@@ -6,8 +6,8 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 include(FetchContent)
 
-# Pin a known-good modern llama.cpp baseline. Performance is validated on-device;
-# do not treat "latest" as synonymous with "fastest".
+# Pin a modern llama.cpp baseline. Runtime performance is validated on-device;
+# "latest" is not treated as synonymous with "fastest".
 FetchContent_Declare(
     llama_cpp
     GIT_REPOSITORY https://github.com/ggml-org/llama.cpp.git
@@ -15,9 +15,8 @@ FetchContent_Declare(
     GIT_SHALLOW FALSE
 )
 
-# Follow the upstream Android binding's runtime-dispatch architecture:
-# build all compatible ARM CPU variants as dynamic backends and select the
-# best one at runtime on the actual phone.
+# Match the current upstream Android binding architecture: build compatible
+# ARM CPU variants as dynamic backends and select the best one at runtime.
 set(GGML_NATIVE OFF CACHE BOOL "" FORCE)
 set(GGML_BACKEND_DL ON CACHE BOOL "" FORCE)
 set(GGML_CPU_ALL_VARIANTS ON CACHE BOOL "" FORCE)
@@ -41,7 +40,7 @@ set(BUILD_SHARED_LIBS ON CACHE BOOL "" FORCE)
 
 FetchContent_MakeAvailable(llama_cpp)
 
-add_library(llama_bridge SHARED llama_bridge.cpp)
+add_library(llama_bridge SHARED llama_bridge_v2.cpp)
 
 target_include_directories(llama_bridge PRIVATE
     ${llama_cpp_SOURCE_DIR}/include
