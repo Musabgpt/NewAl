@@ -8,10 +8,7 @@ import java.util.Map;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
-/**
- * Small, deterministic local memory layer. It never silently invents facts:
- * durable facts are stored only when the user explicitly asks to remember them.
- */
+/** Deterministic local memory; durable facts require an explicit remember request. */
 public final class MemoryManager {
     private static final int MAX_CONTEXT_CHARS = 4200;
     private static final int MAX_MEMORY_CHARS = 1200;
@@ -50,21 +47,25 @@ public final class MemoryManager {
     }
 
     public List<ChatMessage> buildTurns(List<ChatMessage> history) {
-        List<ChatMessage> result = new ArrayList<>();
+        List<ChatMessage> recent = new ArrayList<>();
         String memory = memoryBlock();
-        if (!memory.isEmpty()) {
-            result.add(new ChatMessage(-2, ChatMessage.ROLE_SYSTEM, memory, 0));
-        }
-
         int budget = MAX_CONTEXT_CHARS - memory.length();
+
         for (int i = history.size() - 1; i >= 0; i--) {
             ChatMessage m = history.get(i);
             int cost = m.text.length() + 16;
             if (cost > budget) break;
             budget -= cost;
-            result.add(1, m);
+            recent.add(0, m);
         }
-        return result;
+
+        if (!memory.isEmpty()) {
+            List<ChatMessage> result = new ArrayList<>(recent.size() + 1);
+            result.add(new ChatMessage(-2, ChatMessage.ROLE_SYSTEM, memory, 0));
+            result.addAll(recent);
+            return result;
+        }
+        return recent;
     }
 
     private String memoryBlock() {
@@ -81,20 +82,20 @@ public final class MemoryManager {
         if (summary != null && !summary.trim().isEmpty()) {
             b.append("Earlier conversation extract:\n").append(summary.trim());
         }
-        return b.length() > MAX_MEMORY_CHARS
-                ? b.substring(0, MAX_MEMORY_CHARS) : b.toString();
+        return b.length() > MAX_MEMORY_CHARS ? b.substring(0, MAX_MEMORY_CHARS) : b.toString();
     }
 
     public void refreshExtractiveSummary(List<ChatMessage> history) {
         if (history.size() < 10) return;
         LinkedHashSet<String> pieces = new LinkedHashSet<>();
-        int start = Math.max(0, history.size() - 20);
-        for (int i = 0; i < start; i++) {
+        int recentStart = Math.max(0, history.size() - 20);
+        for (int i = 0; i < recentStart; i++) {
             ChatMessage m = history.get(i);
             if (m.role != ChatMessage.ROLE_USER) continue;
             String text = m.text.replaceAll("\\s+", " ").trim();
             if (text.isEmpty()) continue;
-            int end = text.indexOf('.') > 40 ? text.indexOf('.') + 1 : Math.min(text.length(), 140);
+            int dot = text.indexOf('.');
+            int end = dot > 40 ? dot + 1 : Math.min(text.length(), 140);
             pieces.add(text.substring(0, end));
         }
         StringBuilder summary = new StringBuilder();
