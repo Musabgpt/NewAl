@@ -9,7 +9,6 @@ public final class LlamaEngine implements AutoCloseable {
     private static final char RESULT_SEP = '\u001D';
 
     static { System.loadLibrary("llama_bridge"); }
-
     private volatile long handle;
 
     public LlamaEngine(String modelPath, int contextTokens, int threads) {
@@ -22,8 +21,9 @@ public final class LlamaEngine implements AutoCloseable {
         if (handle == 0) throw new IllegalStateException("المحرك مغلق");
         StringBuilder encoded = new StringBuilder();
         for (ChatMessage m : turns) {
-            encoded.append(m.role == ChatMessage.ROLE_USER ? "user" : "assistant")
-                    .append(FIELD_SEP).append(m.text).append(RECORD_SEP);
+            final String role = m.role == ChatMessage.ROLE_USER ? "user"
+                    : m.role == ChatMessage.ROLE_SYSTEM ? "system" : "assistant";
+            encoded.append(role).append(FIELD_SEP).append(m.text).append(RECORD_SEP);
         }
         String packed = nativeGenerate(handle, encoded.toString(), maxNewTokens,
                 temperature, topK, codeMode);
