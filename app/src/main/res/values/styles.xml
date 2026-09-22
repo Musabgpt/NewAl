@@ -1,0 +1,2 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources><style name="Theme.AraGPT2" parent="Theme.MaterialComponents.NoActionBar"><item name="colorPrimary">@color/accent</item><item name="colorPrimaryVariant">@color/accent_dark</item><item name="colorSecondary">@color/green</item><item name="android:fontFamily">sans</item><item name="android:windowBackground">@color/bg</item><item name="android:statusBarColor">@color/header_end</item><item name="android:navigationBarColor">@color/bg</item><item name="android:windowLightStatusBar">false</item></style></resources>
