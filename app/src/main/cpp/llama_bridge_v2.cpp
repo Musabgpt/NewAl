@@ -7,7 +7,6 @@
 #include <string>
 #include <vector>
 #include <mutex>
-#include <unistd.h>
 #include "llama.h"
 #include "ggml-backend.h"
 
@@ -29,20 +28,13 @@ struct EngineHandle {
 };
 std::once_flag backend_once;
 
-void init_backends(JNIEnv * env, jstring native_lib_dir) {
-    std::call_once(backend_once, [&] {
-        const char * path = native_lib_dir ? env->GetStringUTFChars(native_lib_dir, nullptr) : nullptr;
-        if (path && *path) {
-            LOGI("Loading CPU backends from Android nativeLibDir=%s", path);
-            ggml_backend_load_all_from_path(path);
-        } else {
-            LOGI("nativeLibDir unavailable; using default backend discovery");
-            ggml_backend_load_all();
-        }
-        if (path) env->ReleaseStringUTFChars(native_lib_dir, path);
+// CPU backend is linked into llama.cpp by CMake. Do not attempt dynamic
+// backend discovery: Android's nativeLibraryDir does not contain the separate
+// ggml backend libraries unless they are explicitly packaged as JNI libs.
+void init_backends() {
+    std::call_once(backend_once, [] {
         llama_backend_init();
-
-        LOGI("Registered ggml backends: %zu", ggml_backend_reg_count());
+        LOGI("llama backend initialized; registered backends=%zu", ggml_backend_reg_count());
         for (size_t i = 0; i < ggml_backend_reg_count(); ++i) {
             auto *reg = ggml_backend_reg_get(i);
             LOGI("backend[%zu]=%s", i, ggml_backend_reg_name(reg));
@@ -108,13 +100,13 @@ std::string result_pack(const std::string & answer, int prompt_tokens, int gener
 }
 
 extern "C" {
-JNIEXPORT jlong JNICALL Java_com_musab_aragpt2_LlamaEngine_nativeLoadModel(JNIEnv * env, jobject, jstring jp, jstring native_lib_dir, jint nc, jint nt) {
-    init_backends(env, native_lib_dir);
+JNIEXPORT jlong JNICALL Java_com_musab_aragpt2_LlamaEngine_nativeLoadModel(JNIEnv * env, jobject, jstring jp, jstring, jint nc, jint nt) {
+    init_backends();
     std::string path = js(env, jp);
     auto mp = llama_model_default_params();
     mp.n_gpu_layers = 0;
     llama_model * model = llama_model_load_from_file(path.c_str(), mp);
-    if (!model) { fail(env, "تعذر فتح GGUF بعد اكتمال النسخ — راجع سجل backend"); return 0; }
+    if (!model) { fail(env, "تعذر فتح GGUF بعد النسخ — سجل llama backend يحدد سبب الفشل"); return 0; }
     auto cp = llama_context_default_params();
     cp.n_ctx = std::max(512, static_cast<int>(nc));
     cp.n_batch = std::min(cp.n_ctx, 512u);
