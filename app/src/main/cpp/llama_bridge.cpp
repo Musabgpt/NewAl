@@ -56,9 +56,7 @@ std::vector<Turn> parse(const std::string & x) {
         std::string r = q == std::string::npos ? x.substr(p) : x.substr(p, q - p);
         if (!r.empty()) {
             size_t s = r.find(FIELD_SEP);
-            if (s != std::string::npos) {
-                v.push_back({r.substr(0, s), r.substr(s + 1)});
-            }
+            if (s != std::string::npos) v.push_back({r.substr(0, s), r.substr(s + 1)});
         }
         if (q == std::string::npos) break;
         p = q + 1;
@@ -77,11 +75,13 @@ std::string fallback(const std::vector<Turn> & v) {
     return o;
 }
 
-// llama.cpp v0.2.0 exposes llama_chat_apply_template() with 6 arguments.
-// This version accepts a template string directly; nullptr selects the
-// built-in/default ChatML template.
-std::string templ(const std::vector<Turn> & turns) {
-    if (turns.empty()) return {};
+// IMPORTANT: use the template stored in tokenizer.chat_template inside the
+// selected GGUF. Passing nullptr to llama_chat_apply_template is only correct
+// when the library version/model path resolves the model metadata itself; this
+// bridge explicitly obtains the model's template to avoid accidentally using
+// ChatML for DeepSeek-Coder.
+std::string templ(const EngineHandle * handle, const std::vector<Turn> & turns) {
+    if (!handle || !handle->model || turns.empty()) return {};
 
     std::vector<llama_chat_message> messages;
     messages.reserve(turns.size());
@@ -89,20 +89,33 @@ std::string templ(const std::vector<Turn> & turns) {
         messages.push_back({t.role.c_str(), t.text.c_str()});
     }
 
-    std::vector<char> buffer(4096);
+    const char * model_tmpl = llama_model_chat_template(handle->model, nullptr);
+    if (!model_tmpl || !*model_tmpl) {
+        LOGE("GGUF has no tokenizer.chat_template; using DeepSeek template fallback");
+        // This is the canonical llama.cpp DeepSeek-Coder template selector in
+        // the v0.2.x implementation. It is only used when GGUF metadata lacks
+        // a usable chat template.
+        model_tmpl = "deepseek";
+    }
+
+    std::vector<char> buffer(8192);
     int n = llama_chat_apply_template(
-        nullptr,
+        model_tmpl,
         messages.data(),
         messages.size(),
         true,
         buffer.data(),
         static_cast<int32_t>(buffer.size()));
 
-    if (n < 0) return {};
+    if (n < 0) {
+        LOGE("chat template failed; falling back to explicit plain prompt");
+        return {};
+    }
+
     if (n >= static_cast<int>(buffer.size())) {
         buffer.resize(static_cast<size_t>(n) + 1);
         n = llama_chat_apply_template(
-            nullptr,
+            model_tmpl,
             messages.data(),
             messages.size(),
             true,
@@ -110,7 +123,11 @@ std::string templ(const std::vector<Turn> & turns) {
             static_cast<int32_t>(buffer.size()));
     }
 
-    return n > 0 ? std::string(buffer.data(), static_cast<size_t>(n)) : std::string();
+    if (n <= 0) return {};
+
+    std::string prompt(buffer.data(), static_cast<size_t>(n));
+    LOGE("chat template selected; prompt bytes=%d", n);
+    return prompt;
 }
 
 llama_token sample(
@@ -123,10 +140,7 @@ llama_token sample(
     std::vector<int> ix(n);
     for (int i = 0; i < n; ++i) ix[i] = i;
 
-    std::partial_sort(
-        ix.begin(),
-        ix.begin() + k,
-        ix.end(),
+    std::partial_sort(ix.begin(), ix.begin() + k, ix.end(),
         [&](int a, int b) { return logits[a] > logits[b]; });
 
     if (temp <= 0.01f) return ix[0];
@@ -134,7 +148,6 @@ llama_token sample(
     std::vector<double> probs(k);
     double max_logit = logits[ix[0]] / temp;
     double sum = 0.0;
-
     for (int i = 0; i < k; ++i) {
         probs[i] = std::exp(logits[ix[i]] / temp - max_logit);
         sum += probs[i];
@@ -145,8 +158,38 @@ llama_token sample(
         x -= probs[i];
         if (x <= 0.0) return ix[i];
     }
-
     return ix[0];
+}
+
+bool has_stop_suffix(const std::string & text) {
+    static const char * stops[] = {
+        "<|EOT|>",
+        "<|eot_id|>",
+        "<|im_end|>",
+        "<|end_of_turn|>",
+        "<|endoftext|>"
+    };
+    for (const char * stop : stops) {
+        if (text.size() >= std::strlen(stop) &&
+            text.compare(text.size() - std::strlen(stop), std::strlen(stop), stop) == 0) {
+            return true;
+        }
+    }
+    return false;
+}
+
+void strip_special_suffix(std::string & text) {
+    static const char * stops[] = {
+        "<|EOT|>", "<|eot_id|>", "<|im_end|>",
+        "<|end_of_turn|>", "<|endoftext|>"
+    };
+    for (const char * stop : stops) {
+        const size_t len = std::strlen(stop);
+        if (text.size() >= len && text.compare(text.size() - len, len, stop) == 0) {
+            text.erase(text.size() - len);
+            break;
+        }
+    }
 }
 } // namespace
 
@@ -156,7 +199,6 @@ JNIEXPORT jlong JNICALL
 Java_com_musab_aragpt2_LlamaEngine_nativeLoadModel(
         JNIEnv * env, jobject, jstring jp, jint nc, jint nt) {
     init();
-
     std::string path = js(env, jp);
 
     auto mp = llama_model_default_params();
@@ -185,18 +227,16 @@ Java_com_musab_aragpt2_LlamaEngine_nativeLoadModel(
     handle->model = model;
     handle->ctx = ctx;
     handle->vocab = llama_model_get_vocab(model);
+
+    const char * tmpl = llama_model_chat_template(model, nullptr);
+    LOGE("model chat template present=%s", (tmpl && *tmpl) ? "yes" : "no");
     return reinterpret_cast<jlong>(handle);
 }
 
 JNIEXPORT jstring JNICALL
 Java_com_musab_aragpt2_LlamaEngine_nativeGenerate(
-        JNIEnv * env,
-        jobject,
-        jlong hp,
-        jstring jt,
-        jint max_tokens,
-        jfloat temp,
-        jint topk) {
+        JNIEnv * env, jobject, jlong hp, jstring jt,
+        jint max_tokens, jfloat temp, jint topk) {
     auto * handle = reinterpret_cast<EngineHandle *>(hp);
     if (!handle || !handle->ctx) {
         fail(env, "المحرك غير محمل");
@@ -204,32 +244,21 @@ Java_com_musab_aragpt2_LlamaEngine_nativeGenerate(
     }
 
     auto turns = parse(js(env, jt));
-    std::string prompt = templ(turns);
+    std::string prompt = templ(handle, turns);
     if (prompt.empty()) prompt = fallback(turns);
 
     int n_tokens = -llama_tokenize(
-        handle->vocab,
-        prompt.c_str(),
-        static_cast<int>(prompt.size()),
-        nullptr,
-        0,
-        true,
-        true);
-
+        handle->vocab, prompt.c_str(), static_cast<int>(prompt.size()),
+        nullptr, 0, true, true);
     if (n_tokens <= 0) {
         fail(env, "فشل ترميز النص");
         return nullptr;
     }
 
+    LOGE("prompt tokens=%d", n_tokens);
     std::vector<llama_token> tokens(static_cast<size_t>(n_tokens));
-    if (llama_tokenize(
-            handle->vocab,
-            prompt.c_str(),
-            static_cast<int>(prompt.size()),
-            tokens.data(),
-            n_tokens,
-            true,
-            true) < 0) {
+    if (llama_tokenize(handle->vocab, prompt.c_str(), static_cast<int>(prompt.size()),
+                       tokens.data(), n_tokens, true, true) < 0) {
         fail(env, "فشل ترميز النص");
         return nullptr;
     }
@@ -249,11 +278,8 @@ Java_com_musab_aragpt2_LlamaEngine_nativeGenerate(
 
     while (n < max_tokens && !handle->cancel.load()) {
         llama_token token = sample(
-            llama_get_logits_ith(handle->ctx, -1),
-            vocab_size,
-            topk,
-            temp,
-            handle->rng);
+            llama_get_logits_ith(handle->ctx, -1), vocab_size,
+            topk, temp, handle->rng);
 
         if (llama_vocab_is_eog(handle->vocab, token)) break;
 
@@ -262,28 +288,32 @@ Java_com_musab_aragpt2_LlamaEngine_nativeGenerate(
             handle->vocab, token, piece, sizeof(piece), 0, false);
         if (z > 0) output.append(piece, z);
 
+        if (has_stop_suffix(output)) {
+            strip_special_suffix(output);
+            break;
+        }
+
         llama_token one[1] = {token};
         auto next_batch = llama_batch_get_one(one, 1);
         if (llama_decode(handle->ctx, next_batch) != 0) break;
         ++n;
     }
 
+    strip_special_suffix(output);
+    LOGE("generated tokens=%d output_bytes=%zu", n, output.size());
     return env->NewStringUTF(output.c_str());
 }
 
 JNIEXPORT void JNICALL
-Java_com_musab_aragpt2_LlamaEngine_nativeCancel(
-        JNIEnv *, jobject, jlong hp) {
+Java_com_musab_aragpt2_LlamaEngine_nativeCancel(JNIEnv *, jobject, jlong hp) {
     auto * handle = reinterpret_cast<EngineHandle *>(hp);
     if (handle) handle->cancel = true;
 }
 
 JNIEXPORT void JNICALL
-Java_com_musab_aragpt2_LlamaEngine_nativeFree(
-        JNIEnv *, jobject, jlong hp) {
+Java_com_musab_aragpt2_LlamaEngine_nativeFree(JNIEnv *, jobject, jlong hp) {
     auto * handle = reinterpret_cast<EngineHandle *>(hp);
     if (!handle) return;
-
     if (handle->ctx) llama_free(handle->ctx);
     if (handle->model) llama_model_free(handle->model);
     delete handle;
