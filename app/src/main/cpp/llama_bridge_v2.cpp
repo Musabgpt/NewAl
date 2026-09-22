@@ -31,6 +31,8 @@ std::once_flag backend_once;
 
 void init_cpu_backends() {
     std::call_once(backend_once, [] {
+        // llama.cpp requires global backend initialization before model loading.
+        llama_backend_init();
         Dl_info info{};
         if (dladdr(reinterpret_cast<void *>(&init_cpu_backends), &info) && info.dli_fname) {
             std::string so_path(info.dli_fname);
