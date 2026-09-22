@@ -13,7 +13,6 @@ import android.widget.TextView;
 
 import androidx.activity.result.ActivityResultLauncher;
 import androidx.activity.result.contract.ActivityResultContracts;
-import androidx.annotation.NonNull;
 import androidx.appcompat.app.AppCompatActivity;
 import androidx.core.graphics.Insets;
 import androidx.core.view.ViewCompat;
@@ -28,7 +27,6 @@ import java.io.File;
 import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.io.InputStream;
-import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.ExecutorService;
@@ -44,14 +42,14 @@ public class MainActivity extends AppCompatActivity {
     private static final int CONTEXT_TOKENS = 2048;
     private static final int MAX_NEW_TOKENS = 256;
     private static final int TOP_K = 40;
-    private static final float TEMPERATURE = 0.8f;
-    private static final int PROMPT_CHAR_BUDGET = (CONTEXT_TOKENS - MAX_NEW_TOKENS - 64) * 2;
+    private static final float TEMPERATURE = 0.20f;
 
     private final ExecutorService executor = Executors.newSingleThreadExecutor();
     private volatile LlamaEngine engine;
     private volatile boolean generating = false;
 
     private ChatHistoryStore historyStore;
+    private MemoryManager memoryManager;
     private ChatAdapter adapter;
     private SharedPreferences prefs;
 
@@ -64,9 +62,7 @@ public class MainActivity extends AppCompatActivity {
     private Button loadModelButton;
     private Button sendButton;
     private Button clearButton;
-
     private int headerBasePaddingTop;
-
     private ActivityResultLauncher<String[]> pickModelLauncher;
 
     @Override protected void onCreate(Bundle savedInstanceState) {
@@ -75,6 +71,7 @@ public class MainActivity extends AppCompatActivity {
 
         prefs = getSharedPreferences(PREFS, MODE_PRIVATE);
         historyStore = new ChatHistoryStore(this);
+        memoryManager = new MemoryManager(historyStore);
 
         rootView = findViewById(R.id.rootView);
         headerView = findViewById(R.id.headerView);
@@ -91,53 +88,33 @@ public class MainActivity extends AppCompatActivity {
         chatList.setAdapter(adapter);
         adapter.setAll(historyStore.loadAll());
         scrollToEnd();
-
         installKeyboardInsetsFix();
 
         pickModelLauncher = registerForActivityResult(
-                new ActivityResultContracts.OpenDocument(),
-                this::onModelPicked);
-
-        loadModelButton.setOnClickListener(v ->
-                pickModelLauncher.launch(new String[]{"*/*"}));
+                new ActivityResultContracts.OpenDocument(), this::onModelPicked);
+        loadModelButton.setOnClickListener(v -> pickModelLauncher.launch(new String[]{"*/*"}));
         sendButton.setOnClickListener(v -> onSendOrStopClicked());
         clearButton.setOnClickListener(v -> clearChat());
-
         restoreSavedModel();
     }
 
-    /**
-     * Android 15/16 + targetSdk 35 can place the IME over app content.
-     * We explicitly consume IME/system-bar insets and move the composer above
-     * the keyboard instead of relying only on legacy adjustResize behavior.
-     */
     private void installKeyboardInsetsFix() {
         Window window = getWindow();
         WindowCompat.setDecorFitsSystemWindows(window, false);
         headerBasePaddingTop = headerView.getPaddingTop();
-
         ViewCompat.setOnApplyWindowInsetsListener(rootView, (view, insets) -> {
             Insets bars = insets.getInsets(WindowInsetsCompat.Type.systemBars());
             Insets ime = insets.getInsets(WindowInsetsCompat.Type.ime());
-
-            headerView.setPadding(
-                    headerView.getPaddingLeft(),
-                    headerBasePaddingTop + bars.top,
-                    headerView.getPaddingRight(),
-                    headerView.getPaddingBottom());
-
+            headerView.setPadding(headerView.getPaddingLeft(), headerBasePaddingTop + bars.top,
+                    headerView.getPaddingRight(), headerView.getPaddingBottom());
             int bottom = Math.max(bars.bottom, ime.bottom);
             android.widget.LinearLayout.LayoutParams lp =
                     (android.widget.LinearLayout.LayoutParams) inputBar.getLayoutParams();
             lp.bottomMargin = bottom;
             inputBar.setLayoutParams(lp);
-
-            if (ime.bottom > 0) {
-                inputBar.post(this::scrollToEnd);
-            }
+            if (ime.bottom > 0) inputBar.post(this::scrollToEnd);
             return insets;
         });
-
         ViewCompat.requestApplyInsets(rootView);
     }
 
@@ -152,37 +129,23 @@ public class MainActivity extends AppCompatActivity {
                 return;
             }
         }
-
         String savedUri = prefs.getString(PREF_MODEL_URI, null);
-        if (savedUri != null) {
-            prepareAndLoadFromUri(Uri.parse(savedUri), savedName);
-        } else {
-            setWorking(false, "اضغط «تحميل نموذج» واختر ملف GGUF من الهاتف");
-        }
+        if (savedUri != null) prepareAndLoadFromUri(Uri.parse(savedUri), savedName);
+        else setWorking(false, "اضغط «تحميل نموذج» واختر ملف GGUF من الهاتف");
     }
 
     private void onModelPicked(Uri uri) {
         if (uri == null) return;
-
         String name = queryDisplayName(uri);
         if (!name.toLowerCase(java.util.Locale.ROOT).endsWith(".gguf")) {
             setWorking(false, "الملف المختار ليس GGUF");
             return;
         }
-
         long size = querySize(uri);
-        prefs.edit()
-                .putString(PREF_MODEL_URI, uri.toString())
-                .putString(PREF_MODEL_NAME, name)
-                .apply();
-
-        // Persist SAF access when the provider supports it; the app does not
-        // require any storage permission.
+        prefs.edit().putString(PREF_MODEL_URI, uri.toString()).putString(PREF_MODEL_NAME, name).apply();
         try {
-            getContentResolver().takePersistableUriPermission(
-                    uri, Intent.FLAG_GRANT_READ_URI_PERMISSION);
+            getContentResolver().takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION);
         } catch (SecurityException ignored) {}
-
         prepareAndLoadFromUri(uri, name, size);
     }
 
@@ -193,15 +156,11 @@ public class MainActivity extends AppCompatActivity {
     private void prepareAndLoadFromUri(Uri uri, String displayName, long expectedSize) {
         setWorking(true, "جاري تجهيز ملف GGUF: " + displayName);
         loadModelButton.setEnabled(false);
-
         executor.execute(() -> {
-            File staged = null;
             try {
-                staged = stageModelToAppStorage(uri, expectedSize);
-                final File finalFile = staged;
-                runOnUiThread(() -> setWorking(true,
-                        "تم تجهيز النموذج — جاري فتحه: " + displayName));
-                loadModelFromLocalFileInternal(finalFile, displayName, uri.toString(), expectedSize);
+                File staged = stageModelToAppStorage(uri, expectedSize);
+                runOnUiThread(() -> setWorking(true, "تم تجهيز النموذج — جاري فتحه: " + displayName));
+                loadModelFromLocalFileInternal(staged, displayName, uri.toString(), expectedSize);
             } catch (Exception ex) {
                 runOnUiThread(() -> {
                     loadModelButton.setEnabled(true);
@@ -211,39 +170,23 @@ public class MainActivity extends AppCompatActivity {
         });
     }
 
-    /**
-     * SAF providers are allowed to return virtual/non-file-backed descriptors.
-     * llama.cpp needs a real seekable file for its mmap/loader path. We therefore
-     * stage the selected GGUF once into app-specific external storage and load
-     * the real filesystem path. The source model is never bundled into the APK.
-     */
     private File stageModelToAppStorage(Uri uri, long expectedSize) throws Exception {
         File dir = getExternalFilesDir("models");
         if (dir == null) throw new IllegalStateException("تخزين التطبيق غير متاح");
-        if (!dir.exists() && !dir.mkdirs()) {
-            throw new IllegalStateException("تعذر إنشاء مجلد النماذج");
-        }
-
+        if (!dir.exists() && !dir.mkdirs()) throw new IllegalStateException("تعذر إنشاء مجلد النماذج");
         File tmp = new File(dir, "model.gguf.part");
         File target = new File(dir, "model.gguf");
-        if (tmp.exists() && !tmp.delete()) {
-            throw new IllegalStateException("تعذر حذف ملف مؤقت قديم");
-        }
-
+        if (tmp.exists() && !tmp.delete()) throw new IllegalStateException("تعذر حذف ملف مؤقت قديم");
         try (InputStream raw = getContentResolver().openInputStream(uri)) {
             if (raw == null) throw new IllegalStateException("تعذر فتح ملف GGUF");
             try (BufferedInputStream in = new BufferedInputStream(raw, 1024 * 1024);
-                 BufferedOutputStream out = new BufferedOutputStream(
-                         new FileOutputStream(tmp), 1024 * 1024)) {
-
+                 BufferedOutputStream out = new BufferedOutputStream(new FileOutputStream(tmp), 1024 * 1024)) {
                 byte[] buffer = new byte[1024 * 1024];
-                long copied = 0;
-                long lastUi = 0;
+                long copied = 0, lastUi = 0;
                 int read;
                 while ((read = in.read(buffer)) != -1) {
                     out.write(buffer, 0, read);
                     copied += read;
-
                     long now = System.currentTimeMillis();
                     if (now - lastUi >= 400) {
                         final long done = copied;
@@ -251,35 +194,18 @@ public class MainActivity extends AppCompatActivity {
                             if (expectedSize > 0) {
                                 int pct = (int) Math.min(99L, (done * 100L) / expectedSize);
                                 setWorking(true, "جاري تجهيز GGUF… " + pct + "%");
-                            } else {
-                                setWorking(true, "جاري تجهيز GGUF… " + (done / (1024 * 1024)) + " MB");
-                            }
+                            } else setWorking(true, "جاري تجهيز GGUF… " + (done / (1024 * 1024)) + " MB");
                         });
                         lastUi = now;
                     }
                 }
             }
         }
-
-        if (!isValidGgufFile(tmp)) {
-            tmp.delete();
-            throw new IllegalStateException("ملف GGUF غير صالح أو تالف");
-        }
-
-        if (target.exists() && !target.delete()) {
-            tmp.delete();
-            throw new IllegalStateException("تعذر استبدال النموذج السابق");
-        }
-        if (!tmp.renameTo(target)) {
-            tmp.delete();
-            throw new IllegalStateException("تعذر حفظ نسخة النموذج داخل التطبيق");
-        }
-
-        prefs.edit()
-                .putString(PREF_MODEL_LOCAL_PATH, target.getAbsolutePath())
-                .putLong(PREF_MODEL_SIZE, target.length())
-                .apply();
-
+        if (!isValidGgufFile(tmp)) { tmp.delete(); throw new IllegalStateException("ملف GGUF غير صالح أو تالف"); }
+        if (target.exists() && !target.delete()) { tmp.delete(); throw new IllegalStateException("تعذر استبدال النموذج السابق"); }
+        if (!tmp.renameTo(target)) { tmp.delete(); throw new IllegalStateException("تعذر حفظ نسخة النموذج داخل التطبيق"); }
+        prefs.edit().putString(PREF_MODEL_LOCAL_PATH, target.getAbsolutePath())
+                .putLong(PREF_MODEL_SIZE, target.length()).apply();
         return target;
     }
 
@@ -290,47 +216,27 @@ public class MainActivity extends AppCompatActivity {
                 file, displayName, prefs.getString(PREF_MODEL_URI, ""), file.length()));
     }
 
-    private void loadModelFromLocalFileInternal(
-            File file, String displayName, String sourceUri, long expectedSize) {
+    private void loadModelFromLocalFileInternal(File file, String displayName,
+                                                 String sourceUri, long expectedSize) {
         try {
-            if (!isValidGgufFile(file)) {
-                throw new IllegalStateException("ملف GGUF غير صالح أو تالف");
-            }
+            if (!isValidGgufFile(file)) throw new IllegalStateException("ملف GGUF غير صالح أو تالف");
+            if (engine != null) { try { engine.close(); } catch (Exception ignored) {} engine = null; }
 
-            if (engine != null) {
-                try { engine.close(); } catch (Exception ignored) {}
-                engine = null;
-            }
-
-            int threads = Math.max(2,
-                    Math.min(4, Runtime.getRuntime().availableProcessors()));
-            LlamaEngine loaded = new LlamaEngine(
-                    file.getAbsolutePath(), CONTEXT_TOKENS, threads);
+            int threads = Math.max(2, Math.min(6, Runtime.getRuntime().availableProcessors()));
+            LlamaEngine loaded = new LlamaEngine(file.getAbsolutePath(), CONTEXT_TOKENS, threads);
             engine = loaded;
-
-            prefs.edit()
-                    .putString(PREF_MODEL_LOCAL_PATH, file.getAbsolutePath())
-                    .putString(PREF_MODEL_NAME, displayName)
-                    .putString(PREF_MODEL_URI, sourceUri)
-                    .putLong(PREF_MODEL_SIZE, file.length() > 0 ? file.length() : expectedSize)
-                    .apply();
-
-            runOnUiThread(() -> {
-                loadModelButton.setEnabled(true);
-                setWorking(false, "جاهز — " + displayName);
-            });
+            prefs.edit().putString(PREF_MODEL_LOCAL_PATH, file.getAbsolutePath())
+                    .putString(PREF_MODEL_NAME, displayName).putString(PREF_MODEL_URI, sourceUri)
+                    .putLong(PREF_MODEL_SIZE, file.length() > 0 ? file.length() : expectedSize).apply();
+            runOnUiThread(() -> { loadModelButton.setEnabled(true); setWorking(false, "جاهز — " + displayName); });
         } catch (Exception ex) {
-            runOnUiThread(() -> {
-                loadModelButton.setEnabled(true);
-                setWorking(false, "تعذر تحميل النموذج: " + safeMessage(ex));
-            });
+            runOnUiThread(() -> { loadModelButton.setEnabled(true); setWorking(false, "تعذر تحميل النموذج: " + safeMessage(ex)); });
         }
     }
 
     private long querySize(Uri uri) {
         try (android.database.Cursor c = getContentResolver().query(
-                uri, new String[]{android.provider.OpenableColumns.SIZE},
-                null, null, null)) {
+                uri, new String[]{android.provider.OpenableColumns.SIZE}, null, null, null)) {
             if (c != null && c.moveToFirst()) {
                 int idx = c.getColumnIndex(android.provider.OpenableColumns.SIZE);
                 if (idx >= 0 && !c.isNull(idx)) return c.getLong(idx);
@@ -340,8 +246,7 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private String queryDisplayName(Uri uri) {
-        try (android.database.Cursor c = getContentResolver().query(
-                uri, null, null, null, null)) {
+        try (android.database.Cursor c = getContentResolver().query(uri, null, null, null, null)) {
             if (c != null && c.moveToFirst()) {
                 int idx = c.getColumnIndex(android.provider.OpenableColumns.DISPLAY_NAME);
                 if (idx >= 0) {
@@ -358,78 +263,51 @@ public class MainActivity extends AppCompatActivity {
         try (FileInputStream in = new FileInputStream(file)) {
             byte[] magic = new byte[4];
             int n = in.read(magic);
-            return n == 4
-                    && magic[0] == 'G'
-                    && magic[1] == 'G'
-                    && magic[2] == 'U'
-                    && magic[3] == 'F';
-        } catch (Exception ignored) {
-            return false;
-        }
+            return n == 4 && magic[0] == 'G' && magic[1] == 'G' && magic[2] == 'U' && magic[3] == 'F';
+        } catch (Exception ignored) { return false; }
     }
 
     private void onSendOrStopClicked() {
-        if (generating) {
-            if (engine != null) engine.cancel();
-            return;
-        }
-
+        if (generating) { if (engine != null) engine.cancel(); return; }
         String question = inputBox.getText().toString().trim();
         if (question.isEmpty() || engine == null) return;
-
         inputBox.setText("");
         setGenerating(true);
 
         executor.execute(() -> {
             long userId = historyStore.append(ChatMessage.ROLE_USER, question);
             long userTime = System.currentTimeMillis();
-
+            memoryManager.rememberExplicit(question);
+            List<ChatMessage> turns = memoryManager.buildTurns(historyStore.loadAll());
             runOnUiThread(() -> {
-                adapter.add(new ChatMessage(
-                        userId, ChatMessage.ROLE_USER, question, userTime));
+                adapter.add(new ChatMessage(userId, ChatMessage.ROLE_USER, question, userTime));
                 scrollToEnd();
                 setWorking(true, "يفكر…");
             });
-
             try {
-                String answer = engine.generate(
-                        buildTurnsWithinBudget(), MAX_NEW_TOKENS, TEMPERATURE, TOP_K);
-                String finalAnswer = answer.isEmpty() ? "…" : answer;
-                long assistantId = historyStore.append(
-                        ChatMessage.ROLE_ASSISTANT, finalAnswer);
+                GenerationResult result = engine.generate(turns, MAX_NEW_TOKENS, TEMPERATURE, TOP_K, true);
+                String finalAnswer = result.text.isEmpty() ? "…" : result.text;
+                long assistantId = historyStore.append(ChatMessage.ROLE_ASSISTANT, finalAnswer);
                 long assistantTime = System.currentTimeMillis();
-
+                memoryManager.refreshExtractiveSummary(historyStore.loadAll());
+                String metric = formatMetrics(result);
                 runOnUiThread(() -> {
-                    adapter.add(new ChatMessage(
-                            assistantId,
-                            ChatMessage.ROLE_ASSISTANT,
-                            finalAnswer,
-                            assistantTime));
+                    adapter.add(new ChatMessage(assistantId, ChatMessage.ROLE_ASSISTANT, finalAnswer, assistantTime));
                     scrollToEnd();
                     setGenerating(false);
-                    setWorking(false, "جاهز");
+                    setWorking(false, metric);
                 });
             } catch (Exception ex) {
-                runOnUiThread(() -> {
-                    setGenerating(false);
-                    setWorking(false, "خطأ أثناء التوليد: " + safeMessage(ex));
-                });
+                runOnUiThread(() -> { setGenerating(false); setWorking(false, "خطأ أثناء التوليد: " + safeMessage(ex)); });
             }
         });
     }
 
-    private List<ChatMessage> buildTurnsWithinBudget() {
-        List<ChatMessage> history = historyStore.loadAll();
-        List<ChatMessage> kept = new ArrayList<>();
-        int budget = PROMPT_CHAR_BUDGET;
-
-        for (int i = history.size() - 1; i >= 0; i--) {
-            ChatMessage m = history.get(i);
-            if (budget - m.text.length() < 0) break;
-            budget -= m.text.length();
-            kept.add(0, m);
-        }
-        return kept;
+    private String formatMetrics(GenerationResult r) {
+        if (r.generatedTokens <= 0) return "جاهز";
+        String first = r.firstTokenMs >= 0 ? r.firstTokenMs + "ms" : "—";
+        return String.format(java.util.Locale.US, "جاهز • %d tok • %s أول token • %.1f tok/s",
+                r.generatedTokens, first, r.tokensPerSecond);
     }
 
     private void scrollToEnd() {
@@ -439,8 +317,9 @@ public class MainActivity extends AppCompatActivity {
 
     private void clearChat() {
         historyStore.clear();
+        if (engine != null) engine.resetContext();
         adapter.setAll(java.util.Collections.emptyList());
-        status.setText("تم مسح المحادثة");
+        status.setText("تم مسح المحادثة والذاكرة");
     }
 
     private void setGenerating(boolean value) {
@@ -462,16 +341,12 @@ public class MainActivity extends AppCompatActivity {
 
     private static String safeMessage(Exception ex) {
         String m = ex.getMessage();
-        return TextUtils.isEmpty(m)
-                ? ex.getClass().getSimpleName()
-                : m;
+        return TextUtils.isEmpty(m) ? ex.getClass().getSimpleName() : m;
     }
 
     @Override protected void onDestroy() {
         super.onDestroy();
         executor.shutdownNow();
-        if (engine != null) {
-            try { engine.close(); } catch (Exception ignored) {}
-        }
+        if (engine != null) { try { engine.close(); } catch (Exception ignored) {} }
     }
 }
