@@ -87,25 +87,16 @@ std::string templ(const EngineHandle * handle, const std::vector<Turn> & turns, 
             "Do not invent APIs. When code is requested, return complete code.";
         messages.push_back({"system", system_prompt});
     }
-    for (const auto & t : turns) {
-        messages.push_back({t.role.c_str(), t.text.c_str()});
-    }
+    for (const auto & t : turns) messages.push_back({t.role.c_str(), t.text.c_str()});
 
     const char * model_tmpl = llama_model_chat_template(handle->model, nullptr);
-    if (!model_tmpl || !*model_tmpl) {
-        LOGE("GGUF has no tokenizer.chat_template; using plain prompt fallback");
-        return fallback(turns);
-    }
+    if (!model_tmpl || !*model_tmpl) return fallback(turns);
 
     std::vector<char> buffer(8192);
     int n = llama_chat_apply_template(
         model_tmpl, messages.data(), messages.size(), true,
         buffer.data(), static_cast<int32_t>(buffer.size()));
-
-    if (n < 0) {
-        LOGE("chat template failed; using plain prompt fallback");
-        return fallback(turns);
-    }
+    if (n < 0) return fallback(turns);
     if (n >= static_cast<int>(buffer.size())) {
         buffer.resize(static_cast<size_t>(n) + 1);
         n = llama_chat_apply_template(
@@ -114,13 +105,6 @@ std::string templ(const EngineHandle * handle, const std::vector<Turn> & turns, 
     }
     if (n <= 0) return fallback(turns);
     return std::string(buffer.data(), static_cast<size_t>(n));
-}
-
-int common_prefix(const std::vector<llama_token> & a, const std::vector<llama_token> & b) {
-    const size_t n = std::min(a.size(), b.size());
-    size_t i = 0;
-    while (i < n && a[i] == b[i]) ++i;
-    return static_cast<int>(i);
 }
 
 bool has_stop_suffix(const std::string & text) {
@@ -167,7 +151,6 @@ Java_com_musab_aragpt2_LlamaEngine_nativeLoadModel(
 
     auto mp = llama_model_default_params();
     mp.n_gpu_layers = 0;
-
     llama_model * model = llama_model_load_from_file(path.c_str(), mp);
     if (!model) {
         fail(env, "تعذر تحميل ملف GGUF");
@@ -191,7 +174,6 @@ Java_com_musab_aragpt2_LlamaEngine_nativeLoadModel(
     handle->model = model;
     handle->ctx = ctx;
     handle->vocab = llama_model_get_vocab(model);
-
     LOGE("model loaded; context=%d threads=%d chat_template=%s",
          static_cast<int>(cp.n_ctx), static_cast<int>(cp.n_threads),
          llama_model_chat_template(model, nullptr) ? "yes" : "no");
@@ -214,10 +196,9 @@ Java_com_musab_aragpt2_LlamaEngine_nativeGenerate(
     if (prompt.empty()) prompt = fallback(turns);
 
     const bool first_context = handle->cached_prompt_tokens.empty();
-    const bool add_special = first_context;
     int n_tokens = -llama_tokenize(
         handle->vocab, prompt.c_str(), static_cast<int>(prompt.size()),
-        nullptr, 0, add_special, true);
+        nullptr, 0, first_context, true);
     if (n_tokens <= 0) {
         fail(env, "فشل ترميز النص");
         return nullptr;
@@ -225,83 +206,72 @@ Java_com_musab_aragpt2_LlamaEngine_nativeGenerate(
 
     std::vector<llama_token> prompt_tokens(static_cast<size_t>(n_tokens));
     if (llama_tokenize(handle->vocab, prompt.c_str(), static_cast<int>(prompt.size()),
-                       prompt_tokens.data(), n_tokens, add_special, true) < 0) {
+                       prompt_tokens.data(), n_tokens, first_context, true) < 0) {
         fail(env, "فشل ترميز النص");
         return nullptr;
     }
 
-    // Reuse the existing KV cache whenever the new prompt shares a prefix with
-    // the previous prompt. The first token is the one-time BOS added on the
-    // first request, so subsequent tokenization omits it.
-    int prefix = 0;
+    // First request includes BOS. Later requests omit BOS, then compare their
+    // tokens against the old prompt after its first token.
+    int common_prompt_tokens = 0;
+    int kv_prefix = 0;
     if (!handle->cached_prompt_tokens.empty()) {
-        const size_t old_offset = handle->cached_prompt_tokens.size() > 0 ? 1 : 0;
-        if (prompt_tokens.size() >= 0 && handle->cached_prompt_tokens.size() >= old_offset) {
-            const size_t n = std::min(
-                prompt_tokens.size(), handle->cached_prompt_tokens.size() - old_offset);
-            while (prefix < static_cast<int>(n) &&
-                   prompt_tokens[static_cast<size_t>(prefix)] ==
-                       handle->cached_prompt_tokens[old_offset + static_cast<size_t>(prefix)]) {
-                ++prefix;
-            }
-            prefix += static_cast<int>(old_offset);
+        const size_t old_without_bos = handle->cached_prompt_tokens.size() > 0
+            ? handle->cached_prompt_tokens.size() - 1 : 0;
+        const size_t n = std::min(prompt_tokens.size(), old_without_bos);
+        while (common_prompt_tokens < static_cast<int>(n) &&
+               prompt_tokens[static_cast<size_t>(common_prompt_tokens)] ==
+                   handle->cached_prompt_tokens[1 + static_cast<size_t>(common_prompt_tokens)]) {
+            ++common_prompt_tokens;
         }
+        kv_prefix = common_prompt_tokens + 1;
     }
 
     auto mem = llama_get_memory(handle->ctx);
     const llama_pos pos_max = llama_memory_seq_pos_max(mem, 0);
-    const bool can_reuse = !handle->cached_prompt_tokens.empty() && prefix > 0 && pos_max >= prefix - 1;
+    const bool can_reuse = !handle->cached_prompt_tokens.empty()
+        && common_prompt_tokens > 0 && pos_max >= kv_prefix - 1;
 
     if (!can_reuse) {
         llama_memory_clear(mem, true);
         handle->cached_prompt_tokens.clear();
-        prefix = 0;
+        common_prompt_tokens = 0;
+        kv_prefix = 0;
         if (llama_tokenize(handle->vocab, prompt.c_str(), static_cast<int>(prompt.size()),
                            prompt_tokens.data(), n_tokens, true, true) < 0) {
             fail(env, "فشل إعادة ترميز النص");
             return nullptr;
         }
     } else {
-        llama_memory_seq_rm(mem, 0, prefix, -1);
+        llama_memory_seq_rm(mem, 0, kv_prefix, -1);
     }
 
     handle->cancel = false;
+    const auto prompt_start = std::chrono::steady_clock::now();
 
+    const size_t suffix_begin = can_reuse ? static_cast<size_t>(common_prompt_tokens) : 0;
     std::vector<llama_token> suffix(
-        prompt_tokens.begin() + std::min(prefix, static_cast<int>(prompt_tokens.size())),
+        prompt_tokens.begin() + std::min(suffix_begin, prompt_tokens.size()),
         prompt_tokens.end());
 
-    const auto prompt_start = std::chrono::steady_clock::now();
     if (!suffix.empty()) {
         auto batch = llama_batch_get_one(suffix.data(), suffix.size());
         if (llama_decode(handle->ctx, batch) != 0) {
             fail(env, "فشل تشغيل النموذج");
             return nullptr;
         }
-    } else if (pos_max < 0) {
+    }
+    if (suffix.empty() && !can_reuse) {
         auto batch = llama_batch_get_one(prompt_tokens.data(), prompt_tokens.size());
         if (llama_decode(handle->ctx, batch) != 0) {
             fail(env, "فشل تشغيل النموذج");
             return nullptr;
         }
     }
-    const auto prompt_end = std::chrono::steady_clock::now();
 
-    handle->cached_prompt_tokens.clear();
-    handle->cached_prompt_tokens.reserve(prompt_tokens.size());
-    if (prefix == 0) {
-        handle->cached_prompt_tokens = prompt_tokens;
-    } else {
-        handle->cached_prompt_tokens = prompt_tokens;
-        if (handle->cached_prompt_tokens.size() > 0) {
-            // cached_prompt_tokens keeps the BOS marker when the first request
-            // used one; this makes the next prefix comparison unambiguous.
-            if (handle->cached_prompt_tokens[0] != prompt_tokens[0] &&
-                !prompt_tokens.empty()) {
-                handle->cached_prompt_tokens.insert(handle->cached_prompt_tokens.begin(), prompt_tokens[0]);
-            }
-        }
-    }
+    // Keep the full prompt as the next-turn cache key. The generated tokens
+    // remain in the KV cache and are trimmed on the next request.
+    handle->cached_prompt_tokens = prompt_tokens;
 
     auto sparams = llama_sampler_chain_default_params();
     sparams.no_perf = true;
@@ -328,7 +298,6 @@ Java_com_musab_aragpt2_LlamaEngine_nativeGenerate(
     while (generated < max_tokens && !handle->cancel.load()) {
         llama_token token = llama_sampler_sample(sampler, handle->ctx, -1);
         llama_sampler_accept(sampler, token);
-
         if (llama_vocab_is_eog(handle->vocab, token)) break;
 
         char piece[512];
@@ -340,7 +309,6 @@ Java_com_musab_aragpt2_LlamaEngine_nativeGenerate(
             first_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
                 std::chrono::steady_clock::now() - prompt_start).count();
         }
-
         if (has_stop_suffix(output)) {
             strip_special_suffix(output);
             break;
@@ -354,13 +322,10 @@ Java_com_musab_aragpt2_LlamaEngine_nativeGenerate(
     llama_sampler_free(sampler);
     strip_special_suffix(output);
 
-    // Keep the generated continuation in the live context. The next request
-    // will trim it back to the common prompt prefix before decoding its suffix.
     const auto total_end = std::chrono::steady_clock::now();
     const double gen_seconds = std::chrono::duration<double>(total_end - gen_start).count();
     const double tok_per_sec = generated > 0 && gen_seconds > 0.0
         ? static_cast<double>(generated) / gen_seconds : 0.0;
-
     LOGE("prompt=%d generated=%d first_ms=%lld tok_s=%.2f total_ms=%lld",
          n_tokens, generated, first_ms, tok_per_sec,
          static_cast<long long>(std::chrono::duration_cast<std::chrono::milliseconds>(
