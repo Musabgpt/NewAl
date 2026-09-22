@@ -1,6 +1,8 @@
 name: Build H33 GGUF Chat APK
 
 on:
+  push:
+    branches: [ h33-gguf-chat ]
   workflow_dispatch:
 
 jobs:
