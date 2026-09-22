@@ -5,6 +5,7 @@ plugins {
 android {
     namespace = "com.musab.aragpt2"
     compileSdk = 35
+    ndkVersion = "27.2.12479018"
 
     defaultConfig {
         applicationId = "com.musab.aragpt2"
@@ -14,7 +15,6 @@ android {
         versionName = "1.0"
 
         ndk {
-            version = "27.2.12479018"
             abiFilters += listOf("arm64-v8a")
         }
 
