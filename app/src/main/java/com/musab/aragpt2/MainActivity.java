@@ -25,7 +25,6 @@ import java.io.File;
 import java.io.FileInputStream;
 import java.io.FileOutputStream;
 import java.io.InputStream;
-import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -59,6 +58,5 @@ public class MainActivity extends AppCompatActivity {
     private boolean isWorkingStatus(){String s=status.getText()==null?"":status.getText().toString();return s.startsWith("جاري")||s.startsWith("تم تجهيز النموذج");}
     private void setWorking(boolean working,String message){status.setText(message);if(!generating)sendButton.setEnabled(!working&&engine!=null);}
     private static String safeMessage(Exception ex){String m=ex.getMessage();return TextUtils.isEmpty(m)?ex.getClass().getSimpleName():m;}
-    private void scrollToEnd(){}
     @Override protected void onDestroy(){super.onDestroy();executor.shutdownNow();if(engine!=null){try{engine.close();}catch(Exception ignored){}}}
 }
