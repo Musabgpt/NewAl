@@ -11,11 +11,7 @@ public final class LlamaEngine implements AutoCloseable {
     static { System.loadLibrary("llama_bridge"); }
     private volatile long handle;
 
-    public LlamaEngine(String modelPath, String nativeLibDir, int contextTokens, int threads) {
-        if (nativeLibDir == null || nativeLibDir.isEmpty()) {
-            throw new IllegalArgumentException("مسار مكتبات المحرك غير متاح");
-        }
-        nativeInitBackends(nativeLibDir);
+    public LlamaEngine(String modelPath, int contextTokens, int threads) {
         handle = nativeLoadModel(modelPath, contextTokens, threads);
         if (handle == 0) throw new IllegalStateException("فشل تحميل النموذج");
     }
@@ -61,7 +57,6 @@ public final class LlamaEngine implements AutoCloseable {
         if (handle != 0) { nativeFree(handle); handle = 0; }
     }
 
-    private native void nativeInitBackends(String nativeLibDir);
     private native long nativeLoadModel(String modelPath, int contextTokens, int threads);
     private native String nativeGenerate(long handle, String encodedTurns, int maxNewTokens,
                                          float temperature, int topK, boolean codeMode);
