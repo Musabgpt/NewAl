@@ -6,7 +6,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 include(FetchContent)
 
-# Pin the inference engine so APK builds are reproducible. b11058 is a modern
+# Pin the inference engine so APK builds are reproducible. This is a modern
 # upstream Android-capable baseline with the current sampler/state APIs.
 FetchContent_Declare(
     llama_cpp
@@ -48,9 +48,11 @@ target_include_directories(llama_bridge PRIVATE
 find_library(log-lib log)
 find_library(android-lib android)
 
+# The modern llama.cpp build no longer exposes a separate llama-common
+# library target here. llama_bridge only uses the public llama API, so linking
+# against the llama target is sufficient.
 target_link_libraries(llama_bridge
     llama
-    llama-common
     ${log-lib}
     ${android-lib}
 )
