@@ -12,10 +12,13 @@ FetchContent_Declare(
     GIT_SHALLOW FALSE
 )
 
-# Android binding architecture: portable ARM build + dynamically loaded CPU variants.
+# Android: keep the CPU backend linked into the app. Dynamic backend loading
+# requires shipping separate ggml backend .so files and is unnecessary for
+# this offline CPU target. KleidiAI provides ARM CPU kernels without that
+# runtime dependency.
 set(GGML_NATIVE OFF CACHE BOOL "" FORCE)
-set(GGML_BACKEND_DL ON CACHE BOOL "" FORCE)
-set(GGML_CPU_ALL_VARIANTS ON CACHE BOOL "" FORCE)
+set(GGML_BACKEND_DL OFF CACHE BOOL "" FORCE)
+set(GGML_CPU_ALL_VARIANTS OFF CACHE BOOL "" FORCE)
 set(GGML_SYSTEM_ARCH ARM CACHE STRING "" FORCE)
 set(GGML_CPU_KLEIDIAI ON CACHE BOOL "" FORCE)
 set(GGML_OPENMP OFF CACHE BOOL "" FORCE)
