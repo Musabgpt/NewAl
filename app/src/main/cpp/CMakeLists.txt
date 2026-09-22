@@ -6,8 +6,8 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 include(FetchContent)
 
-# Pin the inference engine so APK builds are reproducible. This is a modern
-# upstream Android-capable baseline with the current sampler/state APIs.
+# Pin a known-good modern llama.cpp baseline. Performance is validated on-device;
+# do not treat "latest" as synonymous with "fastest".
 FetchContent_Declare(
     llama_cpp
     GIT_REPOSITORY https://github.com/ggml-org/llama.cpp.git
@@ -15,10 +15,12 @@ FetchContent_Declare(
     GIT_SHALLOW FALSE
 )
 
-# Android ARM64 baseline: use the optimized CPU backend rather than the
-# legacy generic CPU path. GPU backends stay disabled until device benchmarks
-# justify enabling them.
+# Follow the upstream Android binding's runtime-dispatch architecture:
+# build all compatible ARM CPU variants as dynamic backends and select the
+# best one at runtime on the actual phone.
 set(GGML_NATIVE OFF CACHE BOOL "" FORCE)
+set(GGML_BACKEND_DL ON CACHE BOOL "" FORCE)
+set(GGML_CPU_ALL_VARIANTS ON CACHE BOOL "" FORCE)
 set(GGML_SYSTEM_ARCH ARM CACHE STRING "" FORCE)
 set(GGML_CPU_KLEIDIAI ON CACHE BOOL "" FORCE)
 set(GGML_OPENMP ON CACHE BOOL "" FORCE)
@@ -32,9 +34,10 @@ set(LLAMA_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
 set(LLAMA_BUILD_TESTS OFF CACHE BOOL "" FORCE)
 set(LLAMA_BUILD_TOOLS OFF CACHE BOOL "" FORCE)
 set(LLAMA_BUILD_SERVER OFF CACHE BOOL "" FORCE)
+set(LLAMA_BUILD_COMMON ON CACHE BOOL "" FORCE)
 set(LLAMA_CURL OFF CACHE BOOL "" FORCE)
 set(LLAMA_OPENSSL OFF CACHE BOOL "" FORCE)
-set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
+set(BUILD_SHARED_LIBS ON CACHE BOOL "" FORCE)
 
 FetchContent_MakeAvailable(llama_cpp)
 
@@ -42,17 +45,16 @@ add_library(llama_bridge SHARED llama_bridge.cpp)
 
 target_include_directories(llama_bridge PRIVATE
     ${llama_cpp_SOURCE_DIR}/include
+    ${llama_cpp_SOURCE_DIR}/common
     ${llama_cpp_SOURCE_DIR}/ggml/include
 )
 
 find_library(log-lib log)
 find_library(android-lib android)
 
-# The modern llama.cpp build no longer exposes a separate llama-common
-# library target here. llama_bridge only uses the public llama API, so linking
-# against the llama target is sufficient.
 target_link_libraries(llama_bridge
     llama
+    llama-common
     ${log-lib}
     ${android-lib}
 )
