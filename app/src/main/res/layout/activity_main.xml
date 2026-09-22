@@ -1,1 +1,106 @@
-<?xml version="1.0" encoding="utf-8"?><LinearLayout xmlns:android="http://schemas.android.com/apk/res/android" xmlns:app="http://schemas.android.com/apk/res-auto" android:layout_width="match_parent" android:layout_height="match_parent" android:orientation="vertical" android:background="@color/bg" android:layoutDirection="rtl"><LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content" android:orientation="vertical" android:background="@drawable/header_gradient" android:padding="16dp"><LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content" android:orientation="horizontal" android:gravity="center_vertical"><TextView android:layout_width="0dp" android:layout_height="wrap_content" android:layout_weight="1" android:text="محادثة GGUF محلية" android:textColor="#FFFFFF" android:textStyle="bold" android:textSize="20sp"/><com.google.android.material.button.MaterialButton android:id="@+id/loadModelButton" android:layout_width="wrap_content" android:layout_height="wrap_content" android:text="📂 تحميل نموذج" android:textColor="#FFFFFF" app:strokeColor="#FFFFFF" app:cornerRadius="12dp"/></LinearLayout><TextView android:id="@+id/status" android:layout_width="match_parent" android:layout_height="wrap_content" android:text="اضغط «تحميل نموذج» واختر ملف GGUF من الهاتف" android:textColor="#FFFFFF" android:textSize="12sp" android:background="@drawable/status_bg" android:layout_marginTop="10dp"/></LinearLayout><androidx.recyclerview.widget.RecyclerView android:id="@+id/chatList" android:layout_width="match_parent" android:layout_height="0dp" android:layout_weight="1" android:padding="8dp"/><LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content" android:orientation="horizontal" android:gravity="bottom" android:background="@color/card" android:padding="8dp"><com.google.android.material.button.MaterialButton android:id="@+id/clearButton" android:layout_width="wrap_content" android:layout_height="wrap_content" android:text="🧹" android:minWidth="0dp"/><EditText android:id="@+id/inputBox" android:layout_width="0dp" android:layout_height="wrap_content" android:layout_weight="1" android:minHeight="44dp" android:maxLines="5" android:background="@drawable/answer_bg" android:hint="اكتب رسالتك…" android:textColor="@color/text_primary" android:textColorHint="@color/text_secondary" android:inputType="textMultiLine|textCapSentences" android:gravity="start|center_vertical" android:padding="10dp"/><com.google.android.material.button.MaterialButton android:id="@+id/sendButton" android:layout_width="wrap_content" android:layout_height="wrap_content" android:text="➤" android:enabled="false" app:cornerRadius="12dp" android:backgroundTint="@color/accent"/></LinearLayout></LinearLayout>
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    android:id="@+id/rootView"
+    android:layout_width="match_parent"
+    android:layout_height="match_parent"
+    android:orientation="vertical"
+    android:background="@color/bg"
+    android:layoutDirection="rtl">
+
+    <LinearLayout
+        android:id="@+id/headerView"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="vertical"
+        android:background="@drawable/header_gradient"
+        android:padding="16dp">
+
+        <LinearLayout
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:orientation="horizontal"
+            android:gravity="center_vertical">
+
+            <TextView
+                android:layout_width="0dp"
+                android:layout_height="wrap_content"
+                android:layout_weight="1"
+                android:text="محادثة GGUF محلية"
+                android:textColor="#FFFFFF"
+                android:textStyle="bold"
+                android:textSize="20sp"/>
+
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/loadModelButton"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:text="📂 تحميل نموذج"
+                android:textColor="#FFFFFF"
+                app:strokeColor="#FFFFFF"
+                app:cornerRadius="12dp"/>
+        </LinearLayout>
+
+        <TextView
+            android:id="@+id/status"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="اضغط «تحميل نموذج» واختر ملف GGUF من الهاتف"
+            android:textColor="#FFFFFF"
+            android:textSize="12sp"
+            android:background="@drawable/status_bg"
+            android:layout_marginTop="10dp"
+            android:padding="8dp"/>
+    </LinearLayout>
+
+    <androidx.recyclerview.widget.RecyclerView
+        android:id="@+id/chatList"
+        android:layout_width="match_parent"
+        android:layout_height="0dp"
+        android:layout_weight="1"
+        android:padding="8dp"
+        android:clipToPadding="false"/>
+
+    <LinearLayout
+        android:id="@+id/inputBar"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:orientation="horizontal"
+        android:gravity="bottom"
+        android:background="@color/card"
+        android:padding="8dp">
+
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/clearButton"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="🧹"
+            android:minWidth="0dp"/>
+
+        <EditText
+            android:id="@+id/inputBox"
+            android:layout_width="0dp"
+            android:layout_height="wrap_content"
+            android:layout_weight="1"
+            android:minHeight="44dp"
+            android:maxLines="5"
+            android:background="@drawable/answer_bg"
+            android:hint="اكتب رسالتك…"
+            android:textColor="@color/text_primary"
+            android:textColorHint="@color/text_secondary"
+            android:inputType="textMultiLine|textCapSentences"
+            android:gravity="start|center_vertical"
+            android:padding="10dp"
+            android:scrollbars="vertical"
+            android:overScrollMode="ifContentScrolls"/>
+
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/sendButton"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:text="➤"
+            android:enabled="false"
+            app:cornerRadius="12dp"
+            android:backgroundTint="@color/accent"/>
+    </LinearLayout>
+</LinearLayout>

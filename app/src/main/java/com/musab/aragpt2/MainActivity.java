@@ -4,75 +4,158 @@ import android.content.Intent;
 import android.content.SharedPreferences;
 import android.net.Uri;
 import android.os.Bundle;
-import android.os.ParcelFileDescriptor;
 import android.text.TextUtils;
+import android.view.View;
+import android.view.Window;
 import android.widget.Button;
 import android.widget.EditText;
 import android.widget.TextView;
+
 import androidx.activity.result.ActivityResultLauncher;
 import androidx.activity.result.contract.ActivityResultContracts;
 import androidx.annotation.NonNull;
 import androidx.appcompat.app.AppCompatActivity;
+import androidx.core.graphics.Insets;
+import androidx.core.view.ViewCompat;
+import androidx.core.view.WindowCompat;
+import androidx.core.view.WindowInsetsCompat;
 import androidx.recyclerview.widget.LinearLayoutManager;
 import androidx.recyclerview.widget.RecyclerView;
-import java.util.Arrays;
+
+import java.io.BufferedInputStream;
+import java.io.BufferedOutputStream;
+import java.io.File;
+import java.io.FileInputStream;
+import java.io.FileOutputStream;
+import java.io.InputStream;
+import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
-import java.util.HashSet;
 import java.util.List;
-import java.util.Set;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
 public class MainActivity extends AppCompatActivity {
-    private static final String PREFS = "h33_prefs", PREF_MODEL_URI = "model_uri", PREF_MODEL_NAME = "model_name";
-    private static final int CONTEXT_TOKENS = 2048, MAX_NEW_TOKENS = 256, TOP_K = 40;
+    private static final String PREFS = "h33_prefs";
+    private static final String PREF_MODEL_URI = "model_uri";
+    private static final String PREF_MODEL_NAME = "model_name";
+    private static final String PREF_MODEL_LOCAL_PATH = "model_local_path";
+    private static final String PREF_MODEL_SIZE = "model_local_size";
+
+    private static final int CONTEXT_TOKENS = 2048;
+    private static final int MAX_NEW_TOKENS = 256;
+    private static final int TOP_K = 40;
     private static final float TEMPERATURE = 0.8f;
     private static final int PROMPT_CHAR_BUDGET = (CONTEXT_TOKENS - MAX_NEW_TOKENS - 64) * 2;
-    private static final Set<String> LOCAL_STORAGE_AUTHORITIES = new HashSet<>(Arrays.asList(
-            "com.android.externalstorage.documents", "com.android.providers.downloads.documents",
-            "com.android.providers.media.documents", "com.android.providers.MediaDocumentsProvider"));
 
     private final ExecutorService executor = Executors.newSingleThreadExecutor();
     private volatile LlamaEngine engine;
     private volatile boolean generating = false;
-    private ParcelFileDescriptor modelFd;
+
     private ChatHistoryStore historyStore;
     private ChatAdapter adapter;
     private SharedPreferences prefs;
+
     private TextView status;
     private RecyclerView chatList;
     private EditText inputBox;
-    private Button loadModelButton, sendButton, clearButton;
+    private View rootView;
+    private View headerView;
+    private View inputBar;
+    private Button loadModelButton;
+    private Button sendButton;
+    private Button clearButton;
+
+    private int headerBasePaddingTop;
+
     private ActivityResultLauncher<String[]> pickModelLauncher;
 
     @Override protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         setContentView(R.layout.activity_main);
+
         prefs = getSharedPreferences(PREFS, MODE_PRIVATE);
         historyStore = new ChatHistoryStore(this);
+
+        rootView = findViewById(R.id.rootView);
+        headerView = findViewById(R.id.headerView);
+        inputBar = findViewById(R.id.inputBar);
         status = findViewById(R.id.status);
         chatList = findViewById(R.id.chatList);
         inputBox = findViewById(R.id.inputBox);
         loadModelButton = findViewById(R.id.loadModelButton);
         sendButton = findViewById(R.id.sendButton);
         clearButton = findViewById(R.id.clearButton);
+
         adapter = new ChatAdapter();
         chatList.setLayoutManager(new LinearLayoutManager(this));
         chatList.setAdapter(adapter);
         adapter.setAll(historyStore.loadAll());
         scrollToEnd();
 
-        // OpenDocument is available on the project's minSdk and does not require
-        // Intent.EXTRA_INITIAL_URI, which caused compilation failures in the CI toolchain.
+        installKeyboardInsetsFix();
+
         pickModelLauncher = registerForActivityResult(
-                new ActivityResultContracts.OpenDocument(), this::onModelPicked);
-        loadModelButton.setOnClickListener(v -> pickModelLauncher.launch(new String[]{"*/*"}));
+                new ActivityResultContracts.OpenDocument(),
+                this::onModelPicked);
+
+        loadModelButton.setOnClickListener(v ->
+                pickModelLauncher.launch(new String[]{"*/*"}));
         sendButton.setOnClickListener(v -> onSendOrStopClicked());
         clearButton.setOnClickListener(v -> clearChat());
 
+        restoreSavedModel();
+    }
+
+    /**
+     * Android 15/16 + targetSdk 35 can place the IME over app content.
+     * We explicitly consume IME/system-bar insets and move the composer above
+     * the keyboard instead of relying only on legacy adjustResize behavior.
+     */
+    private void installKeyboardInsetsFix() {
+        Window window = getWindow();
+        WindowCompat.setDecorFitsSystemWindows(window, false);
+        headerBasePaddingTop = headerView.getPaddingTop();
+
+        ViewCompat.setOnApplyWindowInsetsListener(rootView, (view, insets) -> {
+            Insets bars = insets.getInsets(WindowInsetsCompat.Type.systemBars());
+            Insets ime = insets.getInsets(WindowInsetsCompat.Type.ime());
+
+            headerView.setPadding(
+                    headerView.getPaddingLeft(),
+                    headerBasePaddingTop + bars.top,
+                    headerView.getPaddingRight(),
+                    headerView.getPaddingBottom());
+
+            int bottom = Math.max(bars.bottom, ime.bottom);
+            android.widget.LinearLayout.LayoutParams lp =
+                    (android.widget.LinearLayout.LayoutParams) inputBar.getLayoutParams();
+            lp.bottomMargin = bottom;
+            inputBar.setLayoutParams(lp);
+
+            if (ime.bottom > 0) {
+                inputBar.post(this::scrollToEnd);
+            }
+            return insets;
+        });
+
+        ViewCompat.requestApplyInsets(rootView);
+    }
+
+    private void restoreSavedModel() {
+        String savedName = prefs.getString(PREF_MODEL_NAME, "النموذج");
+        String localPath = prefs.getString(PREF_MODEL_LOCAL_PATH, null);
+        if (localPath != null) {
+            File local = new File(localPath);
+            long expected = prefs.getLong(PREF_MODEL_SIZE, -1L);
+            if (isValidGgufFile(local) && (expected <= 0 || local.length() == expected)) {
+                loadModelFromLocalFile(local, savedName);
+                return;
+            }
+        }
+
         String savedUri = prefs.getString(PREF_MODEL_URI, null);
         if (savedUri != null) {
-            loadModelFromUri(Uri.parse(savedUri), prefs.getString(PREF_MODEL_NAME, "النموذج"));
+            prepareAndLoadFromUri(Uri.parse(savedUri), savedName);
         } else {
             setWorking(false, "اضغط «تحميل نموذج» واختر ملف GGUF من الهاتف");
         }
@@ -80,87 +163,248 @@ public class MainActivity extends AppCompatActivity {
 
     private void onModelPicked(Uri uri) {
         if (uri == null) return;
-        if (!isLocalStorageUri(uri)) {
-            setWorking(false, "اختر ملف GGUF من تخزين الهاتف المحلي فقط");
+
+        String name = queryDisplayName(uri);
+        if (!name.toLowerCase(java.util.Locale.ROOT).endsWith(".gguf")) {
+            setWorking(false, "الملف المختار ليس GGUF");
             return;
         }
+
+        long size = querySize(uri);
+        prefs.edit()
+                .putString(PREF_MODEL_URI, uri.toString())
+                .putString(PREF_MODEL_NAME, name)
+                .apply();
+
+        // Persist SAF access when the provider supports it; the app does not
+        // require any storage permission.
         try {
-            getContentResolver().takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION);
+            getContentResolver().takePersistableUriPermission(
+                    uri, Intent.FLAG_GRANT_READ_URI_PERMISSION);
         } catch (SecurityException ignored) {}
-        String name = queryDisplayName(uri);
-        prefs.edit().putString(PREF_MODEL_URI, uri.toString())
-                .putString(PREF_MODEL_NAME, name).apply();
-        loadModelFromUri(uri, name);
+
+        prepareAndLoadFromUri(uri, name, size);
     }
 
-    private boolean isLocalStorageUri(Uri uri) {
-        String authority = uri.getAuthority();
-        return authority != null && LOCAL_STORAGE_AUTHORITIES.contains(authority);
+    private void prepareAndLoadFromUri(Uri uri, String displayName) {
+        prepareAndLoadFromUri(uri, displayName, querySize(uri));
     }
 
-    private String queryDisplayName(Uri uri) {
-        try (android.database.Cursor c = getContentResolver().query(uri, null, null, null, null)) {
-            if (c != null && c.moveToFirst()) {
-                int idx = c.getColumnIndex(android.provider.OpenableColumns.DISPLAY_NAME);
-                if (idx >= 0) {
-                    String name = c.getString(idx);
-                    if (name != null && !name.isEmpty()) return name;
-                }
-            }
-        } catch (Exception ignored) {}
-        return "النموذج";
-    }
-
-    private void loadModelFromUri(Uri uri, String displayName) {
-        setWorking(true, "جاري فتح النموذج: " + displayName);
+    private void prepareAndLoadFromUri(Uri uri, String displayName, long expectedSize) {
+        setWorking(true, "جاري تجهيز ملف GGUF: " + displayName);
         loadModelButton.setEnabled(false);
+
         executor.execute(() -> {
-            ParcelFileDescriptor pfd = null;
+            File staged = null;
             try {
-                pfd = getContentResolver().openFileDescriptor(uri, "r");
-                if (pfd == null) throw new IllegalStateException("تعذر فتح الملف المختار");
-                String fdPath = "/proc/self/fd/" + pfd.getFd();
-                if (engine != null) { engine.close(); engine = null; }
-                if (modelFd != null) { try { modelFd.close(); } catch (Exception ignored) {} modelFd = null; }
-                int threads = Math.max(2, Math.min(4, Runtime.getRuntime().availableProcessors()));
-                LlamaEngine loaded = new LlamaEngine(fdPath, CONTEXT_TOKENS, threads);
-                engine = loaded;
-                modelFd = pfd;
-                runOnUiThread(() -> {
-                    setWorking(false, "جاهز — " + displayName);
-                    loadModelButton.setEnabled(true);
-                });
+                staged = stageModelToAppStorage(uri, expectedSize);
+                final File finalFile = staged;
+                runOnUiThread(() -> setWorking(true,
+                        "تم تجهيز النموذج — جاري فتحه: " + displayName));
+                loadModelFromLocalFileInternal(finalFile, displayName, uri.toString(), expectedSize);
             } catch (Exception ex) {
-                if (pfd != null) try { pfd.close(); } catch (Exception ignored) {}
                 runOnUiThread(() -> {
-                    setWorking(false, "تعذر تحميل النموذج: " + safeMessage(ex));
                     loadModelButton.setEnabled(true);
+                    setWorking(false, "تعذر تجهيز GGUF: " + safeMessage(ex));
                 });
             }
         });
     }
 
+    /**
+     * SAF providers are allowed to return virtual/non-file-backed descriptors.
+     * llama.cpp needs a real seekable file for its mmap/loader path. We therefore
+     * stage the selected GGUF once into app-specific external storage and load
+     * the real filesystem path. The source model is never bundled into the APK.
+     */
+    private File stageModelToAppStorage(Uri uri, long expectedSize) throws Exception {
+        File dir = getExternalFilesDir("models");
+        if (dir == null) throw new IllegalStateException("تخزين التطبيق غير متاح");
+        if (!dir.exists() && !dir.mkdirs()) {
+            throw new IllegalStateException("تعذر إنشاء مجلد النماذج");
+        }
+
+        File tmp = new File(dir, "model.gguf.part");
+        File target = new File(dir, "model.gguf");
+        if (tmp.exists() && !tmp.delete()) {
+            throw new IllegalStateException("تعذر حذف ملف مؤقت قديم");
+        }
+
+        try (InputStream raw = getContentResolver().openInputStream(uri)) {
+            if (raw == null) throw new IllegalStateException("تعذر فتح ملف GGUF");
+            try (BufferedInputStream in = new BufferedInputStream(raw, 1024 * 1024);
+                 BufferedOutputStream out = new BufferedOutputStream(
+                         new FileOutputStream(tmp), 1024 * 1024)) {
+
+                byte[] buffer = new byte[1024 * 1024];
+                long copied = 0;
+                long lastUi = 0;
+                int read;
+                while ((read = in.read(buffer)) != -1) {
+                    out.write(buffer, 0, read);
+                    copied += read;
+
+                    long now = System.currentTimeMillis();
+                    if (now - lastUi >= 400) {
+                        final long done = copied;
+                        runOnUiThread(() -> {
+                            if (expectedSize > 0) {
+                                int pct = (int) Math.min(99L, (done * 100L) / expectedSize);
+                                setWorking(true, "جاري تجهيز GGUF… " + pct + "%");
+                            } else {
+                                setWorking(true, "جاري تجهيز GGUF… " + (done / (1024 * 1024)) + " MB");
+                            }
+                        });
+                        lastUi = now;
+                    }
+                }
+            }
+        }
+
+        if (!isValidGgufFile(tmp)) {
+            tmp.delete();
+            throw new IllegalStateException("ملف GGUF غير صالح أو تالف");
+        }
+
+        if (target.exists() && !target.delete()) {
+            tmp.delete();
+            throw new IllegalStateException("تعذر استبدال النموذج السابق");
+        }
+        if (!tmp.renameTo(target)) {
+            tmp.delete();
+            throw new IllegalStateException("تعذر حفظ نسخة النموذج داخل التطبيق");
+        }
+
+        prefs.edit()
+                .putString(PREF_MODEL_LOCAL_PATH, target.getAbsolutePath())
+                .putLong(PREF_MODEL_SIZE, target.length())
+                .apply();
+
+        return target;
+    }
+
+    private void loadModelFromLocalFile(File file, String displayName) {
+        setWorking(true, "جاري فتح النموذج: " + displayName);
+        loadModelButton.setEnabled(false);
+        executor.execute(() -> loadModelFromLocalFileInternal(
+                file, displayName, prefs.getString(PREF_MODEL_URI, ""), file.length()));
+    }
+
+    private void loadModelFromLocalFileInternal(
+            File file, String displayName, String sourceUri, long expectedSize) {
+        try {
+            if (!isValidGgufFile(file)) {
+                throw new IllegalStateException("ملف GGUF غير صالح أو تالف");
+            }
+
+            if (engine != null) {
+                try { engine.close(); } catch (Exception ignored) {}
+                engine = null;
+            }
+
+            int threads = Math.max(2,
+                    Math.min(4, Runtime.getRuntime().availableProcessors()));
+            LlamaEngine loaded = new LlamaEngine(
+                    file.getAbsolutePath(), CONTEXT_TOKENS, threads);
+            engine = loaded;
+
+            prefs.edit()
+                    .putString(PREF_MODEL_LOCAL_PATH, file.getAbsolutePath())
+                    .putString(PREF_MODEL_NAME, displayName)
+                    .putString(PREF_MODEL_URI, sourceUri)
+                    .putLong(PREF_MODEL_SIZE, file.length() > 0 ? file.length() : expectedSize)
+                    .apply();
+
+            runOnUiThread(() -> {
+                loadModelButton.setEnabled(true);
+                setWorking(false, "جاهز — " + displayName);
+            });
+        } catch (Exception ex) {
+            runOnUiThread(() -> {
+                loadModelButton.setEnabled(true);
+                setWorking(false, "تعذر تحميل النموذج: " + safeMessage(ex));
+            });
+        }
+    }
+
+    private long querySize(Uri uri) {
+        try (android.database.Cursor c = getContentResolver().query(
+                uri, new String[]{android.provider.OpenableColumns.SIZE},
+                null, null, null)) {
+            if (c != null && c.moveToFirst()) {
+                int idx = c.getColumnIndex(android.provider.OpenableColumns.SIZE);
+                if (idx >= 0 && !c.isNull(idx)) return c.getLong(idx);
+            }
+        } catch (Exception ignored) {}
+        return -1L;
+    }
+
+    private String queryDisplayName(Uri uri) {
+        try (android.database.Cursor c = getContentResolver().query(
+                uri, null, null, null, null)) {
+            if (c != null && c.moveToFirst()) {
+                int idx = c.getColumnIndex(android.provider.OpenableColumns.DISPLAY_NAME);
+                if (idx >= 0) {
+                    String name = c.getString(idx);
+                    if (!TextUtils.isEmpty(name)) return name;
+                }
+            }
+        } catch (Exception ignored) {}
+        return "النموذج.gguf";
+    }
+
+    private boolean isValidGgufFile(File file) {
+        if (file == null || !file.isFile() || file.length() < 4) return false;
+        try (FileInputStream in = new FileInputStream(file)) {
+            byte[] magic = new byte[4];
+            int n = in.read(magic);
+            return n == 4
+                    && magic[0] == 'G'
+                    && magic[1] == 'G'
+                    && magic[2] == 'U'
+                    && magic[3] == 'F';
+        } catch (Exception ignored) {
+            return false;
+        }
+    }
+
     private void onSendOrStopClicked() {
-        if (generating) { if (engine != null) engine.cancel(); return; }
+        if (generating) {
+            if (engine != null) engine.cancel();
+            return;
+        }
+
         String question = inputBox.getText().toString().trim();
         if (question.isEmpty() || engine == null) return;
+
         inputBox.setText("");
         setGenerating(true);
+
         executor.execute(() -> {
             long userId = historyStore.append(ChatMessage.ROLE_USER, question);
             long userTime = System.currentTimeMillis();
+
             runOnUiThread(() -> {
-                adapter.add(new ChatMessage(userId, ChatMessage.ROLE_USER, question, userTime));
+                adapter.add(new ChatMessage(
+                        userId, ChatMessage.ROLE_USER, question, userTime));
                 scrollToEnd();
                 setWorking(true, "يفكر…");
             });
+
             try {
-                String answer = engine.generate(buildTurnsWithinBudget(), MAX_NEW_TOKENS, TEMPERATURE, TOP_K);
+                String answer = engine.generate(
+                        buildTurnsWithinBudget(), MAX_NEW_TOKENS, TEMPERATURE, TOP_K);
                 String finalAnswer = answer.isEmpty() ? "…" : answer;
-                long assistantId = historyStore.append(ChatMessage.ROLE_ASSISTANT, finalAnswer);
+                long assistantId = historyStore.append(
+                        ChatMessage.ROLE_ASSISTANT, finalAnswer);
                 long assistantTime = System.currentTimeMillis();
+
                 runOnUiThread(() -> {
-                    adapter.add(new ChatMessage(assistantId, ChatMessage.ROLE_ASSISTANT, finalAnswer, assistantTime));
+                    adapter.add(new ChatMessage(
+                            assistantId,
+                            ChatMessage.ROLE_ASSISTANT,
+                            finalAnswer,
+                            assistantTime));
                     scrollToEnd();
                     setGenerating(false);
                     setWorking(false, "جاهز");
@@ -175,8 +419,10 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private List<ChatMessage> buildTurnsWithinBudget() {
-        List<ChatMessage> history = historyStore.loadAll(), kept = new ArrayList<>();
+        List<ChatMessage> history = historyStore.loadAll();
+        List<ChatMessage> kept = new ArrayList<>();
         int budget = PROMPT_CHAR_BUDGET;
+
         for (int i = history.size() - 1; i >= 0; i--) {
             ChatMessage m = history.get(i);
             if (budget - m.text.length() < 0) break;
@@ -201,6 +447,12 @@ public class MainActivity extends AppCompatActivity {
         generating = value;
         sendButton.setText(value ? "⏹" : "➤");
         sendButton.setEnabled(engine != null);
+        loadModelButton.setEnabled(!value && !isWorkingStatus());
+    }
+
+    private boolean isWorkingStatus() {
+        String s = status.getText() == null ? "" : status.getText().toString();
+        return s.startsWith("جاري") || s.startsWith("تم تجهيز النموذج");
     }
 
     private void setWorking(boolean working, String message) {
@@ -210,13 +462,16 @@ public class MainActivity extends AppCompatActivity {
 
     private static String safeMessage(Exception ex) {
         String m = ex.getMessage();
-        return TextUtils.isEmpty(m) ? ex.getClass().getSimpleName() : m;
+        return TextUtils.isEmpty(m)
+                ? ex.getClass().getSimpleName()
+                : m;
     }
 
     @Override protected void onDestroy() {
         super.onDestroy();
         executor.shutdownNow();
-        if (engine != null) try { engine.close(); } catch (Exception ignored) {}
-        if (modelFd != null) try { modelFd.close(); } catch (Exception ignored) {}
+        if (engine != null) {
+            try { engine.close(); } catch (Exception ignored) {}
+        }
     }
 }
