@@ -114,69 +114,62 @@ std::string templ(const EngineHandle * h, const std::vector<Turn> & turns, bool 
     if (!model_tmpl || !*model_tmpl) return fallback(turns);
 
     std::vector<char> buffer(8192);
-    int n = llama_chat_apply_template(
-            model_tmpl, messages.data(), messages.size(), true,
-            buffer.data(), static_cast<int32_t>(buffer.size()));
+    int n = llama_chat_apply_template(model_tmpl, messages.data(), messages.size(), true,
+                                      buffer.data(), static_cast<int32_t>(buffer.size()));
     if (n < 0) return fallback(turns);
     if (n >= static_cast<int>(buffer.size())) {
         buffer.resize(static_cast<size_t>(n) + 1);
-        n = llama_chat_apply_template(
-                model_tmpl, messages.data(), messages.size(), true,
-                buffer.data(), static_cast<int32_t>(buffer.size()));
+        n = llama_chat_apply_template(model_tmpl, messages.data(), messages.size(), true,
+                                      buffer.data(), static_cast<int32_t>(buffer.size()));
     }
     return n > 0 ? std::string(buffer.data(), static_cast<size_t>(n)) : fallback(turns);
 }
 
-bool tokenize(const EngineHandle * h, const std::string & prompt,
-              std::vector<llama_token> & tokens) {
-    int n = -llama_tokenize(
-            h->vocab, prompt.c_str(), static_cast<int>(prompt.size()),
-            nullptr, 0, true, true);
+bool tokenize(const EngineHandle * h, const std::string & prompt, std::vector<llama_token> & tokens) {
+    int n = -llama_tokenize(h->vocab, prompt.c_str(), static_cast<int>(prompt.size()), nullptr, 0, true, true);
     if (n <= 0) return false;
     tokens.resize(static_cast<size_t>(n));
-    int written = llama_tokenize(
-            h->vocab, prompt.c_str(), static_cast<int>(prompt.size()),
-            tokens.data(), n, true, true);
+    int written = llama_tokenize(h->vocab, prompt.c_str(), static_cast<int>(prompt.size()), tokens.data(), n, true, true);
     return written >= 0;
 }
 
-// Rebuild the chat prompt by dropping the oldest non-system turns until it fits.
-// This preserves valid chat-template boundaries instead of blindly cutting tokens.
+// Drop only old non-system turns. The newest user request is never discarded wholesale.
 bool fit_prompt(const EngineHandle * h, std::vector<Turn> turns, bool code_mode,
-                int max_prompt_tokens, std::string & prompt,
-                std::vector<llama_token> & tokens) {
+                int max_prompt_tokens, std::string & prompt, std::vector<llama_token> & tokens) {
     while (true) {
         prompt = templ(h, turns, code_mode);
         if (prompt.empty()) prompt = fallback(turns);
         if (!tokenize(h, prompt, tokens)) return false;
-
         if (static_cast<int>(tokens.size()) <= max_prompt_tokens) return true;
 
-        int remove_index = -1;
-        for (int i = 0; i < static_cast<int>(turns.size()); ++i) {
-            if (turns[static_cast<size_t>(i)].role != "system") {
-                remove_index = i;
-                break;
+        int non_system_count = 0;
+        for (const auto & t : turns) if (t.role != "system") ++non_system_count;
+
+        // Preserve the newest/current non-system turn. Only remove history when
+        // there is at least one older non-system turn to sacrifice.
+        if (non_system_count > 1) {
+            int remove_index = -1;
+            for (int i = 0; i < static_cast<int>(turns.size()); ++i) {
+                if (turns[static_cast<size_t>(i)].role != "system") {
+                    remove_index = i;
+                    break;
+                }
+            }
+            if (remove_index >= 0) {
+                turns.erase(turns.begin() + remove_index);
+                continue;
             }
         }
 
-        if (remove_index >= 0 && turns.size() > 1) {
-            turns.erase(turns.begin() + remove_index);
-            continue;
-        }
-
-        // A single enormous user/system message remains. Keep BOS plus the tail;
+        // A single enormous current message remains. Keep BOS plus the tail;
         // this is the last-resort guard against native context overflow.
         if (static_cast<int>(tokens.size()) > max_prompt_tokens) {
             std::vector<llama_token> clipped;
             clipped.reserve(static_cast<size_t>(max_prompt_tokens));
             if (!tokens.empty()) clipped.push_back(tokens.front());
             const int tail = std::max(0, max_prompt_tokens - static_cast<int>(clipped.size()));
-            if (tail > 0 && static_cast<int>(tokens.size()) > tail) {
-                clipped.insert(clipped.end(), tokens.end() - tail, tokens.end());
-            } else if (tail > 0) {
-                clipped.insert(clipped.end(), tokens.begin() + static_cast<int>(clipped.size()), tokens.end());
-            }
+            if (tail > 0) clipped.insert(clipped.end(), tokens.end() - std::min(tail, static_cast<int>(tokens.size())), tokens.end());
+            if (static_cast<int>(clipped.size()) > max_prompt_tokens) clipped.resize(static_cast<size_t>(max_prompt_tokens));
             tokens.swap(clipped);
         }
         return true;
@@ -184,10 +177,7 @@ bool fit_prompt(const EngineHandle * h, std::vector<Turn> turns, bool code_mode,
 }
 
 bool has_stop_suffix(const std::string & text) {
-    static const char * stops[] = {
-        "<|EOT|>", "<|eot_id|>", "<|im_end|>",
-        "<|end_of_turn|>", "<|endoftext|>"
-    };
+    static const char * stops[] = {"<|EOT|>", "<|eot_id|>", "<|im_end|>", "<|end_of_turn|>", "<|endoftext|>"};
     for (const char * stop : stops) {
         size_t len = std::strlen(stop);
         if (text.size() >= len && text.compare(text.size() - len, len, stop) == 0) return true;
@@ -196,10 +186,7 @@ bool has_stop_suffix(const std::string & text) {
 }
 
 void strip_special_suffix(std::string & text) {
-    static const char * stops[] = {
-        "<|EOT|>", "<|eot_id|>", "<|im_end|>",
-        "<|end_of_turn|>", "<|endoftext|>"
-    };
+    static const char * stops[] = {"<|EOT|>", "<|eot_id|>", "<|im_end|>", "<|end_of_turn|>", "<|endoftext|>"};
     for (const char * stop : stops) {
         size_t len = std::strlen(stop);
         if (text.size() >= len && text.compare(text.size() - len, len, stop) == 0) {
@@ -234,8 +221,6 @@ JNIEXPORT jlong JNICALL Java_com_musab_aragpt2_LlamaEngine_nativeLoadModel(
 
     auto cp = llama_context_default_params();
     cp.n_ctx = std::max(512, static_cast<int>(nc));
-    // n_batch must be able to accept the complete bounded prompt. n_ubatch
-    // still keeps the actual compute micro-batches small on the phone.
     cp.n_batch = cp.n_ctx;
     cp.n_ubatch = std::min(cp.n_ctx, 512u);
     cp.n_threads = std::max(1, static_cast<int>(nt));
@@ -254,11 +239,10 @@ JNIEXPORT jlong JNICALL Java_com_musab_aragpt2_LlamaEngine_nativeLoadModel(
     handle->vocab = llama_model_get_vocab(model);
     handle->n_ctx = cp.n_ctx;
 
-    const char * tmpl = llama_model_chat_template(model, nullptr);
+    const char * tmpl_ptr = llama_model_chat_template(model, nullptr);
     LOGI("model loaded; context=%d batch=%d ubatch=%d threads=%d chat_template=%s",
-         static_cast<int>(cp.n_ctx), static_cast<int>(cp.n_batch),
-         static_cast<int>(cp.n_ubatch), static_cast<int>(cp.n_threads),
-         (tmpl && *tmpl) ? "yes" : "no");
+         static_cast<int>(cp.n_ctx), static_cast<int>(cp.n_batch), static_cast<int>(cp.n_ubatch),
+         static_cast<int>(cp.n_threads), (tmpl_ptr && *tmpl_ptr) ? "yes" : "no");
     return reinterpret_cast<jlong>(handle);
 }
 
@@ -266,17 +250,11 @@ JNIEXPORT jstring JNICALL Java_com_musab_aragpt2_LlamaEngine_nativeGenerate(
         JNIEnv * env, jobject, jlong hp, jstring jt, jint max_tokens, jfloat temp,
         jint topk, jboolean code_mode) {
     auto * h = reinterpret_cast<EngineHandle *>(hp);
-    if (!h || !h->ctx) {
-        fail(env, "المحرك غير محمل");
-        return nullptr;
-    }
+    if (!h || !h->ctx) { fail(env, "المحرك غير محمل"); return nullptr; }
 
     const auto total_start = std::chrono::steady_clock::now();
     auto turns = parse(js(env, jt));
-    if (turns.empty()) {
-        fail(env, "لا توجد رسائل للتوليد");
-        return nullptr;
-    }
+    if (turns.empty()) { fail(env, "لا توجد رسائل للتوليد"); return nullptr; }
 
     const int requested_new = std::max(1, static_cast<int>(max_tokens));
     const int reserve = std::min(requested_new, std::max(1, h->n_ctx - 32));
@@ -288,29 +266,19 @@ JNIEXPORT jstring JNICALL Java_com_musab_aragpt2_LlamaEngine_nativeGenerate(
         fail(env, "فشل تجهيز prompt");
         return nullptr;
     }
-
     LOGI("bounded prompt tokens=%d/%d", static_cast<int>(prompt_tokens.size()), max_prompt_tokens);
 
-    // Each generation starts from a clean KV state. This deliberately removes
-    // the old prompt-cache reuse path, which could leave stale positions after
-    // a growing conversation and was a source of multi-turn instability.
+    // Clean KV state on every turn. This removes stale-position risks from the old prompt-cache path.
     llama_memory_clear(llama_get_memory(h->ctx), true);
     h->cancel = false;
 
-    const auto prompt_start = std::chrono::steady_clock::now();
     auto batch = llama_batch_get_one(prompt_tokens.data(), prompt_tokens.size());
-    if (llama_decode(h->ctx, batch) != 0) {
-        fail(env, "فشل llama_decode للـprompt");
-        return nullptr;
-    }
+    if (llama_decode(h->ctx, batch) != 0) { fail(env, "فشل llama_decode للـprompt"); return nullptr; }
 
     auto sp = llama_sampler_chain_default_params();
     sp.no_perf = true;
     llama_sampler * sampler = llama_sampler_chain_init(sp);
-    if (!sampler) {
-        fail(env, "تعذر إنشاء sampler");
-        return nullptr;
-    }
+    if (!sampler) { fail(env, "تعذر إنشاء sampler"); return nullptr; }
 
     const float effective_temp = std::max(0.01f, static_cast<float>(temp));
     if (effective_temp <= 0.01f) {
@@ -319,8 +287,7 @@ JNIEXPORT jstring JNICALL Java_com_musab_aragpt2_LlamaEngine_nativeGenerate(
         llama_sampler_chain_add(sampler, llama_sampler_init_top_k(std::max(1, static_cast<int>(topk))));
         llama_sampler_chain_add(sampler, llama_sampler_init_min_p(0.05f, 1));
         llama_sampler_chain_add(sampler, llama_sampler_init_temp(effective_temp));
-        llama_sampler_chain_add(sampler, llama_sampler_init_penalties(
-                llama_vocab_n_tokens(h->vocab), 64, 1.10f, 0.0f, 0.0f));
+        llama_sampler_chain_add(sampler, llama_sampler_init_penalties(llama_vocab_n_tokens(h->vocab), 64, 1.10f, 0.0f, 0.0f));
         llama_sampler_chain_add(sampler, llama_sampler_init_dist(LLAMA_DEFAULT_SEED));
     }
 
@@ -340,57 +307,42 @@ JNIEXPORT jstring JNICALL Java_com_musab_aragpt2_LlamaEngine_nativeGenerate(
         ++generated;
 
         if (first_ms < 0) {
-            first_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-                    std::chrono::steady_clock::now() - total_start).count();
+            first_ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - total_start).count();
         }
-
-        if (has_stop_suffix(output)) {
-            strip_special_suffix(output);
-            break;
-        }
+        if (has_stop_suffix(output)) { strip_special_suffix(output); break; }
 
         llama_token one[1] = {token};
         auto next = llama_batch_get_one(one, 1);
-        if (llama_decode(h->ctx, next) != 0) {
-            break;
-        }
+        if (llama_decode(h->ctx, next) != 0) break;
     }
 
     llama_sampler_free(sampler);
     strip_special_suffix(output);
 
     const auto total_end = std::chrono::steady_clock::now();
-    const double generation_seconds =
-            std::chrono::duration<double>(total_end - generation_start).count();
-    const double tok_per_sec = generated > 0 && generation_seconds > 0.0
-            ? generated / generation_seconds : 0.0;
-    const long long total_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
-            total_end - total_start).count();
+    const double generation_seconds = std::chrono::duration<double>(total_end - generation_start).count();
+    const double tok_per_sec = generated > 0 && generation_seconds > 0.0 ? generated / generation_seconds : 0.0;
+    const long long total_ms = std::chrono::duration_cast<std::chrono::milliseconds>(total_end - total_start).count();
 
     LOGI("prompt=%d generated=%d first_ms=%lld tok_s=%.2f total_ms=%lld",
-         static_cast<int>(prompt_tokens.size()), generated, first_ms,
-         tok_per_sec, total_ms);
+         static_cast<int>(prompt_tokens.size()), generated, first_ms, tok_per_sec, total_ms);
 
-    return env->NewStringUTF(result_pack(
-            output, static_cast<int>(prompt_tokens.size()), generated,
-            first_ms, tok_per_sec, total_ms).c_str());
+    return env->NewStringUTF(result_pack(output, static_cast<int>(prompt_tokens.size()), generated,
+                                         first_ms, tok_per_sec, total_ms).c_str());
 }
 
-JNIEXPORT void JNICALL Java_com_musab_aragpt2_LlamaEngine_nativeCancel(
-        JNIEnv *, jobject, jlong hp) {
+JNIEXPORT void JNICALL Java_com_musab_aragpt2_LlamaEngine_nativeCancel(JNIEnv *, jobject, jlong hp) {
     auto * h = reinterpret_cast<EngineHandle *>(hp);
     if (h) h->cancel = true;
 }
 
-JNIEXPORT void JNICALL Java_com_musab_aragpt2_LlamaEngine_nativeReset(
-        JNIEnv *, jobject, jlong hp) {
+JNIEXPORT void JNICALL Java_com_musab_aragpt2_LlamaEngine_nativeReset(JNIEnv *, jobject, jlong hp) {
     auto * h = reinterpret_cast<EngineHandle *>(hp);
     if (!h || !h->ctx) return;
     llama_memory_clear(llama_get_memory(h->ctx), true);
 }
 
-JNIEXPORT void JNICALL Java_com_musab_aragpt2_LlamaEngine_nativeFree(
-        JNIEnv *, jobject, jlong hp) {
+JNIEXPORT void JNICALL Java_com_musab_aragpt2_LlamaEngine_nativeFree(JNIEnv *, jobject, jlong hp) {
     auto * h = reinterpret_cast<EngineHandle *>(hp);
     if (!h) return;
     if (h->ctx) llama_free(h->ctx);
