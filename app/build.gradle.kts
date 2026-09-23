@@ -29,6 +29,9 @@ android {
     buildTypes {
         release {
             isMinifyEnabled = false
+            // CI uses the release variant for an optimized native llama.cpp build,
+            // while retaining the debug key so the generated APK is directly installable.
+            signingConfig = signingConfigs.getByName("debug")
         }
     }
 
