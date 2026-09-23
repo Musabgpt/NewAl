@@ -259,14 +259,15 @@ public class MainActivity extends AppCompatActivity {
             });
             try{
                 GenerationResult result=engine.generate(turns,MAX_NEW_TOKENS,TEMPERATURE,TOP_K,true);
-                String finalAnswer=cleanAssistantText(result.text);
-                if(finalAnswer.isEmpty())finalAnswer="…";
-                long assistantId=historyStore.append(ChatMessage.ROLE_ASSISTANT,finalAnswer);
+                String answerText=cleanAssistantText(result.text);
+                if(answerText.isEmpty())answerText="…";
+                final String displayAnswer=answerText;
+                long assistantId=historyStore.append(ChatMessage.ROLE_ASSISTANT,displayAnswer);
                 long assistantTime=System.currentTimeMillis();
                 memoryManager.refreshExtractiveSummary(historyStore.loadAll());
                 String metric=formatMetrics(result);
                 runOnUiThread(()->{
-                    adapter.add(new ChatMessage(assistantId,ChatMessage.ROLE_ASSISTANT,finalAnswer,assistantTime));
+                    adapter.add(new ChatMessage(assistantId,ChatMessage.ROLE_ASSISTANT,displayAnswer,assistantTime));
                     scrollToEnd();
                     setGenerating(false);
                     setWorking(false,metric);
@@ -346,9 +347,7 @@ public class MainActivity extends AppCompatActivity {
         engine=null;
         if(toClose!=null)toClose.cancel();
         if(toClose!=null){
-            executor.execute(()->{
-                try{toClose.close();}catch(Exception ignored){}
-            });
+            executor.execute(()->{try{toClose.close();}catch(Exception ignored){}});
         }
         executor.shutdown();
         super.onDestroy();
