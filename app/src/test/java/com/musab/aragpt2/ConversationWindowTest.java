@@ -14,14 +14,13 @@ public class ConversationWindowTest {
         List<ChatMessage> history = Arrays.asList(
                 new ChatMessage(1, ChatMessage.ROLE_USER, "old question", 0),
                 new ChatMessage(2, ChatMessage.ROLE_ASSISTANT, "old answer", 0),
-                new ChatMessage(3, ChatMessage.ROLE_USER, "new question", 0),
-                new ChatMessage(4, ChatMessage.ROLE_ASSISTANT, "new answer", 0));
+                new ChatMessage(3, ChatMessage.ROLE_USER, "new question", 0));
 
         List<ChatMessage> result = ConversationWindow.select(history, 60);
 
         assertTrue(result.size() < history.size());
-        assertEquals("new question", result.get(result.size() - 2).text);
-        assertEquals("new answer", result.get(result.size() - 1).text);
+        assertEquals("old answer", result.get(result.size() - 2).text);
+        assertEquals("new question", result.get(result.size() - 1).text);
     }
 
     @Test
