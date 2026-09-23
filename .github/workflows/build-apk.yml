@@ -2,7 +2,7 @@ name: Build H33 GGUF Chat APK
 
 on:
   push:
-    branches: [ h33-gguf-chat, engine-v2-memory, speed-first-runtime ]
+    branches: [ h33-gguf-chat, engine-v2-memory, speed-first-runtime, fix/gguf-stability-and-hallucination ]
   workflow_dispatch:
 
 jobs:
@@ -26,6 +26,8 @@ jobs:
         uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '8.7'
+      - name: Run unit tests
+        run: gradle :app:testDebugUnitTest --stacktrace
       - name: Build optimized release APK
         run: gradle :app:assembleRelease --stacktrace
       - name: Upload APK

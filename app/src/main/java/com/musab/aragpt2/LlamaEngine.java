@@ -32,15 +32,27 @@ public final class LlamaEngine implements AutoCloseable {
     }
 
     private GenerationResult parseResult(String packed) {
-        if (packed == null) return new GenerationResult("", 0, 0, -1, 0.0);
+        if (packed == null) return new GenerationResult("", 0, 0, -1, 0.0, 0);
         String[] p = packed.split(String.valueOf(RESULT_SEP), -1);
-        if (p.length < 5) return new GenerationResult(packed, 0, 0, -1, 0.0);
-        try { return new GenerationResult(p[0], Integer.parseInt(p[1]), Integer.parseInt(p[2]), Long.parseLong(p[3]), Double.parseDouble(p[4])); }
-        catch (NumberFormatException e) { return new GenerationResult(p[0], 0, 0, -1, 0.0); }
+        if (p.length < 6) return new GenerationResult(packed, 0, 0, -1, 0.0, 0);
+        try {
+            return new GenerationResult(
+                    p[0], Integer.parseInt(p[1]), Integer.parseInt(p[2]),
+                    Long.parseLong(p[3]), Double.parseDouble(p[4]), Long.parseLong(p[5]));
+        } catch (NumberFormatException e) {
+            return new GenerationResult(p[0], 0, 0, -1, 0.0, 0);
+        }
     }
-    public void resetContext() { long h=handle; if(h!=0) nativeReset(h); }
-    public void cancel() { long h=handle; if(h!=0) nativeCancel(h); }
-    @Override public synchronized void close() { if(handle!=0){nativeFree(handle);handle=0;} }
+
+    public void resetContext() { long h = handle; if (h != 0) nativeReset(h); }
+    public void cancel() { long h = handle; if (h != 0) nativeCancel(h); }
+
+    @Override public synchronized void close() {
+        if (handle != 0) {
+            nativeFree(handle);
+            handle = 0;
+        }
+    }
 
     private native long nativeLoadModel(String modelPath, String nativeLibDir, int contextTokens, int threads);
     private native String nativeGenerate(long handle, String encodedTurns, int maxNewTokens, float temperature, int topK, boolean codeMode);
