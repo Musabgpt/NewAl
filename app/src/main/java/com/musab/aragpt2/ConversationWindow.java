@@ -4,7 +4,7 @@ import java.util.ArrayList;
 import java.util.Collections;
 import java.util.List;
 
-/** Selects a bounded conversation window without letting one large turn discard newer turns. */
+/** Selects a bounded conversation window without losing the current user request. */
 public final class ConversationWindow {
     private static final int TURN_OVERHEAD_CHARS = 16;
 
@@ -16,7 +16,6 @@ public final class ConversationWindow {
         List<ChatMessage> result = new ArrayList<>();
         int remaining = maxChars;
 
-        // System context is structural and should survive ordinary history trimming.
         for (ChatMessage message : history) {
             if (message.role != ChatMessage.ROLE_SYSTEM) continue;
             int cost = cost(message);
@@ -26,17 +25,39 @@ public final class ConversationWindow {
             }
         }
 
-        List<ChatMessage> recent = new ArrayList<>();
+        int newestUserIndex = -1;
         for (int i = history.size() - 1; i >= 0; i--) {
+            if (history.get(i).role == ChatMessage.ROLE_USER) {
+                newestUserIndex = i;
+                break;
+            }
+        }
+
+        List<ChatMessage> recent = new ArrayList<>();
+        if (newestUserIndex >= 0) {
+            ChatMessage newest = history.get(newestUserIndex);
+            int availableText = Math.max(0, remaining - TURN_OVERHEAD_CHARS);
+            if (newest.text.length() + TURN_OVERHEAD_CHARS <= remaining) {
+                recent.add(newest);
+                remaining -= cost(newest);
+            } else {
+                // Never drop the current request completely. Keep its leading portion.
+                String clipped = newest.text.substring(0, Math.min(newest.text.length(), availableText));
+                recent.add(new ChatMessage(newest.id, newest.role, clipped, newest.timeMs));
+                remaining = 0;
+            }
+        }
+
+        for (int i = newestUserIndex - 1; i >= 0; i--) {
             ChatMessage message = history.get(i);
             if (message.role == ChatMessage.ROLE_SYSTEM) continue;
             int cost = cost(message);
-            // Skip an oversized old turn instead of breaking and losing all newer turns.
             if (cost <= remaining) {
                 recent.add(message);
                 remaining -= cost;
             }
         }
+
         Collections.reverse(recent);
         result.addAll(recent);
         return result;
