@@ -2,7 +2,7 @@ name: Build H33 GGUF Chat APK
 
 on:
   push:
-    branches: [ h33-gguf-chat, engine-v2-memory, speed-first-runtime, fix/gguf-stability-and-hallucination, speed/max-cpu-runtime ]
+    branches: [ h33-gguf-chat, engine-v2-memory, speed-first-runtime, fix/gguf-stability-and-hallucination, speed/max-cpu-runtime, fix/long-code-output-1024 ]
   workflow_dispatch:
 
 jobs:
@@ -33,7 +33,7 @@ jobs:
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: H33-GGUF-Chat-APK-speed-first
+          name: H33-GGUF-Chat-APK-long-code-1024
           path: app/build/outputs/apk/release/app-release.apk
           compression-level: 0
           retention-days: 7
