@@ -2,7 +2,7 @@ name: Build H33 GGUF Chat APK
 
 on:
   push:
-    branches: [ h33-gguf-chat, engine-v2-memory, speed-first-runtime, fix/gguf-stability-and-hallucination ]
+    branches: [ h33-gguf-chat, engine-v2-memory, speed-first-runtime, fix/gguf-stability-and-hallucination, speed/max-cpu-runtime ]
   workflow_dispatch:
 
 jobs:
