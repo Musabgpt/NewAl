@@ -14,7 +14,8 @@ public final class LlamaEngine implements AutoCloseable {
 
     public LlamaEngine(Context context, String modelPath, int contextTokens, int threads) {
         String nativeLibDir = context.getApplicationInfo().nativeLibraryDir;
-        handle = nativeLoadModel(modelPath, nativeLibDir, contextTokens, threads);
+        int effectiveThreads = ThreadingConfig.recommendedThreads(Runtime.getRuntime().availableProcessors());
+        handle = nativeLoadModel(modelPath, nativeLibDir, contextTokens, effectiveThreads);
         if (handle == 0) throw new IllegalStateException("فشل تحميل النموذج");
     }
 
