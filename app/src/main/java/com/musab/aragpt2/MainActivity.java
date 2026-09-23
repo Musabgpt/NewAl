@@ -157,6 +157,7 @@ public class MainActivity extends AppCompatActivity {
                         lastUi=now;
                     }
                 }
+                if(expectedSize>0&&copied!=expectedSize)throw new IllegalStateException("اكتمل النسخ بحجم غير متوقع للـGGUF");
             }
         }
         if(!isValidGgufFile(tmp)){tmp.delete();throw new IllegalStateException("ملف GGUF غير صالح أو تالف");}
@@ -217,7 +218,7 @@ public class MainActivity extends AppCompatActivity {
             List<ChatMessage> turns=memoryManager.buildTurns(historyStore.loadAll());
             runOnUiThread(()->{adapter.add(new ChatMessage(userId,ChatMessage.ROLE_USER,question,userTime));scrollToEnd();setWorking(true,"يفكر…");});
             try{
-                GenerationResult result=engine.generate(turns,MAX_NEW_TOKENS,TEMPERATURE,TOP_K,true);
+                GenerationResult result=engine.generate(turns,MAX_NEW_TOKENS,TEMPERATURE,TOP_K,GenerationMode.DEFAULT_CODE_MODE);
                 String answerText=cleanAssistantText(result.text);if(answerText.isEmpty())answerText="…";final String displayAnswer=answerText;
                 long assistantId=historyStore.append(ChatMessage.ROLE_ASSISTANT,displayAnswer);long assistantTime=System.currentTimeMillis();
                 memoryManager.refreshExtractiveSummary(historyStore.loadAll());String metric=formatMetrics(result);
