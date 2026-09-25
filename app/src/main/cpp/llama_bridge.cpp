@@ -20,6 +20,15 @@ constexpr int CTX_SAFETY_TOKENS = 8;
 // Refuse to generate if less than this many tokens of room are left.
 constexpr int MIN_GEN_TOKENS = 32;
 
+// Generation stops when the output ends with any of these. Besides the usual
+// end-of-turn markers, this catches a model that starts writing the NEXT turn
+// itself (inventing "User:" / "### Instruction:" lines) -- the fake dialogue
+// seen with base models or when the GGUF has no chat template.
+const char * const STOPS[] = {
+    "<|EOT|>", "<|eot_id|>", "<|im_end|>", "<|end_of_turn|>", "<|endoftext|>",
+    "### Instruction", "\nUser:", "\nuser:", "\nHuman:",
+};
+
 struct Turn { std::string role; std::string text; };
 struct EngineHandle {
     llama_model * model = nullptr;
@@ -60,15 +69,19 @@ std::vector<Turn> parse(const std::string & x) {
     }
     return v;
 }
-std::string fallback(const std::vector<Turn> & v) {
+// Used when the GGUF has no chat template. DeepSeek-Coder-Instruct format.
+std::string fallback(const std::vector<Turn> & v, const std::string & system) {
     std::string o;
+    if (!system.empty()) { o += system; o += '\n'; }
     for (const auto & t : v) {
         if (t.role == "system") continue;
-        o += (t.role == "user" ? "User: " : "Assistant: ");
-        o += t.text;
-        o += '\n';
+        if (t.role == "user") {
+            o += "### Instruction:\n"; o += t.text; o += '\n';
+        } else {
+            o += "### Response:\n"; o += t.text; o += "\n<|EOT|>\n";
+        }
     }
-    o += "Assistant:";
+    o += "### Response:\n";
     return o;
 }
 std::string templ(const EngineHandle * handle, const std::vector<Turn> & turns, bool code_mode) {
@@ -92,20 +105,20 @@ std::string templ(const EngineHandle * handle, const std::vector<Turn> & turns, 
     for (const auto & t : turns) {
         if (t.role != "system") messages.push_back({t.role.c_str(), t.text.c_str()});
     }
-    if (messages.empty()) return fallback(turns);
+    if (messages.empty()) return fallback(turns, system);
 
     const char * model_tmpl = llama_model_chat_template(handle->model, nullptr);
-    if (!model_tmpl || !*model_tmpl) return fallback(turns);
+    if (!model_tmpl || !*model_tmpl) return fallback(turns, system);
     std::vector<char> buffer(8192);
     int n = llama_chat_apply_template(model_tmpl, messages.data(), messages.size(), true,
                                       buffer.data(), static_cast<int32_t>(buffer.size()));
-    if (n < 0) return fallback(turns);
+    if (n < 0) return fallback(turns, system);
     if (n >= static_cast<int>(buffer.size())) {
         buffer.resize(static_cast<size_t>(n) + 1);
         n = llama_chat_apply_template(model_tmpl, messages.data(), messages.size(), true,
                                       buffer.data(), static_cast<int32_t>(buffer.size()));
     }
-    if (n <= 0) return fallback(turns);
+    if (n <= 0) return fallback(turns, system);
     return std::string(buffer.data(), static_cast<size_t>(n));
 }
 
@@ -160,22 +173,18 @@ void reset_kv(EngineHandle * h) {
     h->kv_tokens.clear();
 }
 
-bool has_stop_suffix(const std::string & text) {
-    static const char * stops[] = {"<|EOT|>", "<|eot_id|>", "<|im_end|>", "<|end_of_turn|>", "<|endoftext|>"};
-    for (const char * stop : stops) {
-        const size_t len = std::strlen(stop);
-        if (text.size() >= len && text.compare(text.size() - len, len, stop) == 0) return true;
-    }
-    return false;
-}
-void strip_special_suffix(std::string & text) {
-    static const char * stops[] = {"<|EOT|>", "<|eot_id|>", "<|im_end|>", "<|end_of_turn|>", "<|endoftext|>"};
-    for (const char * stop : stops) {
+// If the output ends with a stop marker, removes it (plus trailing whitespace)
+// and returns true.
+bool strip_stop_suffix(std::string & text) {
+    for (const char * stop : STOPS) {
         const size_t len = std::strlen(stop);
         if (text.size() >= len && text.compare(text.size() - len, len, stop) == 0) {
-            text.erase(text.size() - len); break;
+            text.erase(text.size() - len);
+            while (!text.empty() && (text.back() == '\n' || text.back() == ' ')) text.pop_back();
+            return true;
         }
     }
+    return false;
 }
 std::string result_pack(const std::string & answer, int prompt_tokens, int generated_tokens,
                        long long first_ms, double tok_per_sec) {
@@ -226,7 +235,7 @@ JNIEXPORT jbyteArray JNICALL Java_com_musab_aragpt2_LlamaEngine_nativeGenerate(
     int dropped_turns = 0;
     for (;;) {
         std::string prompt = templ(handle, turns, code_mode == JNI_TRUE);
-        if (prompt.empty()) prompt = fallback(turns);
+        if (prompt.empty()) prompt = fallback(turns, "");
         if (!tokenize_prompt(handle, prompt, prompt_tokens)) { fail(env, "فشل ترميز النص"); return nullptr; }
         if (static_cast<int>(prompt_tokens.size()) + max_new + CTX_SAFETY_TOKENS <= handle->n_ctx) break;
         if (!drop_oldest_turn(turns)) break;
@@ -296,11 +305,11 @@ JNIEXPORT jbyteArray JNICALL Java_com_musab_aragpt2_LlamaEngine_nativeGenerate(
         ++generated;
         if (first_ms < 0) first_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
                 std::chrono::steady_clock::now() - prompt_start).count();
-        if (has_stop_suffix(output)) { strip_special_suffix(output); break; }
+        if (strip_stop_suffix(output)) break;
         if (!decode_tokens(handle, &token, 1)) break;
     }
     llama_sampler_free(sampler);
-    strip_special_suffix(output);
+    strip_stop_suffix(output);
 
     const int n_prompt = static_cast<int>(prompt_tokens.size());
     const auto total_end = std::chrono::steady_clock::now();
