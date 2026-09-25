@@ -279,7 +279,7 @@ JNIEXPORT jbyteArray JNICALL Java_com_musab_aragpt2_LlamaEngine_nativeGenerate(
     llama_sampler * sampler = llama_sampler_chain_init(sparams);
     if (!sampler) { fail(env, "تعذر إنشاء sampler"); return nullptr; }
     const bool greedy = code_mode == JNI_TRUE || temp <= 0.01f;
-    llama_sampler_chain_add(sampler, llama_sampler_init_penalties(64, greedy ? 1.05f : 1.10f, 0.0f, 0.0f));
+    llama_sampler_chain_add(sampler, llama_sampler_init_penalties(llama_vocab_n_tokens(handle->vocab), 64, greedy ? 1.05f : 1.10f, 0.0f, 0.0f));
     if (greedy) {
         llama_sampler_chain_add(sampler, llama_sampler_init_greedy());
     } else {
