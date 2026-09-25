@@ -32,6 +32,16 @@
                 android:textSize="20sp"/>
 
             <com.google.android.material.button.MaterialButton
+                android:id="@+id/agentButton"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginEnd="6dp"
+                android:text="🛠 Termux"
+                android:textColor="#FFFFFF"
+                app:strokeColor="#FFFFFF"
+                app:cornerRadius="12dp"/>
+
+            <com.google.android.material.button.MaterialButton
                 android:id="@+id/loadModelButton"
                 android:layout_width="wrap_content"
                 android:layout_height="wrap_content"

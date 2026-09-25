@@ -14,6 +14,8 @@ public final class ChatAdapter extends RecyclerView.Adapter<ChatAdapter.VH> {
     public void setAll(List<ChatMessage> messages){items.clear();items.addAll(messages);notifyDataSetChanged();}
     public void add(ChatMessage message){items.add(message);notifyItemInserted(items.size()-1);}
     public int getCount(){return items.size();}
+    /** Replaces the last message in place (used while a reply is streaming). */
+    public void updateLast(ChatMessage message){if(items.isEmpty()){add(message);return;}items.set(items.size()-1,message);notifyItemChanged(items.size()-1);}
     @Override public int getItemViewType(int position){return items.get(position).role;}
     @Override public int getItemCount(){return items.size();}
     @NonNull @Override public VH onCreateViewHolder(@NonNull ViewGroup parent,int viewType){int layout=viewType==ChatMessage.ROLE_USER?R.layout.item_message_user:R.layout.item_message_assistant;return new VH(LayoutInflater.from(parent.getContext()).inflate(layout,parent,false));}
