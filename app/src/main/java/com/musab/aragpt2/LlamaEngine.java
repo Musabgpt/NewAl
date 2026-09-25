@@ -1,5 +1,6 @@
 package com.musab.aragpt2;
 
+import java.nio.charset.StandardCharsets;
 import java.util.List;
 
 /** Thin Java wrapper around the native llama.cpp JNI bridge. */
@@ -25,9 +26,11 @@ public final class LlamaEngine implements AutoCloseable {
                     : m.role == ChatMessage.ROLE_SYSTEM ? "system" : "assistant";
             encoded.append(role).append(FIELD_SEP).append(m.text).append(RECORD_SEP);
         }
-        String packed = nativeGenerate(handle, encoded.toString(), maxNewTokens,
+        byte[] packed = nativeGenerate(handle, encoded.toString(), maxNewTokens,
                 temperature, topK, codeMode);
-        return parseResult(packed);
+        // Decode as real UTF-8 in Java: invalid/partial sequences become U+FFFD
+        // instead of crashing the JNI layer.
+        return parseResult(packed == null ? null : new String(packed, StandardCharsets.UTF_8));
     }
 
     private GenerationResult parseResult(String packed) {
@@ -58,7 +61,7 @@ public final class LlamaEngine implements AutoCloseable {
     }
 
     private native long nativeLoadModel(String modelPath, int contextTokens, int threads);
-    private native String nativeGenerate(long handle, String encodedTurns, int maxNewTokens,
+    private native byte[] nativeGenerate(long handle, String encodedTurns, int maxNewTokens,
                                          float temperature, int topK, boolean codeMode);
     private native void nativeCancel(long handle);
     private native void nativeReset(long handle);
