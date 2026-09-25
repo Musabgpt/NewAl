@@ -112,3 +112,34 @@ has: max attempts, timeout, output grammar, and an automatic tester pass after s
 
 Models: 📂 model button → download Qwen2.5-Coder 0.5B / 1.5B / 3B / 7B GGUF from Hugging Face (free). Models too
 large for the phone's RAM are marked.
+
+## Personal assistant (device control)
+
+In agent mode, device requests go to the 📱 assistant, for example "افتح يوتيوب", "اضبط منبه 7 الصبح",
+"شغّل الكشاف" or "ارفع الصوت". Its tools are real Android actions: open_app, list_apps, open_url, web_search,
+navigate, dial, compose_sms, set_alarm, set_timer, open_settings, flashlight, volume, media, share_text,
+open_camera and device_status. Calls and messages only open the dialer or composer; you press send.
+
+Screen control (🖐 chip): enable "NewAl screen control" in Accessibility settings once. The assistant can then
+read_screen, tap (by visible text), type_text (asks first), scroll and press (back / home / recents /
+notifications / quick_settings / lock / screenshot). On Android 13+ a sideloaded app first needs
+App info → ⋮ → Allow restricted settings.
+
+## Model team (🧠)
+
+Each role (🧭 manager, 💻 coder, 🗣 language) can use its own GGUF. Only one model is in memory at a time: the
+app frees the current model before loading the next, so the team runs sequentially. In team mode:
+1. The manager routes the request (`ROUTE: code|phone|explain|chat` plus up to 8 `PLAN:` lines).
+2. The specialist does the work.
+3. The language model answers or summarises in your language.
+
+## Learning (📈)
+
+- **Reward:** every task is scored by its real result (reward 1.0 for success on the first attempt, less for
+  more attempts, 0 for failure).
+- **What it learns:** the app remembers solved tasks and recalls them as worked examples for similar requests,
+  remembers which fix resolved each error, and picks the build strategy with the highest reward per task type
+  (UCB1 bandit).
+- **What it does not do:** none of this changes the model's weights on the phone.
+- **Training the weights:** export the data from 📈 and run `training/finetune_colab.py` on a free Colab GPU.
+  It produces a GGUF that you load back into the app.
