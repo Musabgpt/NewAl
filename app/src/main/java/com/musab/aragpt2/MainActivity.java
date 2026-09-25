@@ -359,6 +359,7 @@ public class MainActivity extends AppCompatActivity {
                 ProjectWorkspace ws=currentWorkspace();
                 AgentLoop loop=new AgentLoop(agentModel(),termuxBridge(),ws,new UiAgentListener());
                 agentLoop=loop;
+                live.persist=true;
                 if(resume)runOnUiThread(()->setWorking(true,"استئناف المهمة السابقة من آخر حالة آمنة…"));
                 AgentLoop.Outcome o=resume?loop.resume():loop.run(request);
                 live.end();
@@ -367,7 +368,7 @@ public class MainActivity extends AppCompatActivity {
             }catch(Exception e){
                 live.end();
                 text="❌ "+safeMessage(e);
-            }finally{agentLoop=null;}
+            }finally{agentLoop=null;live.persist=false;}
             final String summary=text;
             long id=historyStore.append(ChatMessage.ROLE_ASSISTANT,summary);long t=System.currentTimeMillis();
             runOnUiThread(()->{adapter.add(new ChatMessage(id,ChatMessage.ROLE_ASSISTANT,summary,t));scrollToEnd();setGenerating(false);});
@@ -416,10 +417,13 @@ public class MainActivity extends AppCompatActivity {
         private static final int MAX_CHARS=8000;
         private final StringBuilder text=new StringBuilder();
         private boolean active,scheduled;
+        /** Agent mode: finished bubbles (generated code, program output) are saved to chat history. */
+        volatile boolean persist;
 
         void start(String header){
             final String previous;
             synchronized(this){previous=active?snapshot():null;text.setLength(0);text.append(header);active=true;}
+            save(previous);
             ui.post(()->{
                 if(previous!=null)adapter.updateLast(bubble(previous));
                 adapter.add(bubble(header));scrollToEnd();
@@ -446,7 +450,12 @@ public class MainActivity extends AppCompatActivity {
         void end(){
             String snap;
             synchronized(this){if(!active)return;snap=snapshot();active=false;}
+            save(snap);
             ui.post(()->adapter.updateLast(bubble(snap)));
+        }
+
+        private void save(String finished){
+            if(persist&&finished!=null&&!finished.trim().isEmpty())historyStore.append(ChatMessage.ROLE_ASSISTANT,finished);
         }
 
         private String snapshot(){return text.length()>MAX_CHARS?"…"+text.substring(text.length()-MAX_CHARS):text.toString();}

@@ -112,25 +112,33 @@ public final class CodeStreamParser {
         }
     }
 
-    /** Ends the stream; an unterminated block is reported as incomplete, never silently dropped. */
-    public void finish() throws IOException {
+    /** Ends a stream that was cut off (cancelled, context full). */
+    public void finish() throws IOException { finish(false); }
+
+    /**
+     * Ends the stream. {@code naturalEnd} means the model ended its answer itself: a closing
+     * fence with no newline after it still closes the block, and a last block the model left
+     * unclosed is complete. Otherwise an unterminated block is reported as incomplete.
+     */
+    public void finish(boolean naturalEnd) throws IOException {
         if (mode == Mode.FILE) {
+            String held = line.toString();
+            line.setLength(0);
+            boolean fence = !lineFlushed && isClosingFence(held);
             if (firstLine) {
-                // Cut off before the first line completed: the block is incomplete. Opening the
-                // target now would truncate an existing file for nothing.
-                incompleteBlocks++;
-                if (line.length() == 0 || line.toString().trim().startsWith(SEARCH_MARK)) {
-                    line.setLength(0);
+                firstLine = false;
+                if (fence) { startFile(); endFile(true); return; }
+                if (held.trim().isEmpty() || held.trim().startsWith(SEARCH_MARK)) {
+                    // Nothing usable arrived: opening the target would only truncate it.
+                    incompleteBlocks++;
                     mode = Mode.OUTSIDE;
-                    firstLine = false;
                     return;
                 }
                 startFile();
                 lineFlushed = false;
             }
-            if (line.length() > 0 && !lineFlushed) sink.onFileData(line.toString());
-            line.setLength(0);
-            endFile(false);
+            if (!fence && !held.isEmpty() && !lineFlushed) sink.onFileData(held);
+            endFile(fence || naturalEnd);
             return;
         }
         if (line.length() > 0) {
@@ -139,7 +147,7 @@ public final class CodeStreamParser {
             onLine(l);
         }
         if (mode == Mode.EDIT || mode == Mode.RAW_EDIT) {
-            boolean complete = mode == Mode.RAW_EDIT && editBody.toString().trim().endsWith("REPLACE");
+            boolean complete = (mode == Mode.RAW_EDIT || naturalEnd) && editBody.toString().trim().endsWith("REPLACE");
             emitEdit(complete);
         }
         mode = Mode.OUTSIDE;

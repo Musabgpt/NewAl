@@ -128,6 +128,27 @@ public class CodeStreamParserTest {
         assertEquals(1, r.files.size());
     }
 
+    /** Regression: models end with "```" and then the end-of-turn token, with no newline. */
+    @Test public void closingFenceAtEndOfStreamWithoutNewline() throws Exception {
+        for (boolean natural : new boolean[]{true, false}) {
+            Recorder r = new Recorder();
+            CodeStreamParser p = new CodeStreamParser(r, null);
+            p.feed("FILE: calc.py\n```python\nprint(1 + 1)\n```");
+            p.finish(natural);
+            assertEquals("print(1 + 1)\n", r.files.get("calc.py").toString());
+            assertTrue(r.complete.get("calc.py"));
+        }
+    }
+
+    @Test public void unclosedLastBlockIsCompleteOnlyWhenTheModelEndedItself() throws Exception {
+        Recorder r = new Recorder();
+        CodeStreamParser p = new CodeStreamParser(r, null);
+        p.feed("FILE: a.py\n```python\nx = 1\n");
+        p.finish(true);
+        assertEquals("x = 1\n", r.files.get("a.py").toString());
+        assertTrue(r.complete.get("a.py"));
+    }
+
     @Test public void cutOffBeforeFirstLineDoesNotOpenFile() throws Exception {
         Recorder r = parse("FILE: a.py\n```python\n");
         assertTrue(r.files.isEmpty());

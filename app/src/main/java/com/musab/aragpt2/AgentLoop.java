@@ -297,7 +297,7 @@ public final class AgentLoop {
                 listener.onModelText(delta);
                 parser.feed(delta);
             });
-            parser.finish();
+            parser.finish(g.result.finishedNaturally());
             if (g.result.stopReason == GenerationResult.STOP_CANCELLED) cancelled = true;
         } catch (Exception e) {
             try { parser.finish(); } catch (IOException ignored) {}
