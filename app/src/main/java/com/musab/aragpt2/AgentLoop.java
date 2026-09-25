@@ -163,6 +163,9 @@ public final class AgentLoop {
     }
 
     public AgentProfile agent() { return agent; }
+
+    /** A plan made elsewhere (e.g. by the manager model); skips the architect's own planning pass. */
+    public void setPlan(String externalPlan) { plan = externalPlan == null ? "" : externalPlan; }
     public Skills.Skill skill() { return skill; }
 
     /** Runs the current files again without generating anything. */

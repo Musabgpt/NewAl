@@ -39,7 +39,10 @@ import java.util.concurrent.TimeUnit;
 public class MainActivity extends AppCompatActivity {
     private static final String PREFS="h33_prefs", PREF_MODEL_URI="model_uri", PREF_MODEL_NAME="model_name", PREF_MODEL_LOCAL_PATH="model_local_path", PREF_MODEL_SIZE="model_local_size";
     private static final String PREF_AGENT_MODE="agent_mode", PREF_AGENT_TOKEN="agent_token", PREF_AGENT_PROFILE="agent_profile",
-            PREF_MAX_ATTEMPTS="max_attempts", PREF_TIMEOUT_S="exec_timeout_s", PREF_GRAMMAR="grammar", PREF_AUTO_TEST="auto_test";
+            PREF_MAX_ATTEMPTS="max_attempts", PREF_TIMEOUT_S="exec_timeout_s", PREF_GRAMMAR="grammar", PREF_AUTO_TEST="auto_test",
+            PREF_ROLE="role_path_", PREF_ORCHESTRATE="orchestrate", PREF_LANG_SUMMARY="lang_summary";
+    /** Model roles: each may use its own GGUF; models are loaded one at a time (sequentially). */
+    private static final String ROLE_MANAGER="manager", ROLE_CODER="coder", ROLE_LANGUAGE="language";
     private static final int CONTEXT_TOKENS=4096, MAX_NEW_TOKENS=256, TOP_K=40, AGENT_PORT=47811, REQ_TERMUX=41, REQ_NOTIFY=42;
     private static final float TEMPERATURE=0.70f;
 
@@ -50,6 +53,9 @@ public class MainActivity extends AppCompatActivity {
     private volatile AgentLoop agentLoop;
     private ProjectWorkspace workspace;
     private boolean agentMode;
+    private volatile String loadedPath;
+    private DeviceController device;
+    private ExperienceStore experience;
     private AgentProfile selectedAgent=AgentProfile.AUTO;
     private Skills.Skill selectedSkill;
     private View agentBar,emptyView;
@@ -74,6 +80,8 @@ public class MainActivity extends AppCompatActivity {
         setContentView(R.layout.activity_main);
         prefs=getSharedPreferences(PREFS,MODE_PRIVATE);
         historyStore=new ChatHistoryStore(this);
+        device=new DeviceController(this);
+        experience=new ExperienceStore(new File(getFilesDir(),"learning"));
         memoryManager=new MemoryManager(historyStore);
         rootView=findViewById(R.id.rootView);
         headerView=findViewById(R.id.headerView);
@@ -149,6 +157,9 @@ public class MainActivity extends AppCompatActivity {
             {"Qwen2.5-Coder 1.5B (Q4_K_M) — متوازن",1.12,4,"https://huggingface.co/Qwen/Qwen2.5-Coder-1.5B-Instruct-GGUF/resolve/main/qwen2.5-coder-1.5b-instruct-q4_k_m.gguf"},
             {"Qwen2.5-Coder 3B (Q4_K_M) — أدق بكثير",2.1,6,"https://huggingface.co/Qwen/Qwen2.5-Coder-3B-Instruct-GGUF/resolve/main/qwen2.5-coder-3b-instruct-q4_k_m.gguf"},
             {"Qwen2.5-Coder 7B (Q4_K_M) — الأقوى وبطيء",4.7,10,"https://huggingface.co/Qwen/Qwen2.5-Coder-7B-Instruct-GGUF/resolve/main/qwen2.5-coder-7b-instruct-q4_k_m.gguf"},
+            {"🗣 Qwen2.5 0.5B عام (مدير سريع)",0.68,3,"https://huggingface.co/Qwen/Qwen2.5-0.5B-Instruct-GGUF/resolve/main/qwen2.5-0.5b-instruct-q8_0.gguf"},
+            {"🗣 Qwen2.5 1.5B عام (لغة ومحادثة)",1.12,4,"https://huggingface.co/Qwen/Qwen2.5-1.5B-Instruct-GGUF/resolve/main/qwen2.5-1.5b-instruct-q4_k_m.gguf"},
+            {"🗣 Qwen2.5 3B عام (لغة أقوى)",2.1,6,"https://huggingface.co/Qwen/Qwen2.5-3B-Instruct-GGUF/resolve/main/qwen2.5-3b-instruct-q4_k_m.gguf"},
     };
 
     private void chooseModelSource(){
@@ -294,6 +305,7 @@ public class MainActivity extends AppCompatActivity {
             int threads=Math.max(2,Math.min(6,Runtime.getRuntime().availableProcessors()));
             LlamaEngine loaded=new LlamaEngine(getApplicationContext(),file.getAbsolutePath(),CONTEXT_TOKENS,threads);
             engine=loaded;
+            loadedPath=file.getAbsolutePath();
             prefs.edit().putString(PREF_MODEL_LOCAL_PATH,file.getAbsolutePath()).putString(PREF_MODEL_NAME,displayName).putString(PREF_MODEL_URI,sourceUri).putLong(PREF_MODEL_SIZE,file.length()>0?file.length():expectedSize).apply();
             runOnUiThread(()->{loadModelButton.setEnabled(true);setWorking(false,"جاهز — "+displayName);resumeInterruptedAgentTask();});
         }catch(Exception ex){
@@ -335,7 +347,7 @@ public class MainActivity extends AppCompatActivity {
             live.start("");
             try{
                 // The reply streams into the bubble token by token instead of appearing at the end.
-                GenerationResult result=engine.generate(turns,MAX_NEW_TOKENS,TEMPERATURE,TOP_K,GenerationMode.DEFAULT_CODE_MODE?LlamaEngine.FLAG_CODE_MODE:0,live::append);
+                GenerationResult result=engineForRole(ROLE_LANGUAGE).generate(turns,MAX_NEW_TOKENS,TEMPERATURE,TOP_K,GenerationMode.DEFAULT_CODE_MODE?LlamaEngine.FLAG_CODE_MODE:0,live::append);
                 live.end();
                 String answerText=cleanAssistantText(result.text);if(answerText.isEmpty())answerText="…";final String displayAnswer=answerText;
                 long assistantId=historyStore.append(ChatMessage.ROLE_ASSISTANT,displayAnswer);long assistantTime=System.currentTimeMillis();
@@ -385,6 +397,21 @@ public class MainActivity extends AppCompatActivity {
         com.google.android.material.chip.Chip tools=chip("🧰 الأدوات",false);
         tools.setOnClickListener(v->showTools());
         agentChips.addView(tools);
+        com.google.android.material.chip.Chip models=chip(prefs.getBoolean(PREF_ORCHESTRATE,false)?"🧠 الفريق ✓":"🧠 النماذج",prefs.getBoolean(PREF_ORCHESTRATE,false));
+        models.setOnClickListener(v->showModelRoles());
+        agentChips.addView(models);
+        com.google.android.material.chip.Chip learning=chip("📈 التعلّم",false);
+        learning.setOnClickListener(v->showLearning());
+        agentChips.addView(learning);
+        com.google.android.material.chip.Chip screen=chip(ScreenControlService.instance==null?"🖐 تحكم بالشاشة":"🖐 التحكم مفعّل",ScreenControlService.instance!=null);
+        screen.setOnClickListener(v->{
+            if(ScreenControlService.instance!=null){setWorking(false,"التحكم بالشاشة مفعّل");return;}
+            new AlertDialog.Builder(this).setTitle("🖐 التحكم بالشاشة")
+                    .setMessage("ليستطيع المساعد قراءة الشاشة والضغط والكتابة في التطبيقات الأخرى، فعّل «NewAl screen control» في إعدادات إمكانية الوصول.\n\nفي Android 13+ إن ظهر «إعداد مقيّد»: معلومات التطبيق ← ⋮ ← السماح بالإعدادات المقيّدة، ثم فعّله.")
+                    .setPositiveButton("فتح الإعدادات",(d,w)->startActivity(new Intent(android.provider.Settings.ACTION_ACCESSIBILITY_SETTINGS)))
+                    .setNegativeButton("لاحقاً",null).show();
+        });
+        agentChips.addView(screen);
         com.google.android.material.chip.Chip settings=chip("⚙",false);
         settings.setOnClickListener(v->showSettings());
         agentChips.addView(settings);
@@ -431,6 +458,66 @@ public class MainActivity extends AppCompatActivity {
             hint.setTextSize(13);
             examples.addView(hint);
         }
+    }
+
+    /** Assign a GGUF to each role (manager / coder / language) and turn team mode on or off. */
+    private void showModelRoles(){
+        File dir=getExternalFilesDir("models");
+        File[] ggufs=dir==null?new File[0]:dir.listFiles((d,n)->n.endsWith(".gguf"));
+        if(ggufs==null)ggufs=new File[0];
+        final File[] files=ggufs;
+        String[] roles={ROLE_MANAGER,ROLE_CODER,ROLE_LANGUAGE};
+        String[] labels=new String[roles.length+2];
+        for(int i=0;i<roles.length;i++){
+            String p=prefs.getString(PREF_ROLE+roles[i],"");
+            labels[i]=(ROLE_MANAGER.equals(roles[i])?"🧭 ":ROLE_CODER.equals(roles[i])?"💻 ":"🗣 ")+roleTitle(roles[i])+": "+(p.isEmpty()?"النموذج الأساسي":new File(p).getName());
+        }
+        boolean on=prefs.getBoolean(PREF_ORCHESTRATE,false);
+        labels[3]=(on?"✅":"⬜")+" وضع الفريق: المدير يوجّه، والمختص ينفّذ، ونموذج اللغة يجيب";
+        labels[4]=(prefs.getBoolean(PREF_LANG_SUMMARY,true)?"✅":"⬜")+" ملخص بلغتك من نموذج اللغة بعد كل برنامج";
+        new AlertDialog.Builder(this).setTitle("🧠 نماذج الفريق (تعمل بالتتابع)").setItems(labels,(d,which)->{
+            if(which==3){prefs.edit().putBoolean(PREF_ORCHESTRATE,!on).apply();buildAgentChips();showModelRoles();return;}
+            if(which==4){prefs.edit().putBoolean(PREF_LANG_SUMMARY,!prefs.getBoolean(PREF_LANG_SUMMARY,true)).apply();showModelRoles();return;}
+            String role=roles[which];
+            String[] choices=new String[files.length+2];
+            choices[0]="النموذج الأساسي";
+            for(int i=0;i<files.length;i++)choices[i+1]=files[i].getName()+String.format(java.util.Locale.US," (%.1f GB)",files[i].length()/1e9);
+            choices[files.length+1]="📥 تنزيل نموذج جديد…";
+            new AlertDialog.Builder(this).setTitle(roleTitle(role)).setItems(choices,(d2,c)->{
+                if(c==files.length+1){chooseModelSource();return;}
+                prefs.edit().putString(PREF_ROLE+role,c==0?"":files[c-1].getAbsolutePath()).apply();
+                showModelRoles();
+            }).show();
+        }).show();
+    }
+
+    /** What the agent has learned from real results, and export for fine-tuning elsewhere. */
+    private void showLearning(){
+        TextView v=new TextView(this);
+        v.setText(experience.summary()+"\nكيف يتعلم: كل مهمة تُقيَّم بنتيجة Termux الحقيقية (مكافأة). يتذكر الحلول الناجحة ويعرضها كمثال للمهام المشابهة، ويتذكر الإصلاحات التي نجحت لكل خطأ، ويختار الاستراتيجية الأعلى مكافأة لكل نوع مهمة (خوارزمية UCB).\n\nتدريب أوزان النموذج نفسه يحتاج GPU: صدّر البيانات وادرّبه مجاناً على Google Colab (Unsloth) ثم حمّل ملف GGUF الناتج هنا.");
+        v.setTextIsSelectable(true);v.setPadding(48,24,48,24);
+        android.widget.ScrollView sv=new android.widget.ScrollView(this);sv.addView(v);
+        new AlertDialog.Builder(this).setTitle("📈 التعلّم من التجربة").setView(sv)
+                .setPositiveButton("تصدير بيانات التدريب",(d,w)->exportTraining())
+                .setNegativeButton("إغلاق",null).show();
+    }
+
+    private void exportTraining(){
+        executor.execute(()->{
+            try{
+                File dir=new File(getExternalFilesDir(null),"export");
+                if(!dir.isDirectory()&&!dir.mkdirs())throw new java.io.IOException("export folder");
+                File out=new File(dir,"newal_training.jsonl");
+                int n=experience.exportTrainingData(out,AgentLoop.SYSTEM_PROMPT);
+                Uri uri=androidx.core.content.FileProvider.getUriForFile(this,getPackageName()+".files",out);
+                Intent send=new Intent(Intent.ACTION_SEND).setType("application/jsonl").putExtra(Intent.EXTRA_STREAM,uri)
+                        .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+                runOnUiThread(()->{
+                    setWorking(false,"صُدّر "+n+" مثال ناجح للتدريب");
+                    if(n>0)startActivity(Intent.createChooser(send,"بيانات التدريب"));
+                });
+            }catch(Exception e){runOnUiThread(()->setWorking(false,"تعذر التصدير: "+safeMessage(e)));}
+        });
     }
 
     private void showSkills(){
@@ -556,8 +643,10 @@ public class MainActivity extends AppCompatActivity {
     /** One-time setup: Termux installed, permission granted, agent reachable. Afterwards it is automatic. */
     private void ensureTermuxReady(){
         if(!TermuxLauncher.isInstalled(this)){
-            new AlertDialog.Builder(this).setTitle("Termux غير مثبت").setMessage("ثبّت Termux من F-Droid أو GitHub (وليس Google Play) ثم فعّل الوضع مرة أخرى.").setPositiveButton("حسناً",null).show();
-            setAgentMode(false);return;
+            new AlertDialog.Builder(this).setTitle("Termux غير مثبت")
+                    .setMessage("مساعد الهاتف (فتح التطبيقات، المنبه، الإعدادات…) يعمل الآن.\nلتشغيل البرامج التي يكتبها ثبّت Termux من F-Droid أو GitHub (وليس Google Play).")
+                    .setPositiveButton("حسناً",null).show();
+            return;
         }
         if(!TermuxLauncher.hasPermission(this)){requestPermissions(new String[]{TermuxLauncher.PERMISSION},REQ_TERMUX);return;}
         setWorking(true,"جاري الاتصال بـTermux…");
@@ -577,7 +666,7 @@ public class MainActivity extends AppCompatActivity {
         super.onRequestPermissionsResult(requestCode,permissions,grantResults);
         if(requestCode!=REQ_TERMUX)return;
         if(grantResults.length>0&&grantResults[0]==android.content.pm.PackageManager.PERMISSION_GRANTED)ensureTermuxReady();
-        else{setAgentMode(false);setWorking(false,"لم يُمنح إذن تشغيل الأوامر في Termux");}
+        else setWorking(false,"بدون إذن Termux: مساعد الهاتف يعمل، وتشغيل البرامج معطّل");
     }
 
     private void showTermuxSetup(){
@@ -595,7 +684,7 @@ public class MainActivity extends AppCompatActivity {
                     if(open!=null)startActivity(open);
                 })
                 .setNeutralButton("أعد المحاولة",(d,w)->ensureTermuxReady())
-                .setNegativeButton("إلغاء",(d,w)->setAgentMode(false))
+                .setNegativeButton("لاحقاً",null)
                 .show();
     }
 
@@ -682,7 +771,57 @@ public class MainActivity extends AppCompatActivity {
         AgentProfile agent=parsed.agent!=null?parsed.agent:selectedAgent;
         Skills.Skill skill=parsed.skill!=null?parsed.skill:selectedSkill;
         String text=parsed.text.isEmpty()?request:parsed.text;
-        runAgentTask(resume?null:request,loop->resume?loop.resume():loop.run(text,agent,skill));
+        boolean orchestrate=!resume&&parsed.agent==null&&agent==AgentProfile.AUTO&&prefs.getBoolean(PREF_ORCHESTRATE,false);
+        runAgentTask(resume?null:request,loop->{
+            if(resume)return loop.resume();
+            if(!orchestrate)return loop.run(text,agent,skill);
+            // Manager → specialist → language model, one model at a time.
+            Orchestrator.Route route=managerRoute(text);
+            if(route.kind==Orchestrator.Kind.CHAT)return chatAnswer(text);
+            if(!route.plan.isEmpty())loop.setPlan(route.planText());
+            AgentLoop.Outcome o=loop.run(text,route.agent(),skill);
+            if(o.state==AgentLoop.State.SUCCESS&&route.kind==Orchestrator.Kind.CODE&&prefs.getBoolean(PREF_LANG_SUMMARY,true)){
+                String summary=languageSummary(text,o.message);
+                if(!summary.isEmpty())return new AgentLoop.Outcome(o.state,summary+"\n\n"+o.message,o.interactiveCommand);
+            }
+            return o;
+        });
+    }
+
+    private Orchestrator.Route managerRoute(String text){
+        List<ChatMessage> turns=new java.util.ArrayList<>();
+        turns.add(new ChatMessage(-1,ChatMessage.ROLE_SYSTEM,Orchestrator.MANAGER_PROMPT,0));
+        turns.add(new ChatMessage(-1,ChatMessage.ROLE_USER,text,0));
+        live.start("🧭 ",ChatMessage.ROLE_CODE);
+        try{
+            GenerationResult r=engineForRole(ROLE_MANAGER).generate(turns,120,0f,1,LlamaEngine.FLAG_RAW,Orchestrator.ROUTE_GRAMMAR,live::append);
+            return Orchestrator.parse(r.text);
+        }catch(Exception e){
+            return Orchestrator.parse("ROUTE: code");
+        }
+    }
+
+    private AgentLoop.Outcome chatAnswer(String text){
+        live.start("",ChatMessage.ROLE_ASSISTANT);
+        List<ChatMessage> history=historyStore.loadAll();
+        List<ChatMessage> turns=memoryManager.buildTurns(history);
+        GenerationResult r=engineForRole(ROLE_LANGUAGE).generate(turns,MAX_NEW_TOKENS*2,TEMPERATURE,TOP_K,0,live::append);
+        live.end();
+        String answer=cleanAssistantText(r.text);
+        return new AgentLoop.Outcome(AgentLoop.State.SUCCESS,answer.isEmpty()?"…":answer,null);
+    }
+
+    private String languageSummary(String request,String outcome){
+        try{
+            ProjectWorkspace ws=currentWorkspace();
+            List<String> files=new java.util.ArrayList<>(ws.completeShas().keySet());
+            List<ChatMessage> turns=new java.util.ArrayList<>();
+            turns.add(new ChatMessage(-1,ChatMessage.ROLE_USER,Orchestrator.summaryPrompt(request,outcome,files),0));
+            live.start("",ChatMessage.ROLE_ASSISTANT);
+            GenerationResult r=engineForRole(ROLE_LANGUAGE).generate(turns,200,0.3f,TOP_K,0,live::append);
+            live.end();
+            return cleanAssistantText(r.text);
+        }catch(Exception e){return "";}
     }
 
     /** Runs one agent action (new task, resume or rerun) in the background with live UI and notifications. */
@@ -730,7 +869,12 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private AgentLoop newLoop(ProjectWorkspace ws,TermuxBridge b){
-        AgentLoop loop=new AgentLoop(agentModel(),b,ws,new UiAgentListener());
+        AgentLoop[] self=new AgentLoop[1];
+        AgentLoop loop=new AgentLoop(roleModel(()->self[0]==null?ROLE_CODER:roleFor(self[0].agent()),true),b,ws,new UiAgentListener());
+        self[0]=loop;
+        loop.planner=roleModel(()->ROLE_MANAGER,true);
+        loop.localTools=device;
+        loop.experience=experience;
         loop.maxAttempts=prefs.getInt(PREF_MAX_ATTEMPTS,6);
         loop.execTimeoutMs=prefs.getInt(PREF_TIMEOUT_S,60)*1000L;
         return loop;
@@ -770,18 +914,52 @@ public class MainActivity extends AppCompatActivity {
         }catch(Exception ignored){}
     }
 
-    private AgentLoop.Model agentModel(){
-        final LlamaEngine e=engine;
+    /**
+     * The model of a role, loaded on demand. Only one model is in memory: switching frees the
+     * current one first, so the team runs one after another (sequentially), never in parallel.
+     * Called on the worker thread.
+     */
+    private LlamaEngine engineForRole(String role){
+        String path=prefs.getString(PREF_ROLE+role,"");
+        if(path.isEmpty()||!new File(path).isFile())path=prefs.getString(PREF_MODEL_LOCAL_PATH,null);
+        LlamaEngine current=engine;
+        if(path==null||(current!=null&&path.equals(loadedPath)))return current;
+        String name=new File(path).getName();
+        runOnUiThread(()->setWorking(true,"🔄 تبديل النموذج ("+roleTitle(role)+"): "+name));
+        long t=System.nanoTime();
+        engine=null;
+        if(current!=null)current.close();
+        int threads=Math.max(2,Math.min(6,Runtime.getRuntime().availableProcessors()));
+        LlamaEngine next=new LlamaEngine(getApplicationContext(),path,CONTEXT_TOKENS,threads);
+        engine=next;
+        loadedPath=path;
+        long ms=(System.nanoTime()-t)/1_000_000;
+        runOnUiThread(()->setWorking(true,"🧠 "+roleTitle(role)+": "+name+" • تحميل "+ms+"ms"));
+        return next;
+    }
+
+    private static String roleTitle(String role){
+        return ROLE_MANAGER.equals(role)?"المدير":ROLE_CODER.equals(role)?"المبرمج":"اللغة";
+    }
+
+    private static String roleFor(AgentProfile a){
+        return a==AgentProfile.AUTOMATOR||a==AgentProfile.EXPLAINER?ROLE_MANAGER:ROLE_CODER;
+    }
+
+    /** A model whose role (and so its GGUF) is decided at call time. */
+    private AgentLoop.Model roleModel(java.util.function.Supplier<String> role,boolean codeGrammar){
         return new AgentLoop.Model(){
-            // Greedy decoding for deterministic code; generate until the answer ends or the context is full.
-            // The grammar only allows FILE/EDIT/STDIN/RUN blocks, so the output always parses.
+            // Greedy decoding for deterministic output; generate until the answer ends or the context is full.
             @Override public GenerationResult generate(List<ChatMessage> turns,TextListener l){
-                return e.generate(turns,0,0f,1,LlamaEngine.FLAG_RAW,prefs.getBoolean(PREF_GRAMMAR,true)?AgentLoop.OUTPUT_GRAMMAR:null,l);
+                String grammar=codeGrammar&&prefs.getBoolean(PREF_GRAMMAR,true)?AgentLoop.OUTPUT_GRAMMAR:null;
+                return engineForRole(role.get()).generate(turns,0,0f,1,LlamaEngine.FLAG_RAW,grammar,l);
             }
-            @Override public void cancel(){e.cancel();}
-            @Override public int contextTokens(){return e.contextTokens();}
+            @Override public void cancel(){LlamaEngine e=engine;if(e!=null)e.cancel();}
+            @Override public int contextTokens(){LlamaEngine e=engine;return e==null?CONTEXT_TOKENS:e.contextTokens();}
         };
     }
+
+    private AgentLoop.Model agentModel(){return roleModel(()->ROLE_CODER,true);}
 
     private final class UiAgentListener implements AgentLoop.Listener{
         @Override public void onState(AgentLoop.State state,String detail){

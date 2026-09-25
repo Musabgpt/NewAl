@@ -1,1 +1,5 @@
-<resources><string name="app_name">H33 محادثة GGUF محلية</string></resources>
+<resources>
+    <string name="app_name">H33 محادثة GGUF محلية</string>
+    <string name="screen_control_label">NewAl screen control</string>
+    <string name="screen_control_description">Lets the NewAl assistant read the screen, tap, type, scroll and press system buttons when you ask it to. It acts only on your requests and sends nothing off the phone.</string>
+</resources>
