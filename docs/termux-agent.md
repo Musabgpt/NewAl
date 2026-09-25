@@ -84,3 +84,31 @@ Long-press the 🛠 Termux button to see the installed tools.
   spending a model attempt.
 - **Background running:** a foreground service with a progress notification keeps a task running while you use
   other apps.
+
+## Agents and skills
+
+Agents (chips in agent mode, or a `/command` at the start of the message). All of them share the same model and
+loop:
+
+| Agent | Command | What it does |
+|---|---|---|
+| 🤖 Auto | | Picks one from the request |
+| 💻 Coder | `/code` | Writes and runs code |
+| 🏗 Architect | `/plan` | Plans the files first, then codes them |
+| 🧪 Tester | `/test` | Writes and runs tests |
+| 🔧 Fixer | `/fix` | Takes pasted code and an error, and fixes it |
+| 📖 Explainer | `/explain` | Answers only, reading project files with tools |
+| 📱 Phone | `/auto-phone` | Termux:API tools and scripts |
+
+Skills are focused recipes added to the prompt: `/interactive`, `/scraper`, `/api`, `/data`, `/sqlite`, `/bash`,
+`/files`, `/tests`, `/phone`, `/algo`, `/telegram`, `/cli`. They are also picked automatically by keywords. You
+can add your own as `~/newal/skills/<id>.md` in Termux, with the first line `# Title | keyword, keyword`.
+
+Built-in tools that need nothing extra: `list_files`, `read_file`, `search`, `http_get`, `now`, `system_info`,
+`calc`.
+
+A result card offers ▶ run again, 📂 files, ⌨ open in Termux and ↩ undo (reverts the last attempt). ⚙ Settings
+has: max attempts, timeout, output grammar, and an automatic tester pass after success.
+
+Models: 📂 model button → download Qwen2.5-Coder 0.5B / 1.5B / 3B / 7B GGUF from Hugging Face (free). Models too
+large for the phone's RAM are marked.

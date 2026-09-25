@@ -103,7 +103,7 @@ public class MainActivity extends AppCompatActivity {
         installKeyboardInsetsFix();
 
         pickModelLauncher=registerForActivityResult(new ActivityResultContracts.OpenDocument(), this::onModelPicked);
-        loadModelButton.setOnClickListener(v->pickModelLauncher.launch(new String[]{"*/*"}));
+        loadModelButton.setOnClickListener(v->chooseModelSource());
         sendButton.setOnClickListener(v->onSendOrStopClicked());
         clearButton.setOnClickListener(v->clearChat());
         agentButton.setOnClickListener(v->setAgentMode(!agentMode));
@@ -139,6 +139,76 @@ public class MainActivity extends AppCompatActivity {
             return insets;
         });
         ViewCompat.requestApplyInsets(rootView);
+    }
+
+    // ------------------------------------------------------------------ model catalog / download
+
+    /** Free GGUF models from Hugging Face: name, size in GB, minimum phone RAM in GB, URL. */
+    private static final Object[][] MODEL_CATALOG={
+            {"Qwen2.5-Coder 0.5B (Q8) — الأسرع",0.68,3,"https://huggingface.co/Qwen/Qwen2.5-Coder-0.5B-Instruct-GGUF/resolve/main/qwen2.5-coder-0.5b-instruct-q8_0.gguf"},
+            {"Qwen2.5-Coder 1.5B (Q4_K_M) — متوازن",1.12,4,"https://huggingface.co/Qwen/Qwen2.5-Coder-1.5B-Instruct-GGUF/resolve/main/qwen2.5-coder-1.5b-instruct-q4_k_m.gguf"},
+            {"Qwen2.5-Coder 3B (Q4_K_M) — أدق بكثير",2.1,6,"https://huggingface.co/Qwen/Qwen2.5-Coder-3B-Instruct-GGUF/resolve/main/qwen2.5-coder-3b-instruct-q4_k_m.gguf"},
+            {"Qwen2.5-Coder 7B (Q4_K_M) — الأقوى وبطيء",4.7,10,"https://huggingface.co/Qwen/Qwen2.5-Coder-7B-Instruct-GGUF/resolve/main/qwen2.5-coder-7b-instruct-q4_k_m.gguf"},
+    };
+
+    private void chooseModelSource(){
+        android.app.ActivityManager am=(android.app.ActivityManager)getSystemService(ACTIVITY_SERVICE);
+        android.app.ActivityManager.MemoryInfo mi=new android.app.ActivityManager.MemoryInfo();
+        if(am!=null)am.getMemoryInfo(mi);
+        double ramGb=mi.totalMem/1e9;
+        String[] items=new String[MODEL_CATALOG.length+1];
+        items[0]="📂 اختيار ملف GGUF من الهاتف";
+        for(int i=0;i<MODEL_CATALOG.length;i++){
+            Object[] m=MODEL_CATALOG[i];
+            boolean fits=ramGb<=0||ramGb>=((Number)m[2]).doubleValue();
+            items[i+1]=(fits?"📥 ":"⚠️ ")+m[0]+String.format(java.util.Locale.US," • %.1f GB",((Number)m[1]).doubleValue())+(fits?"":" (يحتاج RAM أكبر)");
+        }
+        new AlertDialog.Builder(this).setTitle(String.format(java.util.Locale.US,"النموذج (ذاكرة الهاتف %.1f GB)",ramGb)).setItems(items,(d,which)->{
+            if(which==0)pickModelLauncher.launch(new String[]{"*/*"});
+            else downloadModel((String)MODEL_CATALOG[which-1][0],(String)MODEL_CATALOG[which-1][3]);
+        }).show();
+    }
+
+    /** Downloads with Android's DownloadManager (resumes, survives app restarts), then loads it. */
+    private void downloadModel(String title,String url){
+        File dir=getExternalFilesDir("models");
+        if(dir==null){setWorking(false,"تخزين التطبيق غير متاح");return;}
+        String fileName=url.substring(url.lastIndexOf('/')+1);
+        File target=new File(dir,fileName);
+        if(isValidGgufFile(target)){loadModelFromLocalFile(target,fileName);return;}
+        android.app.DownloadManager dm=(android.app.DownloadManager)getSystemService(DOWNLOAD_SERVICE);
+        if(dm==null)return;
+        target.delete();
+        android.app.DownloadManager.Request r=new android.app.DownloadManager.Request(Uri.parse(url))
+                .setTitle(title).setDescription("NewAl model")
+                .setNotificationVisibility(android.app.DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED)
+                .setAllowedOverMetered(true).setAllowedOverRoaming(false)
+                .setDestinationInExternalFilesDir(this,"models",fileName);
+        long id=dm.enqueue(r);
+        loadModelButton.setEnabled(false);
+        pollDownload(dm,id,target,fileName);
+    }
+
+    private void pollDownload(android.app.DownloadManager dm,long id,File target,String name){
+        try(android.database.Cursor c=dm.query(new android.app.DownloadManager.Query().setFilterById(id))){
+            if(c==null||!c.moveToFirst()){loadModelButton.setEnabled(true);setWorking(false,"أُلغي التنزيل");return;}
+            int status=c.getInt(c.getColumnIndexOrThrow(android.app.DownloadManager.COLUMN_STATUS));
+            long done=c.getLong(c.getColumnIndexOrThrow(android.app.DownloadManager.COLUMN_BYTES_DOWNLOADED_SO_FAR));
+            long total=c.getLong(c.getColumnIndexOrThrow(android.app.DownloadManager.COLUMN_TOTAL_SIZE_BYTES));
+            if(status==android.app.DownloadManager.STATUS_SUCCESSFUL){
+                if(isValidGgufFile(target))loadModelFromLocalFile(target,name);
+                else{loadModelButton.setEnabled(true);setWorking(false,"الملف المنزّل ليس GGUF صالحاً");}
+                return;
+            }
+            if(status==android.app.DownloadManager.STATUS_FAILED){
+                loadModelButton.setEnabled(true);
+                setWorking(false,"فشل التنزيل (رمز "+c.getInt(c.getColumnIndexOrThrow(android.app.DownloadManager.COLUMN_REASON))+")");
+                return;
+            }
+            setWorking(true,total>0?String.format(java.util.Locale.US,"📥 تنزيل %s… %d%% (%.0f / %.0f MB)",name,done*100/total,done/1e6,total/1e6)
+                    :"📥 تنزيل "+name+"…");
+        }
+        ui.postDelayed(()->pollDownload(dm,id,target,name),1000);
     }
 
     private void restoreSavedModel(){
