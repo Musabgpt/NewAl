@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto"
+    android:layout_width="match_parent" android:layout_height="wrap_content" android:padding="4dp">
+    <LinearLayout android:layout_width="match_parent" android:layout_height="wrap_content"
+        android:orientation="vertical" android:background="@drawable/bubble_result" android:padding="12dp">
+        <TextView android:id="@+id/messageText" android:layout_width="match_parent" android:layout_height="wrap_content"
+            android:textColor="@color/text_primary" android:textSize="15sp" android:textIsSelectable="true"/>
+        <HorizontalScrollView android:layout_width="match_parent" android:layout_height="wrap_content"
+            android:layout_marginTop="8dp" android:scrollbars="none">
+            <LinearLayout android:layout_width="wrap_content" android:layout_height="wrap_content" android:orientation="horizontal">
+                <com.google.android.material.button.MaterialButton android:id="@+id/actionRun"
+                    style="@style/Widget.MaterialComponents.Button.OutlinedButton" android:layout_width="wrap_content"
+                    android:layout_height="wrap_content" android:layout_marginEnd="6dp" android:text="▶ تشغيل"
+                    android:textAllCaps="false" android:textColor="@color/text_primary" app:strokeColor="@color/accent"/>
+                <com.google.android.material.button.MaterialButton android:id="@+id/actionFiles"
+                    style="@style/Widget.MaterialComponents.Button.OutlinedButton" android:layout_width="wrap_content"
+                    android:layout_height="wrap_content" android:layout_marginEnd="6dp" android:text="📂 الملفات"
+                    android:textAllCaps="false" android:textColor="@color/text_primary" app:strokeColor="@color/accent"/>
+                <com.google.android.material.button.MaterialButton android:id="@+id/actionTermux"
+                    style="@style/Widget.MaterialComponents.Button.OutlinedButton" android:layout_width="wrap_content"
+                    android:layout_height="wrap_content" android:layout_marginEnd="6dp" android:text="⌨ Termux"
+                    android:textAllCaps="false" android:textColor="@color/text_primary" app:strokeColor="@color/accent"/>
+                <com.google.android.material.button.MaterialButton android:id="@+id/actionUndo"
+                    style="@style/Widget.MaterialComponents.Button.OutlinedButton" android:layout_width="wrap_content"
+                    android:layout_height="wrap_content" android:text="↩ تراجع"
+                    android:textAllCaps="false" android:textColor="@color/text_primary" app:strokeColor="@color/accent"/>
+            </LinearLayout>
+        </HorizontalScrollView>
+    </LinearLayout>
+</LinearLayout>

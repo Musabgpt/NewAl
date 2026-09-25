@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<LinearLayout xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent" android:layout_height="wrap_content"
+    android:orientation="vertical" android:padding="4dp" android:layoutDirection="ltr">
+    <TextView android:id="@+id/label" android:layout_width="wrap_content" android:layout_height="wrap_content"
+        android:text="⌨ Termux" android:textColor="#3FB950" android:textSize="11sp" android:paddingStart="6dp"/>
+    <HorizontalScrollView android:layout_width="match_parent" android:layout_height="wrap_content"
+        android:background="@drawable/bubble_terminal" android:scrollbars="none">
+        <TextView android:id="@+id/messageText" android:layout_width="wrap_content" android:layout_height="wrap_content"
+            android:padding="12dp" android:textColor="#7EE787" android:textSize="12sp" android:typeface="monospace"
+            android:textDirection="ltr" android:textIsSelectable="true"/>
+    </HorizontalScrollView>
+</LinearLayout>

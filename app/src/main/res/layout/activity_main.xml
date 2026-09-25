@@ -66,13 +66,49 @@
             android:padding="8dp"/>
     </LinearLayout>
 
-    <androidx.recyclerview.widget.RecyclerView
-        android:id="@+id/chatList"
+    <FrameLayout
         android:layout_width="match_parent"
         android:layout_height="0dp"
-        android:layout_weight="1"
-        android:padding="8dp"
-        android:clipToPadding="false"/>
+        android:layout_weight="1">
+
+        <androidx.recyclerview.widget.RecyclerView
+            android:id="@+id/chatList"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
+            android:padding="8dp"
+            android:clipToPadding="false"/>
+
+        <!-- Shown while the chat is empty: what the app can do, with tappable examples. -->
+        <ScrollView
+            android:id="@+id/emptyView"
+            android:layout_width="match_parent"
+            android:layout_height="match_parent"
+            android:visibility="gone">
+            <LinearLayout
+                android:id="@+id/examples"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:orientation="vertical"
+                android:padding="20dp"/>
+        </ScrollView>
+    </FrameLayout>
+
+    <HorizontalScrollView
+        android:id="@+id/agentBar"
+        android:layout_width="match_parent"
+        android:layout_height="wrap_content"
+        android:background="@color/card"
+        android:scrollbars="none"
+        android:visibility="gone">
+        <com.google.android.material.chip.ChipGroup
+            android:id="@+id/agentChips"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:paddingStart="8dp"
+            android:paddingEnd="8dp"
+            app:singleLine="true"
+            app:chipSpacingHorizontal="6dp"/>
+    </HorizontalScrollView>
 
     <LinearLayout
         android:id="@+id/inputBar"

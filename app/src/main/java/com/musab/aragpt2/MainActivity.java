@@ -38,7 +38,8 @@ import java.util.concurrent.TimeUnit;
 
 public class MainActivity extends AppCompatActivity {
     private static final String PREFS="h33_prefs", PREF_MODEL_URI="model_uri", PREF_MODEL_NAME="model_name", PREF_MODEL_LOCAL_PATH="model_local_path", PREF_MODEL_SIZE="model_local_size";
-    private static final String PREF_AGENT_MODE="agent_mode", PREF_AGENT_TOKEN="agent_token";
+    private static final String PREF_AGENT_MODE="agent_mode", PREF_AGENT_TOKEN="agent_token", PREF_AGENT_PROFILE="agent_profile",
+            PREF_MAX_ATTEMPTS="max_attempts", PREF_TIMEOUT_S="exec_timeout_s", PREF_GRAMMAR="grammar", PREF_AUTO_TEST="auto_test";
     private static final int CONTEXT_TOKENS=4096, MAX_NEW_TOKENS=256, TOP_K=40, AGENT_PORT=47811, REQ_TERMUX=41, REQ_NOTIFY=42;
     private static final float TEMPERATURE=0.70f;
 
@@ -49,6 +50,11 @@ public class MainActivity extends AppCompatActivity {
     private volatile AgentLoop agentLoop;
     private ProjectWorkspace workspace;
     private boolean agentMode;
+    private AgentProfile selectedAgent=AgentProfile.AUTO;
+    private Skills.Skill selectedSkill;
+    private View agentBar,emptyView;
+    private com.google.android.material.chip.ChipGroup agentChips;
+    private android.widget.LinearLayout examples;
     private volatile LlamaEngine engine;
     private volatile boolean generating=false;
     private ChatHistoryStore historyStore;
@@ -79,8 +85,17 @@ public class MainActivity extends AppCompatActivity {
         sendButton=findViewById(R.id.sendButton);
         clearButton=findViewById(R.id.clearButton);
         agentButton=findViewById(R.id.agentButton);
+        agentBar=findViewById(R.id.agentBar);
+        emptyView=findViewById(R.id.emptyView);
+        agentChips=findViewById(R.id.agentChips);
+        examples=findViewById(R.id.examples);
 
         adapter=new ChatAdapter();
+        adapter.setActions(new ResultActions());
+        adapter.registerAdapterDataObserver(new RecyclerView.AdapterDataObserver(){
+            @Override public void onChanged(){updateEmptyState();}
+            @Override public void onItemRangeInserted(int a,int b){updateEmptyState();}
+        });
         chatList.setLayoutManager(new LinearLayoutManager(this));
         chatList.setAdapter(adapter);
         adapter.setAll(historyStore.loadAll());
@@ -94,7 +109,10 @@ public class MainActivity extends AppCompatActivity {
         agentButton.setOnClickListener(v->setAgentMode(!agentMode));
         agentButton.setOnLongClickListener(v->{showTools();return true;});
         agentMode=prefs.getBoolean(PREF_AGENT_MODE,false);
+        AgentProfile saved=AgentProfile.byId(prefs.getString(PREF_AGENT_PROFILE,"auto"));
+        if(saved!=null)selectedAgent=saved;
         renderAgentButton();
+        updateEmptyState();
         restoreSavedModel();
         // While a task runs, Back sends the app to the background instead of closing it.
         getOnBackPressedDispatcher().addCallback(this,new androidx.activity.OnBackPressedCallback(true){
@@ -267,7 +285,203 @@ public class MainActivity extends AppCompatActivity {
         else setWorking(false,"وضع المحادثة العادية");
     }
 
-    private void renderAgentButton(){agentButton.setText(agentMode?"🛠 Termux ✓":"🛠 Termux");inputBox.setHint(agentMode?"اطلب برنامجاً ليُكتب ويُشغَّل في Termux…":"اكتب رسالتك…");}
+    private void renderAgentButton(){
+        agentButton.setText(agentMode?"🛠 Termux ✓":"🛠 Termux");
+        inputBox.setHint(agentMode?"اطلب برنامجاً… أو /test /fix /explain":"اكتب رسالتك…");
+        agentBar.setVisibility(agentMode?View.VISIBLE:View.GONE);
+        if(agentMode)buildAgentChips();
+        updateEmptyState();
+    }
+
+    // ------------------------------------------------------------------ agent bar, welcome, dialogs
+
+    private void buildAgentChips(){
+        agentChips.removeAllViews();
+        for(AgentProfile a:AgentProfile.values()){
+            com.google.android.material.chip.Chip c=chip(a.icon+" "+a.title,a==selectedAgent);
+            c.setOnClickListener(v->{
+                selectedAgent=a;
+                prefs.edit().putString(PREF_AGENT_PROFILE,a.id).apply();
+                buildAgentChips();
+            });
+            agentChips.addView(c);
+        }
+        com.google.android.material.chip.Chip sk=chip(selectedSkill==null?"✨ مهارة":"✨ "+selectedSkill.title,selectedSkill!=null);
+        sk.setOnClickListener(v->showSkills());
+        agentChips.addView(sk);
+        com.google.android.material.chip.Chip files=chip("📂 الملفات",false);
+        files.setOnClickListener(v->showFiles());
+        agentChips.addView(files);
+        com.google.android.material.chip.Chip tools=chip("🧰 الأدوات",false);
+        tools.setOnClickListener(v->showTools());
+        agentChips.addView(tools);
+        com.google.android.material.chip.Chip settings=chip("⚙",false);
+        settings.setOnClickListener(v->showSettings());
+        agentChips.addView(settings);
+    }
+
+    private com.google.android.material.chip.Chip chip(String text,boolean selected){
+        com.google.android.material.chip.Chip c=new com.google.android.material.chip.Chip(this);
+        c.setText(text);
+        c.setTextColor(android.graphics.Color.WHITE);
+        c.setChipBackgroundColor(android.content.res.ColorStateList.valueOf(android.graphics.Color.parseColor(selected?"#7C3AED":"#22304F")));
+        c.setChipStrokeWidth(0f);
+        return c;
+    }
+
+    private void updateEmptyState(){
+        boolean empty=adapter.getItemCount()==0;
+        emptyView.setVisibility(empty?View.VISIBLE:View.GONE);
+        if(!empty)return;
+        examples.removeAllViews();
+        TextView title=new TextView(this);
+        title.setText(agentMode?"🛠 وضع البرمجة مع Termux\nاكتب طلبك وسيُكتب الكود ويُشغَّل ويُصلَح تلقائياً.":"💬 محادثة محلية بالكامل على هاتفك");
+        title.setTextColor(getResources().getColor(R.color.text_primary,getTheme()));
+        title.setTextSize(17);
+        title.setPadding(0,0,0,24);
+        examples.addView(title);
+        String[] prompts=agentMode?new String[]{
+                "اكتب آلة حاسبة بسيطة بلغة Python",
+                "اكتب برنامجاً يطبع أول 20 عدداً أولياً مع اختبارات",
+                "/data اكتب برنامجاً يحسب متوسط الدرجات من ملف CSV",
+                "/sqlite اصنع دفتر ملاحظات بقاعدة بيانات",
+                "كم نسبة البطارية؟",
+                "/explain كيف يعمل main.py؟"}
+                :new String[]{"مرحباً! عرّفني بنفسك","اشرح لي الفرق بين list و tuple في Python","اكتب قصيدة قصيرة عن البحر"};
+        for(String p:prompts){
+            com.google.android.material.button.MaterialButton b=new com.google.android.material.button.MaterialButton(this,null,com.google.android.material.R.attr.materialButtonOutlinedStyle);
+            b.setText(p);b.setAllCaps(false);b.setTextColor(android.graphics.Color.WHITE);
+            b.setOnClickListener(v->{inputBox.setText(p);inputBox.setSelection(p.length());});
+            examples.addView(b);
+        }
+        if(agentMode){
+            TextView hint=new TextView(this);
+            hint.setText("\nأوامر سريعة: /code /plan /test /fix /explain /auto-phone\nومهارات: /interactive /scraper /api /data /sqlite /bash /files /algo …");
+            hint.setTextColor(getResources().getColor(R.color.text_secondary,getTheme()));
+            hint.setTextSize(13);
+            examples.addView(hint);
+        }
+    }
+
+    private void showSkills(){
+        List<Skills.Skill> all=Skills.all();
+        String[] names=new String[all.size()+1];
+        names[0]="بدون مهارة (اختيار تلقائي)";
+        for(int i=0;i<all.size();i++)names[i+1]=all.get(i).icon+" "+all.get(i).title+"   /"+all.get(i).id;
+        new AlertDialog.Builder(this).setTitle("✨ المهارات").setItems(names,(d,which)->{
+            selectedSkill=which==0?null:all.get(which-1);
+            buildAgentChips();
+        }).show();
+    }
+
+    private void showFiles(){
+        executor.execute(()->{
+            ProjectWorkspace ws;
+            try{ws=currentWorkspace();}catch(Exception e){return;}
+            List<ProjectWorkspace.Entry> entries=ws.entries();
+            runOnUiThread(()->{
+                if(entries.isEmpty()){setWorking(false,"لا توجد ملفات في المشروع بعد");return;}
+                String[] names=new String[entries.size()+1];
+                for(int i=0;i<entries.size();i++){ProjectWorkspace.Entry e=entries.get(i);names[i]="📄 "+e.path+"  ("+e.size+" B"+(e.status==ProjectWorkspace.FileStatus.COMPLETE?"":", "+e.status)+")";}
+                names[entries.size()]="⌨ آخر مخرجات التشغيل";
+                new AlertDialog.Builder(this).setTitle("📂 ~/newal/projects/"+ws.id).setItems(names,(d,which)->{
+                    if(which<entries.size())showFile(ws,entries.get(which).path);
+                    else showLastRun(ws);
+                }).show();
+            });
+        });
+    }
+
+    private void showFile(ProjectWorkspace ws,String path){
+        String content;
+        try{content=ws.read(path);}catch(Exception e){content="تعذرت القراءة: "+safeMessage(e);}
+        showCode(path,content,true);
+    }
+
+    private void showLastRun(ProjectWorkspace ws){
+        StringBuilder b=new StringBuilder();
+        for(String stream:new String[]{"exec.stdout","exec.stderr"}){
+            File f=ws.runLog(ws.attempt,stream);
+            if(!f.isFile())continue;
+            try{b.append("── ").append(stream).append(" ──\n").append(AgentLoop.tail(new String(ProjectWorkspace.readBytes(f),java.nio.charset.StandardCharsets.UTF_8),20000)).append('\n');}catch(Exception ignored){}
+        }
+        showCode("مخرجات المحاولة "+ws.attempt,b.length()==0?"لا توجد مخرجات محفوظة":b.toString(),false);
+    }
+
+    private void showCode(String title,String content,boolean highlight){
+        TextView v=new TextView(this);
+        v.setText(highlight?ChatAdapter.highlight(content):content);
+        v.setTypeface(android.graphics.Typeface.MONOSPACE);v.setTextSize(12);v.setTextIsSelectable(true);
+        v.setTextColor(android.graphics.Color.parseColor("#E6EDF3"));v.setBackgroundColor(android.graphics.Color.parseColor("#0D1117"));
+        v.setTextDirection(View.TEXT_DIRECTION_LTR);v.setPadding(32,24,32,24);
+        android.widget.HorizontalScrollView h=new android.widget.HorizontalScrollView(this);h.addView(v);
+        android.widget.ScrollView sv=new android.widget.ScrollView(this);sv.addView(h);
+        new AlertDialog.Builder(this).setTitle(title).setView(sv)
+                .setPositiveButton("نسخ",(d,w)->copy(content))
+                .setNegativeButton("إغلاق",null).show();
+    }
+
+    private void showSettings(){
+        android.widget.LinearLayout box=new android.widget.LinearLayout(this);
+        box.setOrientation(android.widget.LinearLayout.VERTICAL);box.setPadding(48,16,48,0);
+        EditText attempts=numberField(box,"أقصى عدد محاولات إصلاح",prefs.getInt(PREF_MAX_ATTEMPTS,6));
+        EditText timeout=numberField(box,"مهلة تشغيل البرنامج (ثوانٍ)",prefs.getInt(PREF_TIMEOUT_S,60));
+        android.widget.CheckBox grammar=new android.widget.CheckBox(this);
+        grammar.setText("إجبار صيغة الإخراج (أدق للنماذج الصغيرة)");grammar.setChecked(prefs.getBoolean(PREF_GRAMMAR,true));box.addView(grammar);
+        android.widget.CheckBox autoTest=new android.widget.CheckBox(this);
+        autoTest.setText("اختبارات تلقائية بعد نجاح البرنامج");autoTest.setChecked(prefs.getBoolean(PREF_AUTO_TEST,false));box.addView(autoTest);
+        new AlertDialog.Builder(this).setTitle("⚙ الإعدادات").setView(box).setPositiveButton("حفظ",(d,w)->{
+            prefs.edit().putInt(PREF_MAX_ATTEMPTS,clamp(attempts,1,20,6)).putInt(PREF_TIMEOUT_S,clamp(timeout,5,1800,60))
+                    .putBoolean(PREF_GRAMMAR,grammar.isChecked()).putBoolean(PREF_AUTO_TEST,autoTest.isChecked()).apply();
+            setWorking(false,"تم حفظ الإعدادات");
+        }).setNegativeButton("إلغاء",null).show();
+    }
+
+    private EditText numberField(android.widget.LinearLayout box,String label,int value){
+        TextView l=new TextView(this);l.setText(label);box.addView(l);
+        EditText e=new EditText(this);e.setInputType(android.text.InputType.TYPE_CLASS_NUMBER);e.setText(String.valueOf(value));box.addView(e);
+        return e;
+    }
+
+    private static int clamp(EditText e,int min,int max,int def){
+        try{return Math.max(min,Math.min(max,Integer.parseInt(e.getText().toString().trim())));}catch(NumberFormatException ex){return def;}
+    }
+
+    private void copy(String text){
+        android.content.ClipboardManager cm=(android.content.ClipboardManager)getSystemService(CLIPBOARD_SERVICE);
+        if(cm!=null)cm.setPrimaryClip(android.content.ClipData.newPlainText("NewAl",text));
+        android.widget.Toast.makeText(this,"تم النسخ",android.widget.Toast.LENGTH_SHORT).show();
+    }
+
+    /** Buttons on result cards act on the current project. */
+    private final class ResultActions implements ChatAdapter.Actions{
+        @Override public void onRerun(){
+            if(generating||engine==null)return;
+            runAgentTask(null,AgentLoop::rerun);
+        }
+        @Override public void onFiles(){showFiles();}
+        @Override public void onOpenTermux(){
+            executor.execute(()->{
+                try{
+                    ProjectWorkspace ws=currentWorkspace();
+                    CommandPlanner.Plan plan=CommandPlanner.plan(ws.completeShas().keySet(),p->{try{return ws.read(p);}catch(Exception e){return "";}},ws.runCommandOverride);
+                    if(plan.command!=null)runOnUiThread(()->openInTermux(ws.id,plan.command));
+                }catch(Exception e){runOnUiThread(()->setWorking(false,safeMessage(e)));}
+            });
+        }
+        @Override public void onUndo(){
+            if(generating)return;
+            executor.execute(()->{
+                try{
+                    ProjectWorkspace ws=currentWorkspace();
+                    ws.attach(termuxBridge());
+                    List<String> reverted=ws.undoLastAttempt();
+                    runOnUiThread(()->setWorking(false,reverted.isEmpty()?"لا يوجد ما يُتراجع عنه":"↩ تم التراجع عن: "+String.join(", ",reverted)));
+                }catch(Exception e){runOnUiThread(()->setWorking(false,"تعذر التراجع: "+safeMessage(e)));}
+            });
+        }
+        @Override public void onCopy(String text){copy(text);}
+    }
 
     /** One-time setup: Termux installed, permission granted, agent reachable. Afterwards it is automatic. */
     private void ensureTermuxReady(){
@@ -394,45 +608,96 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private void startAgent(String request,boolean resume){
+        Skills.Parsed parsed=Skills.parse(request);
+        AgentProfile agent=parsed.agent!=null?parsed.agent:selectedAgent;
+        Skills.Skill skill=parsed.skill!=null?parsed.skill:selectedSkill;
+        String text=parsed.text.isEmpty()?request:parsed.text;
+        runAgentTask(resume?null:request,loop->resume?loop.resume():loop.run(text,agent,skill));
+    }
+
+    /** Runs one agent action (new task, resume or rerun) in the background with live UI and notifications. */
+    private void runAgentTask(String userText,java.util.function.Function<AgentLoop,AgentLoop.Outcome> action){
         setGenerating(true);
         if(Build.VERSION.SDK_INT>=33&&checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS)!=android.content.pm.PackageManager.PERMISSION_GRANTED)
             requestPermissions(new String[]{android.Manifest.permission.POST_NOTIFICATIONS},REQ_NOTIFY);
-        AgentService.start(this,AgentLoop.tail(request,200));
+        AgentService.start(this,userText==null?"متابعة المهمة":AgentLoop.tail(userText,200));
         executor.execute(()->{
-            if(!resume){
-                long userId=historyStore.append(ChatMessage.ROLE_USER,request);long t=System.currentTimeMillis();
-                runOnUiThread(()->{adapter.add(new ChatMessage(userId,ChatMessage.ROLE_USER,request,t));scrollToEnd();});
+            if(userText!=null){
+                long userId=historyStore.append(ChatMessage.ROLE_USER,userText);long t=System.currentTimeMillis();
+                runOnUiThread(()->{adapter.add(new ChatMessage(userId,ChatMessage.ROLE_USER,userText,t));scrollToEnd();});
             }
             String text;
             try{
                 ProjectWorkspace ws=currentWorkspace();
-                AgentLoop loop=new AgentLoop(agentModel(),termuxBridge(),ws,new UiAgentListener());
+                TermuxBridge b=termuxBridge();
+                loadUserSkills(b);
+                AgentLoop loop=newLoop(ws,b);
                 agentLoop=loop;
                 live.persist=true;
-                if(resume)runOnUiThread(()->setWorking(true,"استئناف المهمة السابقة من آخر حالة آمنة…"));
-                AgentLoop.Outcome o=resume?loop.resume():loop.run(request);
+                AgentLoop.Outcome o=action.apply(loop);
                 live.end();
-                String icon=o.state==AgentLoop.State.SUCCESS?"✅ ":o.state==AgentLoop.State.WAITING_FOR_USER?"⚠️ ":"❌ ";
-                text=icon+o.message+"\n📁 ~/newal/projects/"+ws.id;
-                if(o.interactiveCommand!=null){
-                    String projectId=ws.id,command=o.interactiveCommand;
-                    runOnUiThread(()->new AlertDialog.Builder(this).setTitle("برنامج تفاعلي")
-                            .setMessage("البرنامج يعمل وينتظر إدخالك. تشغيله الآن في Termux لتكتب له؟\n\n"+command)
-                            .setPositiveButton("شغّل في Termux",(d,w)->{
-                                try{new TermuxLauncher(this).openInteractive(projectId,command);}
-                                catch(Exception e){setWorking(false,"تعذر فتح Termux: "+safeMessage(e));}
-                            })
-                            .setNegativeButton("لاحقاً",null).show());
+                text=describe(o,loop,ws);
+                if(o.state==AgentLoop.State.SUCCESS&&o.interactiveCommand==null&&prefs.getBoolean(PREF_AUTO_TEST,false)
+                        &&(loop.agent()==AgentProfile.CODER||loop.agent()==AgentProfile.ARCHITECT)&&!hasTests(ws)){
+                    // Verification pass: a tester agent writes and runs tests for what was just built.
+                    runOnUiThread(()->setWorking(true,"🧪 كتابة اختبارات للتحقق…"));
+                    AgentLoop tester=newLoop(ws,b);
+                    agentLoop=tester;
+                    AgentLoop.Outcome t=tester.run("Write unit tests for this project and run them.",AgentProfile.TESTER,Skills.byId("tests"));
+                    live.end();
+                    text+="\n\n"+describe(t,tester,ws);
                 }
+                if(o.interactiveCommand!=null)offerInteractive(ws.id,o.interactiveCommand);
             }catch(Exception e){
                 live.end();
                 text="❌ "+safeMessage(e);
             }finally{agentLoop=null;live.persist=false;}
             final String summary=text;
             AgentService.finish(getApplicationContext(),summary.startsWith("✅")?"✅ اكتملت المهمة":summary.startsWith("⚠️")?"⚠️ المهمة تحتاج تدخلك":"❌ فشلت المهمة",summary);
-            long id=historyStore.append(ChatMessage.ROLE_ASSISTANT,summary);long t=System.currentTimeMillis();
-            runOnUiThread(()->{adapter.add(new ChatMessage(id,ChatMessage.ROLE_ASSISTANT,summary,t));scrollToEnd();setGenerating(false);});
+            long id=historyStore.append(ChatMessage.ROLE_RESULT,summary);long t=System.currentTimeMillis();
+            runOnUiThread(()->{adapter.add(new ChatMessage(id,ChatMessage.ROLE_RESULT,summary,t));scrollToEnd();setGenerating(false);});
         });
+    }
+
+    private AgentLoop newLoop(ProjectWorkspace ws,TermuxBridge b){
+        AgentLoop loop=new AgentLoop(agentModel(),b,ws,new UiAgentListener());
+        loop.maxAttempts=prefs.getInt(PREF_MAX_ATTEMPTS,6);
+        loop.execTimeoutMs=prefs.getInt(PREF_TIMEOUT_S,60)*1000L;
+        return loop;
+    }
+
+    private String describe(AgentLoop.Outcome o,AgentLoop loop,ProjectWorkspace ws){
+        String icon=o.state==AgentLoop.State.SUCCESS?"✅ ":o.state==AgentLoop.State.WAITING_FOR_USER?"⚠️ ":"❌ ";
+        Skills.Skill sk=loop.skill();
+        return icon+o.message+"\n"+loop.agent().icon+" "+loop.agent().title+(sk==null?"":" • "+sk.icon+" "+sk.title)
+                +" • 📁 ~/newal/projects/"+ws.id;
+    }
+
+    private static boolean hasTests(ProjectWorkspace ws){
+        for(ProjectWorkspace.Entry e:ws.entries())if(e.path.startsWith("tests/")||e.path.matches(".*(^|/)test_[^/]*\\.py"))return true;
+        return false;
+    }
+
+    private void offerInteractive(String projectId,String command){
+        runOnUiThread(()->new AlertDialog.Builder(this).setTitle("برنامج تفاعلي")
+                .setMessage("البرنامج يعمل وينتظر إدخالك. تشغيله الآن في Termux لتكتب له؟\n\n"+command)
+                .setPositiveButton("شغّل في Termux",(d,w)->openInTermux(projectId,command))
+                .setNegativeButton("لاحقاً",null).show());
+    }
+
+    private void openInTermux(String projectId,String command){
+        try{new TermuxLauncher(this).openInteractive(projectId,command);}
+        catch(Exception e){setWorking(false,"تعذر فتح Termux: "+safeMessage(e));}
+    }
+
+    private void loadUserSkills(TermuxBridge b){
+        try{
+            b.ensureConnected(8000);
+            org.json.JSONArray a=b.userSkills();
+            List<Skills.Skill> list=new java.util.ArrayList<>();
+            for(int i=0;i<a.length();i++){org.json.JSONObject o=a.getJSONObject(i);list.add(Skills.fromMarkdown(o.getString("id"),o.getString("markdown")));}
+            Skills.setUserSkills(list);
+        }catch(Exception ignored){}
     }
 
     private AgentLoop.Model agentModel(){
@@ -440,7 +705,9 @@ public class MainActivity extends AppCompatActivity {
         return new AgentLoop.Model(){
             // Greedy decoding for deterministic code; generate until the answer ends or the context is full.
             // The grammar only allows FILE/EDIT/STDIN/RUN blocks, so the output always parses.
-            @Override public GenerationResult generate(List<ChatMessage> turns,TextListener l){return e.generate(turns,0,0f,1,LlamaEngine.FLAG_RAW,AgentLoop.OUTPUT_GRAMMAR,l);}
+            @Override public GenerationResult generate(List<ChatMessage> turns,TextListener l){
+                return e.generate(turns,0,0f,1,LlamaEngine.FLAG_RAW,prefs.getBoolean(PREF_GRAMMAR,true)?AgentLoop.OUTPUT_GRAMMAR:null,l);
+            }
             @Override public void cancel(){e.cancel();}
             @Override public int contextTokens(){return e.contextTokens();}
         };
@@ -448,8 +715,8 @@ public class MainActivity extends AppCompatActivity {
 
     private final class UiAgentListener implements AgentLoop.Listener{
         @Override public void onState(AgentLoop.State state,String detail){
-            if((state==AgentLoop.State.GENERATING||state==AgentLoop.State.PATCHING)&&detail!=null)live.start("");
-            else if(state==AgentLoop.State.RUNNING)live.start("▶ "+detail+"\n");
+            if((state==AgentLoop.State.GENERATING||state==AgentLoop.State.PATCHING)&&detail!=null)live.start("",ChatMessage.ROLE_CODE);
+            else if(state==AgentLoop.State.RUNNING)live.start("$ "+detail+"\n",ChatMessage.ROLE_TERMINAL);
             String label=state.name()+(detail==null||detail.isEmpty()?"":" • "+AgentLoop.tail(detail,120));
             runOnUiThread(()->status.setText(label));
             AgentService.update(getApplicationContext(),label);
@@ -479,16 +746,19 @@ public class MainActivity extends AppCompatActivity {
         private static final int MAX_CHARS=8000;
         private final StringBuilder text=new StringBuilder();
         private boolean active,scheduled;
+        private int role=ChatMessage.ROLE_ASSISTANT;
         /** Agent mode: finished bubbles (generated code, program output) are saved to chat history. */
         volatile boolean persist;
 
-        void start(String header){
-            final String previous;
-            synchronized(this){previous=active?snapshot():null;text.setLength(0);text.append(header);active=true;}
-            save(previous);
+        void start(String header){start(header,ChatMessage.ROLE_ASSISTANT);}
+
+        void start(String header,int newRole){
+            final String previous;final int previousRole;
+            synchronized(this){previous=active?snapshot():null;previousRole=role;text.setLength(0);text.append(header);active=true;role=newRole;}
+            save(previous,previousRole);
             ui.post(()->{
-                if(previous!=null)adapter.updateLast(bubble(previous));
-                adapter.add(bubble(header));scrollToEnd();
+                if(previous!=null)adapter.updateLast(bubble(previous,previousRole));
+                adapter.add(bubble(header,newRole));scrollToEnd();
             });
         }
 
@@ -505,23 +775,25 @@ public class MainActivity extends AppCompatActivity {
 
         private void flush(){
             String snap;
-            synchronized(this){scheduled=false;if(!active)return;snap=snapshot();}
-            adapter.updateLast(bubble(snap));scrollToEnd();
+            int r;
+            synchronized(this){scheduled=false;if(!active)return;snap=snapshot();r=role;}
+            adapter.updateLast(bubble(snap,r));scrollToEnd();
         }
 
         void end(){
             String snap;
-            synchronized(this){if(!active)return;snap=snapshot();active=false;}
-            save(snap);
-            ui.post(()->adapter.updateLast(bubble(snap)));
+            int r;
+            synchronized(this){if(!active)return;snap=snapshot();active=false;r=role;}
+            save(snap,r);
+            ui.post(()->adapter.updateLast(bubble(snap,r)));
         }
 
-        private void save(String finished){
-            if(persist&&finished!=null&&!finished.trim().isEmpty())historyStore.append(ChatMessage.ROLE_ASSISTANT,finished);
+        private void save(String finished,int r){
+            if(persist&&finished!=null&&!finished.trim().isEmpty())historyStore.append(r,finished);
         }
 
         private String snapshot(){return text.length()>MAX_CHARS?"…"+text.substring(text.length()-MAX_CHARS):text.toString();}
-        private ChatMessage bubble(String s){return new ChatMessage(-1,ChatMessage.ROLE_ASSISTANT,s,System.currentTimeMillis());}
+        private ChatMessage bubble(String s,int r){return new ChatMessage(-1,r,s,System.currentTimeMillis());}
     }
 
     private String cleanAssistantText(String answer){
