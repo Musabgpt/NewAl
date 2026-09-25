@@ -25,6 +25,7 @@ VERSION = 1
 HELLO, PING, FOPEN, FWRITE, FCLOSE, SYNC, VALIDATE, EXEC, KILL = 0x01, 0x02, 0x10, 0x11, 0x12, 0x14, 0x20, 0x30, 0x31
 HELLO_OK, PONG, FCLOSED, SYNC_RESULT, VALIDATE_RESULT = 0x81, 0x82, 0x92, 0x94, 0xA0
 TOOLS, TOOL_CALL, TOOLS_RESULT, TOOL_RESULT = 0x40, 0x41, 0xC0, 0xC1
+FDELETE, FDELETED, SKILLS, SKILLS_RESULT = 0x13, 0x93, 0x42, 0xC2
 TOOL_TIMEOUT = 30.0
 TOOL_OUTPUT_MAX = 8000
 STARTED, STDOUT, STDERR, EXIT, ERROR = 0xB0, 0xB1, 0xB2, 0xB3, 0xFF
@@ -174,6 +175,15 @@ class Connection:
             self.send(VALIDATE_RESULT, rid, {"errors": errors, "missing_commands": missing})
         elif op == EXEC:
             asyncio.ensure_future(self.run(rid, json.loads(payload)))
+        elif op == FDELETE:
+            req = json.loads(payload)
+            path = project_path(req["project"], req["path"])
+            existed = os.path.isfile(path)
+            if existed:
+                os.remove(path)
+            self.send(FDELETED, rid, {"path": req["path"], "deleted": existed})
+        elif op == SKILLS:
+            self.send(SKILLS_RESULT, rid, {"skills": read_user_skills()})
         elif op == TOOLS:
             self.send(TOOLS_RESULT, rid, {"tools": await TOOLBOX.list()})
         elif op == TOOL_CALL:
@@ -346,6 +356,146 @@ async def run_argv(argv, stdin_bytes=None, cwd=None, timeout=TOOL_TIMEOUT):
     return {"ok": proc.returncode == 0, "output": text.strip()}
 
 
+# Tools implemented in the agent itself: always available, no extra packages.
+SKIP_DIRS = {".git", "__pycache__", "node_modules", ".newal_bin", ".venv"}
+
+
+def _project_files(project):
+    base = project_path(project)
+    for root, dirs, files in os.walk(base):
+        dirs[:] = sorted(d for d in dirs if d not in SKIP_DIRS)
+        for f in sorted(files):
+            full = os.path.join(root, f)
+            yield os.path.relpath(full, base), full
+
+
+async def tool_list_files(a):
+    lines = ["%s (%d bytes)" % (rel, os.path.getsize(full)) for rel, full in _project_files(a["_project"])]
+    return {"ok": True, "output": "\n".join(lines) or "(empty project)"}
+
+
+async def tool_read_file(a):
+    path = project_path(a["_project"], a.get("path", ""))
+    with open(path, encoding="utf-8", errors="replace") as f:
+        lines = f.read().split("\n")
+    start = max(1, int(a.get("start") or 1))
+    end = min(len(lines), int(a.get("end") or start + 199))
+    return {"ok": True, "output": "\n".join("%4d  %s" % (i, lines[i - 1]) for i in range(start, end + 1))}
+
+
+async def tool_search(a):
+    import re
+    try:
+        rx = re.compile(a.get("pattern", ""), re.IGNORECASE)
+    except re.error:
+        rx = re.compile(re.escape(a.get("pattern", "")), re.IGNORECASE)
+    hits = []
+    for rel, full in _project_files(a["_project"]):
+        try:
+            with open(full, encoding="utf-8") as f:
+                for n, line in enumerate(f, 1):
+                    if rx.search(line):
+                        hits.append("%s:%d: %s" % (rel, n, line.rstrip()[:160]))
+                        if len(hits) >= 50:
+                            return {"ok": True, "output": "\n".join(hits)}
+        except (UnicodeDecodeError, OSError):
+            continue
+    return {"ok": True, "output": "\n".join(hits) or "no matches"}
+
+
+async def tool_http_get(a):
+    import html
+    import re
+    import urllib.request
+    url = a.get("url", "")
+    if not url.startswith(("http://", "https://")):
+        return {"ok": False, "output": "url must start with http:// or https://"}
+
+    def fetch():
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 (NewAl agent)"})
+        with urllib.request.urlopen(req, timeout=15) as r:
+            return r.headers.get_content_type(), r.read(400000).decode("utf-8", "replace")
+    ctype, body = await asyncio.get_running_loop().run_in_executor(None, fetch)
+    if "html" in ctype:
+        body = re.sub(r"(?is)<(script|style|noscript)[^>]*>.*?</\1>", " ", body)
+        body = html.unescape(re.sub(r"(?s)<[^>]+>", " ", body))
+    body = re.sub(r"[ \t\r\f\v]+", " ", body)
+    body = re.sub(r"\n\s*\n+", "\n", body).strip()
+    return {"ok": True, "output": body[:6000]}
+
+
+async def tool_now(a):
+    return {"ok": True, "output": time.strftime("%Y-%m-%d %H:%M:%S %A (%Z)")}
+
+
+async def tool_system_info(a):
+    import platform
+    total, used, free = shutil.disk_usage(HOME)
+    mem = ""
+    try:
+        with open("/proc/meminfo") as f:
+            mem = " ".join(next(f).split()[1:2] + ["kB total RAM"])
+    except (OSError, StopIteration):
+        pass
+    return {"ok": True, "output": "%s %s, Python %s, %d CPUs, %.1f GB free storage, %s" % (
+        platform.system(), platform.machine(), platform.python_version(), os.cpu_count() or 0, free / 1e9, mem)}
+
+
+async def tool_calc(a):
+    import ast
+    import math
+    import operator as op
+    ops = {ast.Add: op.add, ast.Sub: op.sub, ast.Mult: op.mul, ast.Div: op.truediv, ast.Pow: op.pow,
+           ast.Mod: op.mod, ast.FloorDiv: op.floordiv, ast.USub: op.neg, ast.UAdd: op.pos}
+    funcs = {k: getattr(math, k) for k in dir(math) if not k.startswith("_")}
+    funcs.update({"abs": abs, "round": round, "min": min, "max": max})
+
+    def ev(n):
+        if isinstance(n, ast.Expression):
+            return ev(n.body)
+        if isinstance(n, ast.Constant) and isinstance(n.value, (int, float)):
+            return n.value
+        if isinstance(n, ast.BinOp) and type(n.op) in ops:
+            if isinstance(n.op, ast.Pow) and abs(ev(n.right)) > 1000:
+                raise ValueError("exponent too large")
+            return ops[type(n.op)](ev(n.left), ev(n.right))
+        if isinstance(n, ast.UnaryOp) and type(n.op) in ops:
+            return ops[type(n.op)](ev(n.operand))
+        if isinstance(n, ast.Name) and n.id in funcs:
+            return funcs[n.id]
+        if isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id in funcs:
+            return funcs[n.func.id](*[ev(x) for x in n.args])
+        raise ValueError("unsupported expression")
+    return {"ok": True, "output": str(ev(ast.parse(str(a.get("expr", "")), mode="eval")))}
+
+
+PY_TOOLS = {
+    "list_files": ("List the files of the current project", {}, tool_list_files),
+    "read_file": ("Read a project file with line numbers", {"path": "string", "start": "integer", "end": "integer"},
+                  tool_read_file),
+    "search": ("Search the project files for a regex", {"pattern": "string"}, tool_search),
+    "http_get": ("Fetch a web page or API as text (needs internet)", {"url": "string"}, tool_http_get),
+    "now": ("Current local date and time", {}, tool_now),
+    "system_info": ("Phone CPU, RAM, storage and Python version", {}, tool_system_info),
+    "calc": ("Evaluate a math expression exactly, e.g. sqrt(2)*10", {"expr": "string"}, tool_calc),
+}
+
+
+def read_user_skills():
+    """User skills: ~/newal/skills/<id>.md, first line '# Title | keyword, keyword'."""
+    root = os.path.join(HOME, "skills")
+    out = []
+    if os.path.isdir(root):
+        for f in sorted(os.listdir(root)):
+            if f.endswith(".md"):
+                try:
+                    with open(os.path.join(root, f), encoding="utf-8") as fh:
+                        out.append({"id": f[:-3], "markdown": fh.read(20000)})
+                except OSError:
+                    continue
+    return out
+
+
 class McpServer:
     """Minimal MCP client for one stdio server (JSON-RPC 2.0, one message per line)."""
 
@@ -437,7 +587,7 @@ class Toolbox:
             return {}
 
     async def list(self):
-        tools = []
+        tools = [{"name": n, "description": d, "parameters": p, "source": "builtin"} for n, (d, p, _) in PY_TOOLS.items()]
         for name, (desc, params, argv) in BUILTIN_TOOLS.items():
             if shutil.which(argv({})[0]):
                 tools.append({"name": name, "description": desc, "parameters": params, "source": "termux-api"})
@@ -461,6 +611,11 @@ class Toolbox:
         return tools
 
     async def call(self, name, args):
+        if name in PY_TOOLS:
+            if "_project" not in args and name in ("list_files", "read_file", "search"):
+                return {"ok": False, "output": "no project"}
+            return await PY_TOOLS[name][2](args)
+        args = {k: v for k, v in args.items() if k != "_project"}
         if name in BUILTIN_TOOLS:
             return await run_argv(BUILTIN_TOOLS[name][2](args), timeout=15.0)
         plugins = self._plugins()

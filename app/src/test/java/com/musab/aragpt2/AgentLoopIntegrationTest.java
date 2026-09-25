@@ -201,6 +201,52 @@ public class AgentLoopIntegrationTest {
         assertTrue(model.prompts.get(1), model.prompts.get(1).contains("demo.add -> 5"));
     }
 
+    @Test public void builtInToolsWorkWithoutExtraApps() throws Exception {
+        ScriptedModel model = new ScriptedModel(
+                "FILE: notes.py\n```python\nprint('hello notes')\n```",
+                "TOOL: list_files {}\nTOOL: read_file {\"path\": \"notes.py\"}\nTOOL: search {\"pattern\": \"hello\"}\nTOOL: calc {\"expr\": \"sqrt(16) * 2 + 2**10\"}",
+                "SAY: done");
+        ProjectWorkspace ws = workspace();
+        AgentLoop loop = new AgentLoop(model, bridge, ws, new Recorder());
+        assertEquals(AgentLoop.State.SUCCESS, loop.run("make notes").state);
+        AgentLoop.Outcome out = new AgentLoop(model, bridge, ws, new Recorder()).run("inspect", AgentProfile.EXPLAINER, null);
+        assertEquals(out.message, "done", out.message);
+        String p = model.prompts.get(2);
+        assertTrue(p, p.contains("notes.py ("));
+        assertTrue(p, p.contains("   1  print('hello notes')"));
+        assertTrue(p, p.contains("notes.py:1: print('hello notes')"));
+        assertTrue(p, p.contains("calc -> 1032.0"));
+    }
+
+    @Test public void undoRevertsTheLastAttempt() throws Exception {
+        ScriptedModel model = new ScriptedModel(
+                "FILE: main.py\n```python\nprint('v1')\n```",
+                "FILE: main.py\n```python\nprint('v2')\n```\nFILE: extra.py\n```python\nX = 1\n```");
+        ProjectWorkspace ws = workspace();
+        assertEquals(AgentLoop.State.SUCCESS, new AgentLoop(model, bridge, ws, new Recorder()).run("v1").state);
+        assertEquals(AgentLoop.State.SUCCESS, new AgentLoop(model, bridge, ws, new Recorder()).run("v2").state);
+        assertEquals("print('v2')\n", ws.read("main.py"));
+        java.util.List<String> reverted = ws.undoLastAttempt();
+        assertTrue(reverted.contains("main.py") && reverted.contains("extra.py"));
+        assertEquals("print('v1')\n", ws.read("main.py"));
+        assertTrue(!new File(ws.dir, "extra.py").exists());
+        // The Termux copy follows: extra.py is gone there too, and a rerun runs v1.
+        assertTrue(!new File(agentHome, "projects/" + ws.id + "/extra.py").exists());
+        Recorder ui = new Recorder();
+        assertEquals(AgentLoop.State.SUCCESS, new AgentLoop(model, bridge, ws, ui).rerun().state);
+        assertTrue(ui.stdout.toString().contains("v1"));
+    }
+
+    @Test public void architectPlansBeforeCoding() throws Exception {
+        ScriptedModel model = new ScriptedModel(
+                "SAY: main.py - entry point\nSAY: 1. print a greeting",
+                "FILE: main.py\n```python\nprint('hi')\n```");
+        AgentLoop.Outcome out = new AgentLoop(model, bridge, workspace(), new Recorder())
+                .run("greeting program", AgentProfile.ARCHITECT, null);
+        assertEquals(AgentLoop.State.SUCCESS, out.state);
+        assertTrue(model.prompts.get(1), model.prompts.get(1).contains("Plan:\n- main.py - entry point"));
+    }
+
     @Test public void unknownToolIsReportedToTheModel() throws Exception {
         ScriptedModel model = new ScriptedModel("TOOL: nope {}", "SAY: sorry");
         AgentLoop.Outcome out = new AgentLoop(model, bridge, workspace(), new Recorder()).run("x");

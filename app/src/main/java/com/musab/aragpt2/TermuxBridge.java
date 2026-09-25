@@ -29,7 +29,8 @@ import java.util.concurrent.atomic.AtomicInteger;
  */
 public final class TermuxBridge implements Closeable {
     static final int HELLO = 0x01, PING = 0x02, FOPEN = 0x10, FWRITE = 0x11, FCLOSE = 0x12,
-            SYNC = 0x14, VALIDATE = 0x20, EXEC = 0x30, KILL = 0x31, TOOLS = 0x40, TOOL_CALL = 0x41;
+            SYNC = 0x14, VALIDATE = 0x20, EXEC = 0x30, KILL = 0x31, TOOLS = 0x40, TOOL_CALL = 0x41,
+            FDELETE = 0x13, SKILLS = 0x42;
     static final int HELLO_OK = 0x81, PONG = 0x82, FCLOSED = 0x92, SYNC_RESULT = 0x94,
             VALIDATE_RESULT = 0xA0, STARTED = 0xB0, STDOUT = 0xB1, STDERR = 0xB2, EXIT = 0xB3, ERROR = 0xFF;
 
@@ -307,6 +308,21 @@ public final class TermuxBridge implements Closeable {
         } catch (JSONException e) {
             throw new IOException(e);
         }
+    }
+
+    /** Deletes a project file inside Termux (used by undo for files an attempt created). */
+    public void deleteFile(String project, String path) throws IOException {
+        try {
+            call(FDELETE, new JSONObject().put("project", project).put("path", path), 10_000);
+        } catch (JSONException e) {
+            throw new IOException(e);
+        }
+    }
+
+    /** User skills stored in Termux as ~/newal/skills/<id>.md. */
+    public org.json.JSONArray userSkills() throws IOException {
+        org.json.JSONArray a = call(SKILLS, new JSONObject(), 10_000).optJSONArray("skills");
+        return a == null ? new org.json.JSONArray() : a;
     }
 
     /** Tools the agent offers: Termux:API built-ins, script plugins and MCP server tools. */

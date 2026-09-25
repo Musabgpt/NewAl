@@ -46,7 +46,10 @@ public final class MemoryManager {
         }
     }
 
-    public List<ChatMessage> buildTurns(List<ChatMessage> history) {
+    public List<ChatMessage> buildTurns(List<ChatMessage> allHistory) {
+        // Code, terminal output and result cards are for display only, not chat context.
+        java.util.ArrayList<ChatMessage> history = new java.util.ArrayList<>(allHistory.size());
+        for (ChatMessage m : allHistory) if (ChatMessage.isConversation(m.role)) history.add(m);
         String memory = memoryBlock();
         int budget = Math.max(0, MAX_CONTEXT_CHARS - memory.length());
         List<ChatMessage> recent = ConversationWindow.select(history, budget);

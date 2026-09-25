@@ -52,6 +52,7 @@ public final class ProjectWorkspace {
     public String installedRequirementsSha = "";
     /** Sample keyboard input the model supplied for an interactive program, or null. */
     public String stdinInput;
+    public String agentId = "code", skillId = "";
     public final List<String> attemptNotes = new ArrayList<>();
 
     private ProjectWorkspace(String id, File dir) {
@@ -231,6 +232,44 @@ public final class ProjectWorkspace {
         remoteDirty = false;
     }
 
+    /**
+     * Reverts the last attempt: files it changed get their previous content back, files it
+     * created are deleted (here and in Termux). Returns the paths that were reverted.
+     */
+    public List<String> undoLastAttempt() throws IOException {
+        List<String> reverted = new ArrayList<>();
+        int a = attempt;
+        if (a <= 0) return reverted;
+        File history = new File(dir, META + "/history/a" + a);
+        for (Entry e : entries()) {
+            if (e.changedInAttempt != a) continue;
+            File backup = new File(history, e.path);
+            File target = new File(dir, e.path);
+            if (backup.isFile()) {
+                byte[] previous = readBytes(backup);
+                writeBytes(target, previous, true);
+                synchronized (this) {
+                    e.sha = hex(sha256().digest(previous));
+                    e.size = previous.length;
+                    e.status = FileStatus.COMPLETE;
+                    e.changedInAttempt = a - 1;
+                }
+            } else {
+                target.delete();
+                synchronized (this) { files.remove(e.path); }
+                TermuxBridge b = bridge;
+                if (b != null && b.isConnected()) {
+                    try { b.deleteFile(id, e.path); } catch (IOException ignored) {}
+                }
+            }
+            reverted.add(e.path);
+        }
+        attempt = a - 1;
+        remoteDirty = true;
+        saveJournal();
+        return reverted;
+    }
+
     public File runLog(int attemptNo, String stream) {
         File runs = new File(dir, META + "/runs");
         runs.mkdirs();
@@ -254,6 +293,7 @@ public final class ProjectWorkspace {
                     .put("run", runCommandOverride == null ? JSONObject.NULL : runCommandOverride)
                     .put("installed_requirements", installedRequirementsSha)
                     .put("stdin", stdinInput == null ? JSONObject.NULL : stdinInput)
+                    .put("agent", agentId).put("skill", skillId)
                     .put("notes", new JSONArray(attemptNotes));
             JSONArray fa = new JSONArray();
             for (Entry e : files.values()) {
@@ -275,6 +315,8 @@ public final class ProjectWorkspace {
         runCommandOverride = j.isNull("run") ? null : j.optString("run", null);
         installedRequirementsSha = j.optString("installed_requirements");
         stdinInput = j.isNull("stdin") ? null : j.optString("stdin", null);
+        agentId = j.optString("agent", "code");
+        skillId = j.optString("skill", "");
         JSONArray notes = j.optJSONArray("notes");
         for (int i = 0; notes != null && i < notes.length(); i++) attemptNotes.add(notes.getString(i));
         JSONArray fa = j.optJSONArray("files");

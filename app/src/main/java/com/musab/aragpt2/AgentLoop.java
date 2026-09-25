@@ -105,6 +105,9 @@ public final class AgentLoop {
     private final TermuxBridge bridge;
     private final ProjectWorkspace ws;
     private final Listener listener;
+    private AgentProfile agent = AgentProfile.CODER;
+    private Skills.Skill skill;
+    private String plan = "";
     private volatile boolean cancelled;
     private volatile int runningExec = -1;
     private final List<String> signatures = new ArrayList<>();
@@ -126,7 +129,15 @@ public final class AgentLoop {
     }
 
     /** Starts a new task on the workspace (existing files are kept and can be edited). */
-    public Outcome run(String request) {
+    public Outcome run(String request) { return run(request, AgentProfile.CODER, null); }
+
+    /** Starts a task with a specific agent and optional skill (AUTO picks an agent from the request). */
+    public Outcome run(String request, AgentProfile agentProfile, Skills.Skill chosenSkill) {
+        agent = agentProfile == null || agentProfile == AgentProfile.AUTO
+                ? AgentProfile.choose(request, !ws.isEmpty()) : agentProfile;
+        skill = chosenSkill != null ? chosenSkill : Skills.match(request);
+        ws.agentId = agent.id;
+        ws.skillId = skill == null ? "" : skill.id;
         ws.request = request;
         ws.stdinInput = null;
         ws.attempt = 0;
@@ -134,8 +145,24 @@ public final class AgentLoop {
         return loop(initialPrompt(), false);
     }
 
+    public AgentProfile agent() { return agent; }
+    public Skills.Skill skill() { return skill; }
+
+    /** Runs the current files again without generating anything. */
+    public Outcome rerun() {
+        restoreProfile();
+        return loop(null, true);
+    }
+
+    private void restoreProfile() {
+        AgentProfile a = AgentProfile.byId(ws.agentId);
+        agent = a == null || a == AgentProfile.AUTO ? AgentProfile.CODER : a;
+        skill = ws.skillId.isEmpty() ? null : Skills.byId(ws.skillId);
+    }
+
     /** Continues an interrupted task from the last safe point recorded in the journal. */
     public Outcome resume() {
+        restoreProfile();
         boolean haveFiles = false;
         for (ProjectWorkspace.Entry e : ws.entries()) {
             if (e.status != ProjectWorkspace.FileStatus.COMPLETE) restoreOrDrop(e);
@@ -173,6 +200,10 @@ public final class AgentLoop {
         warm.start();
         // Tools must be known before the first prompt; don't hold generation up for long.
         try { warm.join(4000); } catch (InterruptedException e) { Thread.currentThread().interrupt(); }
+        if (agent.planFirst && !executeFirst && plan.isEmpty()) {
+            plan = makePlan();
+            if (!plan.isEmpty()) prompt = initialPrompt();
+        }
         String failure = null;
         Set<String> carried = new LinkedHashSet<>();
         int toolRounds = 0;
@@ -374,7 +405,7 @@ public final class AgentLoop {
         Generation g = new Generation(ws.attempt);
         CodeStreamParser parser = new CodeStreamParser(g, g);
         List<ChatMessage> turns = new ArrayList<>(2);
-        turns.add(new ChatMessage(-1, ChatMessage.ROLE_SYSTEM, SYSTEM_PROMPT + toolsSection, 0));
+        turns.add(new ChatMessage(-1, ChatMessage.ROLE_SYSTEM, systemPrompt(), 0));
         turns.add(new ChatMessage(-1, ChatMessage.ROLE_USER, prompt, 0));
         g.startNanos = System.nanoTime();
         try {
@@ -624,8 +655,43 @@ public final class AgentLoop {
 
     // ---------------------------------------------------------------- prompts
 
+    /** Stable per task (agent, skill and tools do not change between attempts), so its KV cache is reused. */
+    private String systemPrompt() {
+        StringBuilder b = new StringBuilder(SYSTEM_PROMPT);
+        if (!agent.instructions.isEmpty()) b.append('\n').append(agent.instructions);
+        if (skill != null) b.append('\n').append(skill.instructions);
+        return b.append(toolsSection).toString();
+    }
+
+    /** Architect pass: the files and steps, as SAY lines, before any code is written. */
+    private String makePlan() {
+        setState(State.GENERATING, "تخطيط");
+        List<ChatMessage> turns = new ArrayList<>(2);
+        turns.add(new ChatMessage(-1, ChatMessage.ROLE_SYSTEM,
+                "You are a software architect. Plan the program for the task. Answer only with SAY: lines: first one "
+                + "line per file (path - purpose), then the steps to build it. At most 12 lines. No code.", 0));
+        turns.add(new ChatMessage(-1, ChatMessage.ROLE_USER, "Task: " + ws.request, 0));
+        StringBuilder out = new StringBuilder();
+        CodeStreamParser parser = new CodeStreamParser(new CodeStreamParser.Sink() {
+            @Override public void onFileStart(String path) {}
+            @Override public void onFileData(String text) {}
+            @Override public void onFileEnd(boolean complete) {}
+            @Override public void onEdit(String path, String body, boolean complete) {}
+            @Override public void onRunCommand(String command) {}
+            @Override public void onSay(String text) { out.append("- ").append(text).append('\n'); }
+        }, null);
+        try {
+            GenerationResult r = model.generate(turns, delta -> { listener.onModelText(delta); parser.feed(delta); });
+            parser.finish(r.finishedNaturally());
+        } catch (Exception e) {
+            return "";
+        }
+        return out.toString();
+    }
+
     private String initialPrompt() {
         StringBuilder b = new StringBuilder("Task: ").append(ws.request).append('\n');
+        if (!plan.isEmpty()) b.append("\nPlan:\n").append(plan);
         if (!ws.isEmpty()) {
             b.append("\nThe project already contains these files; change only what the task needs:\n");
             appendFiles(b, allPaths(), promptBudgetChars() - b.length());
@@ -706,6 +772,7 @@ public final class AgentLoop {
                 bridge.ensureConnected(15_000);
                 JSONObject args;
                 try { args = new JSONObject(c[1]); } catch (JSONException e) { args = new JSONObject(); }
+                try { args.put("_project", ws.id); } catch (JSONException ignored) {}
                 JSONObject r = bridge.callTool(c[0], args);
                 ok = r.optBoolean("ok");
                 output = r.optString("output");
