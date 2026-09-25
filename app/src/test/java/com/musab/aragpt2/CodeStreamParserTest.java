@@ -18,6 +18,7 @@ public class CodeStreamParserTest {
         final Map<String, Boolean> complete = new LinkedHashMap<>();
         final List<String> edits = new ArrayList<>();
         final List<String> runs = new ArrayList<>();
+        final List<String> stdin = new ArrayList<>();
         String current;
 
         @Override public void onFileStart(String path) { current = path; files.put(path, new StringBuilder()); }
@@ -25,6 +26,7 @@ public class CodeStreamParserTest {
         @Override public void onFileEnd(boolean ok) { complete.put(current, ok); current = null; }
         @Override public void onEdit(String path, String body, boolean ok) { edits.add(path + (ok ? "" : "!") + "|" + body); }
         @Override public void onRunCommand(String command) { runs.add(command); }
+        @Override public void onStdin(String input) { stdin.add(input); }
     }
 
     static Recorder parse(String text, int[] cuts) throws Exception {
@@ -147,6 +149,12 @@ public class CodeStreamParserTest {
         p.finish(true);
         assertEquals("x = 1\n", r.files.get("a.py").toString());
         assertTrue(r.complete.get("a.py"));
+    }
+
+    @Test public void stdinBlockIsCapturedAndNeverWrittenToAFile() throws Exception {
+        Recorder r = parse("FILE: main.py\n```python\nprint(input())\n```\nSTDIN:\n```\n1\n5\n```\n");
+        assertEquals(List.of("1\n5\n"), r.stdin);
+        assertEquals(1, r.files.size());
     }
 
     @Test public void cutOffBeforeFirstLineDoesNotOpenFile() throws Exception {

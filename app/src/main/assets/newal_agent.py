@@ -188,6 +188,8 @@ class Connection:
                     "NO_COLOR": "1", "PY_COLORS": "0", "CLICOLOR": "0"})
         env.update(req.get("env") or {})
         timeout = max(1, req.get("timeout_ms", 60000)) / 1000.0
+        # Scripted keyboard input for interactive programs; None means no stdin at all.
+        stdin_data = req.get("stdin")
 
         # stdout goes through a pty so C/Node/etc. line-buffer instead of block-buffer;
         # stderr stays a separate pipe so the two streams are never mixed.
@@ -209,7 +211,8 @@ class Connection:
         try:
             proc = await asyncio.create_subprocess_exec(
                 "bash", "-c", req["command"], cwd=cwd, env=env,
-                stdin=asyncio.subprocess.DEVNULL, stdout=out_w, stderr=err_w,
+                stdin=asyncio.subprocess.PIPE if stdin_data is not None else asyncio.subprocess.DEVNULL,
+                stdout=out_w, stderr=err_w,
                 start_new_session=True)
         except Exception:
             for fd in (out_r, out_w, err_r, err_w):
@@ -219,6 +222,16 @@ class Connection:
         os.close(err_w)
         self.procs[rid] = proc
         self.send(STARTED, rid, {"pid": proc.pid, "start_ms": int(start * 1000)})
+        if stdin_data is not None:
+            async def feed():
+                try:
+                    proc.stdin.write(stdin_data.encode("utf-8"))
+                    await proc.stdin.drain()
+                except (BrokenPipeError, ConnectionResetError):
+                    pass  # the program exited before reading everything
+                finally:
+                    proc.stdin.close()
+            asyncio.ensure_future(feed())
 
         open_fds = {out_r: STDOUT, err_r: STDERR}
         drained = asyncio.Event()

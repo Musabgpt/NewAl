@@ -342,7 +342,7 @@ JNIEXPORT jlong JNICALL Java_com_musab_aragpt2_LlamaEngine_nativeLoadModel(
 // max_tokens <= 0 means: until end of turn or the context is full.
 JNIEXPORT jstring JNICALL Java_com_musab_aragpt2_LlamaEngine_nativeGenerate(
         JNIEnv * env, jobject, jlong hp, jstring jt, jint max_tokens, jfloat temp,
-        jint topk, jint flags, jobject sink) {
+        jint topk, jint flags, jstring jgrammar, jobject sink) {
     auto * h = reinterpret_cast<EngineHandle *>(hp);
     if (!h || !h->ctx) { fail(env, "المحرك غير محمل"); return nullptr; }
 
@@ -393,6 +393,19 @@ JNIEXPORT jstring JNICALL Java_com_musab_aragpt2_LlamaEngine_nativeGenerate(
         llama_sampler_chain_add(sampler, llama_sampler_init_dist(LLAMA_DEFAULT_SEED));
     }
 
+    // Optional GBNF grammar that constrains the output format. Each sampled token is first
+    // checked alone (cheap); only a rejected token triggers filtering of the whole vocabulary.
+    llama_sampler * grammar = nullptr;
+    if (jgrammar) {
+        const std::string g = js(env, jgrammar);
+        if (!g.empty()) {
+            grammar = llama_sampler_init_grammar(h->vocab, g.c_str(), "root");
+            if (!grammar) LOGE("grammar failed to parse; generating without it");
+        }
+    }
+    const int n_vocab = llama_vocab_n_tokens(h->vocab);
+    std::vector<llama_token_data> candidates;
+
     std::vector<std::string> stops = special_stops();
     if (!raw || !h->has_template) {
         for (const auto & t : turn_stops()) stops.push_back(t);
@@ -410,8 +423,28 @@ JNIEXPORT jstring JNICALL Java_com_musab_aragpt2_LlamaEngine_nativeGenerate(
         if (h->cancel.load()) { stop_reason = STOP_CANCELLED; break; }
         if (static_cast<int>(h->kv.size()) >= h->n_ctx) { stop_reason = STOP_CONTEXT_FULL; break; }
 
+        // llama_sampler_sample() already records the token in the chain (e.g. for penalties).
         llama_token token = llama_sampler_sample(sampler, h->ctx, -1);
-        llama_sampler_accept(sampler, token);
+        if (grammar) {
+            llama_token_data single = {token, 1.0f, 0.0f};
+            llama_token_data_array one = {&single, 1, -1, false};
+            llama_sampler_apply(grammar, &one);
+            if (std::isinf(single.logit) && single.logit < 0) {
+                const float * logits = llama_get_logits_ith(h->ctx, -1);
+                candidates.resize(static_cast<size_t>(n_vocab));
+                for (llama_token id = 0; id < n_vocab; ++id) candidates[static_cast<size_t>(id)] = {id, logits[id], 0.0f};
+                llama_token_data_array all = {candidates.data(), candidates.size(), -1, false};
+                llama_sampler_apply(grammar, &all);
+                llama_token best = LLAMA_TOKEN_NULL;
+                float best_logit = -INFINITY;
+                for (size_t i = 0; i < all.size; ++i) {
+                    if (all.data[i].logit > best_logit) { best_logit = all.data[i].logit; best = all.data[i].id; }
+                }
+                if (best == LLAMA_TOKEN_NULL) { stop_reason = STOP_EOG; break; }  // grammar allows nothing more
+                token = best;
+            }
+            llama_sampler_accept(grammar, token);
+        }
         if (llama_vocab_is_eog(h->vocab, token)) { stop_reason = STOP_EOG; break; }
 
         const size_t before = output.size();
@@ -445,6 +478,7 @@ JNIEXPORT jstring JNICALL Java_com_musab_aragpt2_LlamaEngine_nativeGenerate(
         h->kv.push_back(token);
     }
     llama_sampler_free(sampler);
+    if (grammar) llama_sampler_free(grammar);
 
     // Flush text that was held back but did not turn into a stop marker.
     if (stop_reason != STOP_CALLBACK && output.size() > emitted) {

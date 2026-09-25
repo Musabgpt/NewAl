@@ -3,6 +3,10 @@
     <!-- Localhost socket to the execution agent running inside Termux. -->
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="com.termux.permission.RUN_COMMAND" />
+    <!-- Keeps a running agent task alive while the user is in another app. -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
     <queries>
         <package android:name="com.termux" />
@@ -16,6 +20,8 @@
         <activity
             android:name=".MainActivity"
             android:exported="true"
+            android:launchMode="singleTop"
+            android:configChanges="uiMode|fontScale|density|screenSize|smallestScreenSize|screenLayout|orientation|keyboard|keyboardHidden|navigation|locale|layoutDirection"
             android:screenOrientation="portrait"
             android:windowSoftInputMode="adjustResize|stateAlwaysHidden">
             <intent-filter>
@@ -23,5 +29,14 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+
+        <service
+            android:name=".AgentService"
+            android:exported="false"
+            android:foregroundServiceType="specialUse">
+            <property
+                android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="Runs a local code-generation and execution task the user started" />
+        </service>
     </application>
 </manifest>

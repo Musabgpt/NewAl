@@ -136,6 +136,18 @@ public class AgentLoopIntegrationTest {
         assertEquals(1, model.calls);
     }
 
+    @Test public void interactiveProgramIsTestedWithSampleInput() throws Exception {
+        ScriptedModel model = new ScriptedModel(
+                "FILE: main.py\n```python\nwhile True:\n    c = input('choice: ')\n    if c == '5':\n        break\n"
+                        + "    a = float(input('a: '))\n    b = float(input('b: '))\n    print('sum', a + b)\n```\n"
+                        + "STDIN:\n```\n1\n2\n3\n5\n```");
+        Recorder ui = new Recorder();
+        AgentLoop.Outcome out = new AgentLoop(model, bridge, workspace(), ui).run("calculator");
+        assertEquals(out.message, AgentLoop.State.SUCCESS, out.state);
+        assertEquals(null, out.interactiveCommand);
+        assertTrue(ui.stdout.toString(), ui.stdout.toString().contains("sum 5.0"));
+    }
+
     @Test public void realErrorAfterInputIsStillFixed() throws Exception {
         ScriptedModel model = new ScriptedModel(
                 "FILE: main.py\n```python\nimport sys\nx = undefined_name\n```\n",

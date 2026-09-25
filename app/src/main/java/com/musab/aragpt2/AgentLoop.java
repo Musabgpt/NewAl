@@ -62,11 +62,31 @@ public final class AgentLoop {
             + "replacement lines\n>>>>>>> REPLACE\n```\n"
             + "Rules:\n"
             + "- Complete, runnable code. Never placeholders such as \"...\" or \"your code here\".\n"
-            + "- The program is first run without a keyboard; interactive input() is fine when the task needs it.\n"
+            + "- Interactive input() is fine when the task needs it. Then also give sample keyboard input so the "
+            + "program can be tested automatically, one answer per line, ending with the choice that exits:\n"
+            + "STDIN:\n```\n1\n2\n3\n```\n"
             + "- Prefer the standard library; list third-party Python packages in requirements.txt.\n"
             + "- The project runs with the usual command for its language (python main.py, node index.js, "
             + "bash main.sh). For another command add one line: RUN: <command>\n"
             + "- Output only the files you create or change.";
+
+    /**
+     * GBNF grammar for the agent's output: only FILE / EDIT / STDIN / RUN blocks, so the model
+     * cannot drift into prose, forget the FILE header, or break the fence structure.
+     */
+    static final String OUTPUT_GRAMMAR =
+            "root ::= [\\n]* item (sep item)* [\\n]?\n"
+            + "sep ::= \"\\n\" [\\n]*\n"
+            + "item ::= file | edit | stdin | run\n"
+            + "file ::= \"FILE: \" path \"\\n```\" lang \"\\n\" body \"```\"\n"
+            + "edit ::= \"EDIT: \" path \"\\n```\" lang \"\\n\" hunk+ \"```\"\n"
+            + "hunk ::= \"<<<<<<< SEARCH\\n\" body \"=======\\n\" body \">>>>>>> REPLACE\\n\"\n"
+            + "stdin ::= \"STDIN:\\n```\\n\" body \"```\"\n"
+            + "run ::= \"RUN: \" [^\\n`]+\n"
+            + "path ::= [A-Za-z0-9_] [A-Za-z0-9_./-]*\n"
+            + "lang ::= [A-Za-z0-9+#-]*\n"
+            + "body ::= line*\n"
+            + "line ::= ([^`\\n] [^\\n]* | \"`\" [^`\\n] [^\\n]* | \"``\" [^`\\n] [^\\n]*)? \"\\n\"\n";
 
     private static final Pattern TRACE_FILE = Pattern.compile("(?:File \"|at |^|[\\s(])([\\w./-]+\\.[A-Za-z]{1,5})(?:\", line |:)(\\d+)", Pattern.MULTILINE);
     private static final Set<String> SHELL_LANGS = new java.util.HashSet<>(java.util.Arrays.asList(
@@ -102,6 +122,7 @@ public final class AgentLoop {
     /** Starts a new task on the workspace (existing files are kept and can be edited). */
     public Outcome run(String request) {
         ws.request = request;
+        ws.stdinInput = null;
         ws.attempt = 0;
         ws.attemptNotes.clear();
         return loop(initialPrompt(), false);
@@ -265,6 +286,10 @@ public final class AgentLoop {
             ws.runCommandOverride = command;
         }
 
+        @Override public void onStdin(String input) {
+            ws.stdinInput = input;
+        }
+
         @Override public String pathFor(String language) {
             if (namedSeen || SHELL_LANGS.contains(language)) return null;
             String ext = extensionFor(language);
@@ -347,6 +372,7 @@ public final class AgentLoop {
     private final class Exec implements TermuxBridge.ExecListener {
         final String command;
         final boolean isTest;
+        String stdin;
         final CountDownLatch done = new CountDownLatch(1);
         final Utf8StreamDecoder outDecoder = new Utf8StreamDecoder(), errDecoder = new Utf8StreamDecoder();
         final TailBuffer out = new TailBuffer(4000), err = new TailBuffer(8000);
@@ -414,6 +440,7 @@ public final class AgentLoop {
                 return b.toString();
             }
             b.append("Command: ").append(command).append('\n');
+            if (stdin != null) b.append("Keyboard input given (STDIN):\n").append(tail(stdin, 400)).append('\n');
             if (result.timedOut) b.append("It did not finish within ").append(execTimeoutMs / 1000)
                     .append("s and was stopped (it may wait for input or loop forever).\n");
             else if (result.error != null) b.append("Execution error: ").append(result.error).append('\n');
@@ -480,17 +507,35 @@ public final class AgentLoop {
                 saveJournal();
             }
         }
-        return runCommand(plan.command, plan.isTest, execTimeoutMs, metrics, "exec");
+        String stdin = plan.isTest ? null : ws.stdinInput;
+        Exec run = runCommand(plan.command, plan.isTest, stdin, execTimeoutMs, metrics, "exec");
+        // A missing third-party module is an environment problem, not a code bug: install it
+        // and run again without spending a model attempt on it.
+        Set<String> tried = new java.util.HashSet<>();
+        while (!run.success() && !cancelled) {
+            String install = MissingModule.installCommand(run.err.toString(), files.keySet());
+            if (install == null || !tried.add(install) || tried.size() > 4) break;
+            Exec inst = runCommand(install, false, installTimeoutMs, metrics, "autoinstall");
+            if (!inst.success()) return inst;
+            run = runCommand(plan.command, plan.isTest, stdin, execTimeoutMs, metrics, "exec");
+        }
+        return run;
     }
 
     private Exec runCommand(String command, boolean isTest, long timeoutMs, JSONObject metrics, String label) throws IOException {
+        return runCommand(command, isTest, null, timeoutMs, metrics, label);
+    }
+
+    private Exec runCommand(String command, boolean isTest, String stdin, long timeoutMs, JSONObject metrics,
+                            String label) throws IOException {
         setState(State.RUNNING, command);
         Exec exec = new Exec(command, isTest);
+        exec.stdin = stdin;
         exec.outLog = new FileOutputStream(ws.runLog(ws.attempt, label + ".stdout"));
         exec.errLog = new FileOutputStream(ws.runLog(ws.attempt, label + ".stderr"));
         try {
             for (int tries = 0; ; tries++) {
-                runningExec = bridge.exec(ws.id, command, null, timeoutMs, exec);
+                runningExec = bridge.exec(ws.id, command, null, stdin, timeoutMs, exec);
                 try {
                     exec.done.await(timeoutMs + 30_000, TimeUnit.MILLISECONDS);
                 } catch (InterruptedException e) {
@@ -505,6 +550,7 @@ public final class AgentLoop {
                 bridge.ensureConnected(15_000);
                 ws.syncRemote();
                 exec = new Exec(command, isTest);
+                exec.stdin = stdin;
                 exec.outLog = new FileOutputStream(ws.runLog(ws.attempt, label + ".stdout"));
                 exec.errLog = new FileOutputStream(ws.runLog(ws.attempt, label + ".stderr"));
             }

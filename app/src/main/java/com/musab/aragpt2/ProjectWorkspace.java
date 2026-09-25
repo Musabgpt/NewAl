@@ -50,6 +50,8 @@ public final class ProjectWorkspace {
     public int attempt;
     public String runCommandOverride;
     public String installedRequirementsSha = "";
+    /** Sample keyboard input the model supplied for an interactive program, or null. */
+    public String stdinInput;
     public final List<String> attemptNotes = new ArrayList<>();
 
     private ProjectWorkspace(String id, File dir) {
@@ -251,6 +253,7 @@ public final class ProjectWorkspace {
                     .put("request", request).put("state", state).put("attempt", attempt)
                     .put("run", runCommandOverride == null ? JSONObject.NULL : runCommandOverride)
                     .put("installed_requirements", installedRequirementsSha)
+                    .put("stdin", stdinInput == null ? JSONObject.NULL : stdinInput)
                     .put("notes", new JSONArray(attemptNotes));
             JSONArray fa = new JSONArray();
             for (Entry e : files.values()) {
@@ -271,6 +274,7 @@ public final class ProjectWorkspace {
         attempt = j.optInt("attempt");
         runCommandOverride = j.isNull("run") ? null : j.optString("run", null);
         installedRequirementsSha = j.optString("installed_requirements");
+        stdinInput = j.isNull("stdin") ? null : j.optString("stdin", null);
         JSONArray notes = j.optJSONArray("notes");
         for (int i = 0; notes != null && i < notes.length(); i++) attemptNotes.add(notes.getString(i));
         JSONArray fa = j.optJSONArray("files");

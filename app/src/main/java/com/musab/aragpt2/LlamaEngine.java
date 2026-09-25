@@ -31,6 +31,12 @@ public final class LlamaEngine implements AutoCloseable {
      */
     public GenerationResult generate(List<ChatMessage> turns, int maxNewTokens, float temperature,
                                     int topK, int flags, TextListener listener) {
+        return generate(turns, maxNewTokens, temperature, topK, flags, null, listener);
+    }
+
+    /** As above; {@code grammar} (GBNF, root rule "root") constrains what the model may output. */
+    public GenerationResult generate(List<ChatMessage> turns, int maxNewTokens, float temperature,
+                                    int topK, int flags, String grammar, TextListener listener) {
         if (handle == 0) throw new IllegalStateException("المحرك مغلق");
         StringBuilder encoded = new StringBuilder();
         for (ChatMessage m : turns) {
@@ -39,7 +45,7 @@ public final class LlamaEngine implements AutoCloseable {
             encoded.append(role).append(FIELD_SEP).append(m.text).append(RECORD_SEP);
         }
         StreamCollector collector = new StreamCollector(listener);
-        String packed = nativeGenerate(handle, encoded.toString(), maxNewTokens, temperature, topK, flags, collector);
+        String packed = nativeGenerate(handle, encoded.toString(), maxNewTokens, temperature, topK, flags, grammar, collector);
         collector.finish();
         if (collector.error != null) throw new IllegalStateException(collector.error.getMessage(), collector.error);
         return parseResult(collector.text.toString(), packed);
@@ -106,7 +112,7 @@ public final class LlamaEngine implements AutoCloseable {
 
     private native long nativeLoadModel(String modelPath, String nativeLibDir, int contextTokens, int threads);
     private native String nativeGenerate(long handle, String encodedTurns, int maxNewTokens, float temperature,
-                                         int topK, int flags, StreamCollector sink);
+                                         int topK, int flags, String grammar, StreamCollector sink);
     private native int nativeContextSize(long handle);
     private native void nativeCancel(long handle);
     private native void nativeReset(long handle);

@@ -317,12 +317,19 @@ public final class TermuxBridge implements Closeable {
 
     /** Runs {@code command} with bash inside the project directory; output streams to the listener. */
     public int exec(String project, String command, Map<String, String> env, long timeoutMs, ExecListener listener) throws IOException {
+        return exec(project, command, env, null, timeoutMs, listener);
+    }
+
+    /** As above; {@code stdin} (may be null) is typed into the program, then its input is closed. */
+    public int exec(String project, String command, Map<String, String> env, String stdin, long timeoutMs,
+                    ExecListener listener) throws IOException {
         int id = ids.getAndIncrement();
         ExecState state = new ExecState(listener);
         execs.put(id, state);
         try {
             JSONObject req = new JSONObject().put("project", project).put("command", command).put("timeout_ms", timeoutMs);
             if (env != null && !env.isEmpty()) req.put("env", new JSONObject(env));
+            if (stdin != null) req.put("stdin", stdin);
             state.sentNanos = System.nanoTime();
             send(EXEC, id, req);
         } catch (JSONException e) {

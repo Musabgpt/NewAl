@@ -30,6 +30,8 @@ public final class CodeStreamParser {
         void onFileEnd(boolean complete) throws IOException;
         void onEdit(String path, String editBody, boolean complete) throws IOException;
         void onRunCommand(String command);
+        /** Sample keyboard input for an interactive program (STDIN: block). */
+        default void onStdin(String input) {}
     }
 
     /** Chooses a file for a fenced block that has no name, or null to ignore the block. */
@@ -40,11 +42,13 @@ public final class CodeStreamParser {
             Pattern.CASE_INSENSITIVE);
     static final Pattern RUN = Pattern.compile("^[\\s#>*_-]*run\\s*[:：]\\s*`*\\s*(.+?)\\s*`*\\s*$",
             Pattern.CASE_INSENSITIVE);
+    static final Pattern STDIN_HEADER = Pattern.compile("^[\\s#>*_`-]*(stdin|input)\\s*[:：]?\\s*[`*_]*\\s*$",
+            Pattern.CASE_INSENSITIVE);
     static final Pattern FENCE_OPEN = Pattern.compile("^ {0,3}(`{3,})\\s*([^`]*)$");
     static final Pattern PATH_TOKEN = Pattern.compile("^[\\w./-]*\\w\\.[A-Za-z0-9]+$");
     static final String SEARCH_MARK = "<<<<<<<";
 
-    private enum Mode { OUTSIDE, FILE, EDIT, RAW_EDIT, SKIP }
+    private enum Mode { OUTSIDE, FILE, EDIT, RAW_EDIT, SKIP, STDIN }
 
     private final Sink sink;
     private final UnnamedBlockResolver resolver;
@@ -52,7 +56,7 @@ public final class CodeStreamParser {
     private final StringBuilder editBody = new StringBuilder();
     private Mode mode = Mode.OUTSIDE;
     private String pendingPath;
-    private boolean pendingIsEdit;
+    private boolean pendingIsEdit, pendingStdin;
     private String blockPath;
     private int fenceLen;
     private boolean firstLine;
@@ -146,6 +150,7 @@ public final class CodeStreamParser {
             line.setLength(0);
             onLine(l);
         }
+        if (mode == Mode.STDIN && naturalEnd) sink.onStdin(editBody.toString());
         if (mode == Mode.EDIT || mode == Mode.RAW_EDIT) {
             boolean complete = (mode == Mode.RAW_EDIT || naturalEnd) && editBody.toString().trim().endsWith("REPLACE");
             emitEdit(complete);
@@ -185,6 +190,10 @@ public final class CodeStreamParser {
             case SKIP:
                 if (isClosingFence(l)) mode = Mode.OUTSIDE;
                 return;
+            case STDIN:
+                if (isClosingFence(l)) { sink.onStdin(editBody.toString()); editBody.setLength(0); mode = Mode.OUTSIDE; }
+                else editBody.append(l).append('\n');
+                return;
             default:
                 onOutsideLine(l);
         }
@@ -195,6 +204,13 @@ public final class CodeStreamParser {
         if (fence.matches()) {
             fenceLen = fence.group(1).length();
             String info = fence.group(2).trim();
+            if (pendingStdin) {
+                pendingStdin = false;
+                pendingPath = null;
+                mode = Mode.STDIN;
+                editBody.setLength(0);
+                return;
+            }
             String path = pendingPath != null ? pendingPath : pathFromInfo(info);
             boolean edit = pendingPath != null && pendingIsEdit;
             pendingPath = null;
@@ -220,8 +236,14 @@ public final class CodeStreamParser {
             editBody.append(l).append('\n');
             return;
         }
+        if (STDIN_HEADER.matcher(l).matches()) {
+            pendingStdin = true;
+            pendingPath = null;
+            return;
+        }
         Matcher h = HEADER.matcher(l);
         if (h.matches()) {
+            pendingStdin = false;
             pendingPath = h.group(2);
             pendingIsEdit = h.group(1).equalsIgnoreCase("edit");
             return;

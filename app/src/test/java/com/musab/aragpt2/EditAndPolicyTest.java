@@ -100,6 +100,22 @@ public class EditAndPolicyTest {
         }
     }
 
+    @Test public void missingModulesMapToInstalls() {
+        List<String> files = Arrays.asList("main.py", "helpers/__init__.py");
+        assertEquals("python -m pip install -q --disable-pip-version-check requests",
+                MissingModule.installCommand("ModuleNotFoundError: No module named 'requests'", files));
+        assertEquals("python -m pip install -q --disable-pip-version-check opencv-python",
+                MissingModule.installCommand("ModuleNotFoundError: No module named 'cv2'", files));
+        assertEquals("python -m pip install -q --disable-pip-version-check pyyaml",
+                MissingModule.installCommand("ModuleNotFoundError: No module named 'yaml.loader'", files));
+        // A project module is a code bug, not something to install.
+        assertNull(MissingModule.installCommand("ModuleNotFoundError: No module named 'helpers'", files));
+        assertNull(MissingModule.installCommand("ModuleNotFoundError: No module named 'tkinter'", files));
+        assertEquals("npm install --silent --no-audit --no-fund express",
+                MissingModule.installCommand("Error: Cannot find module 'express'", files));
+        assertNull(MissingModule.installCommand("Error: Cannot find module './util'", files));
+    }
+
     @Test public void errorSignaturesIgnoreLineNumbers() {
         String a = "Traceback (most recent call last):\n  File \"main.py\", line 3, in <module>\nNameError: name 'x' is not defined";
         String b = "Traceback (most recent call last):\n  File \"main.py\", line 9, in <module>\nNameError: name 'x' is not defined";

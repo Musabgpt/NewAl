@@ -3,6 +3,7 @@ package com.musab.aragpt2;
 import android.content.Intent;
 import android.content.SharedPreferences;
 import android.net.Uri;
+import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
@@ -38,7 +39,7 @@ import java.util.concurrent.TimeUnit;
 public class MainActivity extends AppCompatActivity {
     private static final String PREFS="h33_prefs", PREF_MODEL_URI="model_uri", PREF_MODEL_NAME="model_name", PREF_MODEL_LOCAL_PATH="model_local_path", PREF_MODEL_SIZE="model_local_size";
     private static final String PREF_AGENT_MODE="agent_mode", PREF_AGENT_TOKEN="agent_token";
-    private static final int CONTEXT_TOKENS=4096, MAX_NEW_TOKENS=256, TOP_K=40, AGENT_PORT=47811, REQ_TERMUX=41;
+    private static final int CONTEXT_TOKENS=4096, MAX_NEW_TOKENS=256, TOP_K=40, AGENT_PORT=47811, REQ_TERMUX=41, REQ_NOTIFY=42;
     private static final float TEMPERATURE=0.70f;
 
     private final ExecutorService executor=Executors.newSingleThreadExecutor();
@@ -94,6 +95,13 @@ public class MainActivity extends AppCompatActivity {
         agentMode=prefs.getBoolean(PREF_AGENT_MODE,false);
         renderAgentButton();
         restoreSavedModel();
+        // While a task runs, Back sends the app to the background instead of closing it.
+        getOnBackPressedDispatcher().addCallback(this,new androidx.activity.OnBackPressedCallback(true){
+            @Override public void handleOnBackPressed(){
+                if(agentLoop!=null)moveTaskToBack(true);
+                else{setEnabled(false);getOnBackPressedDispatcher().onBackPressed();setEnabled(true);}
+            }
+        });
     }
 
     private void installKeyboardInsetsFix(){
@@ -349,6 +357,9 @@ public class MainActivity extends AppCompatActivity {
 
     private void startAgent(String request,boolean resume){
         setGenerating(true);
+        if(Build.VERSION.SDK_INT>=33&&checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS)!=android.content.pm.PackageManager.PERMISSION_GRANTED)
+            requestPermissions(new String[]{android.Manifest.permission.POST_NOTIFICATIONS},REQ_NOTIFY);
+        AgentService.start(this,AgentLoop.tail(request,200));
         executor.execute(()->{
             if(!resume){
                 long userId=historyStore.append(ChatMessage.ROLE_USER,request);long t=System.currentTimeMillis();
@@ -380,6 +391,7 @@ public class MainActivity extends AppCompatActivity {
                 text="❌ "+safeMessage(e);
             }finally{agentLoop=null;live.persist=false;}
             final String summary=text;
+            AgentService.finish(getApplicationContext(),summary.startsWith("✅")?"✅ اكتملت المهمة":summary.startsWith("⚠️")?"⚠️ المهمة تحتاج تدخلك":"❌ فشلت المهمة",summary);
             long id=historyStore.append(ChatMessage.ROLE_ASSISTANT,summary);long t=System.currentTimeMillis();
             runOnUiThread(()->{adapter.add(new ChatMessage(id,ChatMessage.ROLE_ASSISTANT,summary,t));scrollToEnd();setGenerating(false);});
         });
@@ -389,7 +401,8 @@ public class MainActivity extends AppCompatActivity {
         final LlamaEngine e=engine;
         return new AgentLoop.Model(){
             // Greedy decoding for deterministic code; generate until the answer ends or the context is full.
-            @Override public GenerationResult generate(List<ChatMessage> turns,TextListener l){return e.generate(turns,0,0f,1,LlamaEngine.FLAG_RAW,l);}
+            // The grammar only allows FILE/EDIT/STDIN/RUN blocks, so the output always parses.
+            @Override public GenerationResult generate(List<ChatMessage> turns,TextListener l){return e.generate(turns,0,0f,1,LlamaEngine.FLAG_RAW,AgentLoop.OUTPUT_GRAMMAR,l);}
             @Override public void cancel(){e.cancel();}
             @Override public int contextTokens(){return e.contextTokens();}
         };
@@ -401,6 +414,7 @@ public class MainActivity extends AppCompatActivity {
             else if(state==AgentLoop.State.RUNNING)live.start("▶ "+detail+"\n");
             String label=state.name()+(detail==null||detail.isEmpty()?"":" • "+AgentLoop.tail(detail,120));
             runOnUiThread(()->status.setText(label));
+            AgentService.update(getApplicationContext(),label);
         }
         @Override public void onModelText(String delta){live.append(delta);}
         @Override public void onOutput(boolean stderr,String text){live.append(text);}
