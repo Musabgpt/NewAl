@@ -52,6 +52,26 @@ final class TermuxLauncher implements TermuxBridge.Launcher {
         i.putExtra("com.termux.RUN_COMMAND_WORKDIR", HOME);
         i.putExtra("com.termux.RUN_COMMAND_BACKGROUND", true);
         i.putExtra("com.termux.RUN_COMMAND_COMMAND_LABEL", "NewAl agent");
+        start(i);
+    }
+
+    /**
+     * Opens a visible Termux session running an interactive program in its project folder,
+     * leaving a shell there when it exits.
+     */
+    void openInteractive(String projectId, String command) {
+        Intent i = new Intent("com.termux.RUN_COMMAND");
+        i.setClassName(PACKAGE, "com.termux.app.RunCommandService");
+        i.putExtra("com.termux.RUN_COMMAND_PATH", "/data/data/com.termux/files/usr/bin/bash");
+        i.putExtra("com.termux.RUN_COMMAND_ARGUMENTS", new String[]{"-c",
+                command + "; echo; echo '[program finished]'; exec bash"});
+        i.putExtra("com.termux.RUN_COMMAND_WORKDIR", HOME + "/newal/projects/" + projectId);
+        i.putExtra("com.termux.RUN_COMMAND_BACKGROUND", false);
+        i.putExtra("com.termux.RUN_COMMAND_SESSION_ACTION", "0"); // new session, bring Termux to front
+        start(i);
+    }
+
+    private void start(Intent i) {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) context.startForegroundService(i);
         else context.startService(i);
     }

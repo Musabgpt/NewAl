@@ -44,7 +44,12 @@ public final class AgentLoop {
     public static final class Outcome {
         public final State state;
         public final String message;
-        Outcome(State state, String message) { this.state = state; this.message = message; }
+        /** Set when the program works but needs a person at the keyboard: run it in a Termux session. */
+        public final String interactiveCommand;
+        Outcome(State state, String message) { this(state, message, null); }
+        Outcome(State state, String message, String interactiveCommand) {
+            this.state = state; this.message = message; this.interactiveCommand = interactiveCommand;
+        }
     }
 
     static final String SYSTEM_PROMPT =
@@ -57,7 +62,7 @@ public final class AgentLoop {
             + "replacement lines\n>>>>>>> REPLACE\n```\n"
             + "Rules:\n"
             + "- Complete, runnable code. Never placeholders such as \"...\" or \"your code here\".\n"
-            + "- No keyboard is available: never read input(); use fixed example values.\n"
+            + "- The program is first run without a keyboard; interactive input() is fine when the task needs it.\n"
             + "- Prefer the standard library; list third-party Python packages in requirements.txt.\n"
             + "- The project runs with the usual command for its language (python main.py, node index.js, "
             + "bash main.sh). For another command add one line: RUN: <command>\n"
@@ -171,6 +176,17 @@ public final class AgentLoop {
                     note(result.signature(), changed);
                     return finish(State.SUCCESS, "نجح التنفيذ" + (result.isTest ? " واجتازت الاختبارات" : "")
                             + " (exit 0) في المحاولة " + ws.attempt + ": " + result.command);
+                }
+                if (result.waitsForInput()) {
+                    // Not a bug: the program ran correctly up to the point where it asks the user
+                    // for input, which a background run cannot provide. Asking the model to
+                    // "fix" that would only remove the interactivity the user asked for.
+                    put(metrics, "iteration_ms", ms(iterationStart));
+                    report(metrics);
+                    note("interactive", changed);
+                    Outcome o = finish(State.SUCCESS, "البرنامج يعمل حتى لحظة طلب الإدخال (برنامج تفاعلي): "
+                            + result.command + "\nشغّله في Termux لتتفاعل معه.");
+                    return new Outcome(o.state, o.message, result.command);
                 }
                 failure = result.report();
             }
@@ -357,6 +373,26 @@ public final class AgentLoop {
         @Override public void onExit(TermuxBridge.ExecResult r) {
             result = r;
             done.countDown();
+        }
+
+        /**
+         * The run ended only because nobody typed anything: Python's input() hit end of input,
+         * or the program sat at a prompt until the timeout.
+         */
+        boolean waitsForInput() {
+            if (isTest || validationErrors != null || result == null || result.disconnected) return false;
+            String e = err.toString();
+            if (e.contains("EOFError") && (e.contains("input(") || e.contains("EOF when reading a line"))) {
+                // Only when EOFError is the whole failure, not a later traceback.
+                String last = e.trim().substring(e.trim().lastIndexOf('\n') + 1);
+                return last.startsWith("EOFError");
+            }
+            if (result.timedOut && e.trim().isEmpty()) {
+                String o = out.toString();
+                String t = o.trim();
+                return !o.endsWith("\n") && !t.isEmpty() && ":?>".indexOf(t.charAt(t.length() - 1)) >= 0;
+            }
+            return false;
         }
 
         boolean success() {

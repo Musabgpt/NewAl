@@ -365,6 +365,16 @@ public class MainActivity extends AppCompatActivity {
                 live.end();
                 String icon=o.state==AgentLoop.State.SUCCESS?"✅ ":o.state==AgentLoop.State.WAITING_FOR_USER?"⚠️ ":"❌ ";
                 text=icon+o.message+"\n📁 ~/newal/projects/"+ws.id;
+                if(o.interactiveCommand!=null){
+                    String projectId=ws.id,command=o.interactiveCommand;
+                    runOnUiThread(()->new AlertDialog.Builder(this).setTitle("برنامج تفاعلي")
+                            .setMessage("البرنامج يعمل وينتظر إدخالك. تشغيله الآن في Termux لتكتب له؟\n\n"+command)
+                            .setPositiveButton("شغّل في Termux",(d,w)->{
+                                try{new TermuxLauncher(this).openInteractive(projectId,command);}
+                                catch(Exception e){setWorking(false,"تعذر فتح Termux: "+safeMessage(e));}
+                            })
+                            .setNegativeButton("لاحقاً",null).show());
+                }
             }catch(Exception e){
                 live.end();
                 text="❌ "+safeMessage(e);

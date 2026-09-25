@@ -126,6 +126,26 @@ public class AgentLoopIntegrationTest {
         assertTrue(out.message.contains("الاختبارات"));
     }
 
+    /** Regression: an interactive calculator is not a bug to "fix" by rewriting it. */
+    @Test public void interactiveProgramIsRecognisedInsteadOfRewritten() throws Exception {
+        ScriptedModel model = new ScriptedModel(
+                "FILE: main.py\n```python\nprint('Calculator')\nchoice = input('Enter your choice: ')\nprint(choice)\n```");
+        AgentLoop.Outcome out = new AgentLoop(model, bridge, workspace(), new Recorder()).run("calculator");
+        assertEquals(out.message, AgentLoop.State.SUCCESS, out.state);
+        assertEquals("python main.py", out.interactiveCommand);
+        assertEquals(1, model.calls);
+    }
+
+    @Test public void realErrorAfterInputIsStillFixed() throws Exception {
+        ScriptedModel model = new ScriptedModel(
+                "FILE: main.py\n```python\nimport sys\nx = undefined_name\n```\n",
+                "FILE: main.py\n```python\nprint('ok')\n```\n");
+        AgentLoop.Outcome out = new AgentLoop(model, bridge, workspace(), new Recorder()).run("x");
+        assertEquals(AgentLoop.State.SUCCESS, out.state);
+        assertEquals(null, out.interactiveCommand);
+        assertEquals(2, model.calls);
+    }
+
     @Test public void repeatedIdenticalFailureStopsForTheUser() throws Exception {
         ScriptedModel model = new ScriptedModel(
                 "FILE: main.py\n```python\nraise SystemExit('boom 1')\n```\n",
