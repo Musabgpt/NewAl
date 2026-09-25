@@ -40,7 +40,9 @@ public class MainActivity extends AppCompatActivity {
     private static final String PREF_MODEL_SIZE = "model_local_size";
 
     private static final int CONTEXT_TOKENS = 2048;
-    private static final int MAX_NEW_TOKENS = 256;
+    // Room for ~100-150 lines of code. The native side clamps this further if
+    // the prompt is long, so it can never overflow the context.
+    private static final int MAX_NEW_TOKENS = 768;
     private static final int TOP_K = 40;
     private static final float TEMPERATURE = 0.20f;
 
@@ -278,7 +280,8 @@ public class MainActivity extends AppCompatActivity {
             long userId = historyStore.append(ChatMessage.ROLE_USER, question);
             long userTime = System.currentTimeMillis();
             memoryManager.rememberExplicit(question);
-            List<ChatMessage> turns = memoryManager.buildTurns(historyStore.loadAll());
+            List<ChatMessage> turns = memoryManager.buildTurns(
+                    historyStore.loadAll(), CONTEXT_TOKENS, MAX_NEW_TOKENS);
             runOnUiThread(() -> {
                 adapter.add(new ChatMessage(userId, ChatMessage.ROLE_USER, question, userTime));
                 scrollToEnd();
@@ -289,7 +292,6 @@ public class MainActivity extends AppCompatActivity {
                 String finalAnswer = result.text.isEmpty() ? "…" : result.text;
                 long assistantId = historyStore.append(ChatMessage.ROLE_ASSISTANT, finalAnswer);
                 long assistantTime = System.currentTimeMillis();
-                memoryManager.refreshExtractiveSummary(historyStore.loadAll());
                 String metric = formatMetrics(result);
                 runOnUiThread(() -> {
                     adapter.add(new ChatMessage(assistantId, ChatMessage.ROLE_ASSISTANT, finalAnswer, assistantTime));
@@ -317,6 +319,7 @@ public class MainActivity extends AppCompatActivity {
 
     private void clearChat() {
         historyStore.clear();
+        memoryManager.resetWindow();
         if (engine != null) engine.resetContext();
         adapter.setAll(java.util.Collections.emptyList());
         status.setText("تم مسح المحادثة والذاكرة");
