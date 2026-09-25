@@ -1,25 +1,30 @@
 package com.musab.aragpt2;
 
 import java.util.ArrayList;
-import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
-/** Deterministic local memory; durable facts require an explicit remember request. */
+/**
+ * Deterministic local memory + context-window planner.
+ *
+ * Stable-prefix design: the window start only moves in large jumps (when the
+ * token budget overflows) and the summary of dropped messages is rebuilt only
+ * at those jumps. Between jumps the prompt is append-only, so the native
+ * KV cache can reuse everything that was already processed.
+ */
 public final class MemoryManager {
-    // Conservative chars-per-token estimate covering mixed Arabic/English text;
-    // real tokenizers give ~1-2 chars/token for Arabic, so this keeps the char
-    // budget safely under the model's actual token budget.
-    private static final double CHARS_PER_TOKEN_ESTIMATE = 2.0;
-    private static final int GENERATION_SAFETY_MARGIN_TOKENS = 64;
-    private static final int MIN_CONTEXT_TOKENS_BUDGET = 128;
+    private static final int SAFETY_MARGIN_TOKENS = 64;
+    private static final int MIN_HISTORY_TOKENS = 192;
+    private static final int PER_MESSAGE_OVERHEAD_TOKENS = 6;
+    /** After a jump, fill only this fraction of the budget so the window can grow again. */
+    private static final double REFILL_FRACTION = 0.55;
 
     private static final int MAX_MEMORY_CHARS = 1200;
-    private static final int MAX_SUMMARY_CHARS = 1000;
-    private static final int SUMMARY_REFRESH_INTERVAL = 5;
+    private static final int MAX_SUMMARY_CHARS = 600;
+    private static final int SUMMARY_PIECE_CHARS = 120;
 
     private static final Pattern EXPLICIT = Pattern.compile(
             "^(?:remember|please remember|تذكر|تذكّر)\\s*[:：-]?\\s*(.+)$",
@@ -28,6 +33,7 @@ public final class MemoryManager {
             "^(?:my name is|اسمي)\\s+(.+)$", Pattern.CASE_INSENSITIVE | Pattern.UNICODE_CASE);
 
     private final ChatHistoryStore store;
+    private long windowStartId = Long.MIN_VALUE;
 
     public MemoryManager(ChatHistoryStore store) { this.store = store; }
 
@@ -53,41 +59,94 @@ public final class MemoryManager {
         }
     }
 
+    /** Call when the chat is cleared. */
+    public synchronized void resetWindow() {
+        windowStartId = Long.MIN_VALUE;
+    }
+
     /**
      * Builds the turn list to send to the engine.
      *
      * @param contextTokens the model's context window size (n_ctx)
-     * @param maxNewTokens  the max tokens the engine is allowed to generate this turn
+     * @param maxNewTokens  the max tokens the engine may generate this turn
      */
-    public List<ChatMessage> buildTurns(List<ChatMessage> history, int contextTokens, int maxNewTokens) {
-        int availableTokens = Math.max(MIN_CONTEXT_TOKENS_BUDGET,
-                contextTokens - maxNewTokens - GENERATION_SAFETY_MARGIN_TOKENS);
-        int maxContextChars = (int) (availableTokens * CHARS_PER_TOKEN_ESTIMATE);
+    public synchronized List<ChatMessage> buildTurns(List<ChatMessage> history,
+                                                     int contextTokens, int maxNewTokens) {
+        List<ChatMessage> result = new ArrayList<>();
+        if (history == null || history.isEmpty()) return result;
 
-        List<ChatMessage> recent = new ArrayList<>();
-        String memory = memoryBlock();
-        int budget = maxContextChars - memory.length();
+        int start = indexOfId(history, windowStartId);
+        if (start < 0) start = 0;
 
-        for (int i = history.size() - 1; i >= 0; i--) {
-            ChatMessage m = history.get(i);
-            int cost = m.text.length() + 16;
-            if (cost > budget) break;
-            budget -= cost;
-            recent.add(0, m);
+        String memory = memoryBlock(start > 0);
+        int budget = historyBudget(contextTokens, maxNewTokens, memory);
+
+        if (costFrom(history, start) > budget) {
+            int target = Math.max(1, (int) (budget * REFILL_FRACTION));
+            int newStart = history.size() - 1;
+            int used = messageCost(history.get(newStart));
+            while (newStart - 1 > start) {
+                int c = messageCost(history.get(newStart - 1));
+                if (used + c > target) break;
+                used += c;
+                newStart--;
+            }
+            // Chat templates expect the conversation to start with a user turn.
+            while (newStart < history.size() - 1
+                    && history.get(newStart).role != ChatMessage.ROLE_USER) {
+                newStart++;
+            }
+            start = Math.max(start, newStart);
+            rebuildSummary(history, start);
+            memory = memoryBlock(true);
         }
+        windowStartId = history.get(start).id;
 
         if (!memory.isEmpty()) {
-            List<ChatMessage> result = new ArrayList<>(recent.size() + 1);
             result.add(new ChatMessage(-2, ChatMessage.ROLE_SYSTEM, memory, 0));
-            result.addAll(recent);
-            return result;
         }
-        return recent;
+        result.addAll(history.subList(start, history.size()));
+        return result;
     }
 
-    private String memoryBlock() {
+    private static int historyBudget(int contextTokens, int maxNewTokens, String memory) {
+        return Math.max(MIN_HISTORY_TOKENS,
+                contextTokens - maxNewTokens - SAFETY_MARGIN_TOKENS - estimateTokens(memory));
+    }
+
+    private static int indexOfId(List<ChatMessage> history, long id) {
+        if (id == Long.MIN_VALUE) return -1;
+        for (int i = 0; i < history.size(); i++) {
+            if (history.get(i).id == id) return i;
+        }
+        return -1;
+    }
+
+    private static int costFrom(List<ChatMessage> history, int start) {
+        int total = 0;
+        for (int i = start; i < history.size(); i++) total += messageCost(history.get(i));
+        return total;
+    }
+
+    private static int messageCost(ChatMessage m) {
+        return estimateTokens(m.text) + PER_MESSAGE_OVERHEAD_TOKENS;
+    }
+
+    /**
+     * Script-aware token estimate: ASCII (code, English) is ~3 chars/token,
+     * Arabic and other non-ASCII text is far denser in tokens.
+     */
+    static int estimateTokens(String s) {
+        if (s == null || s.isEmpty()) return 0;
+        int ascii = 0, other = 0;
+        for (int i = 0; i < s.length(); i++) {
+            if (s.charAt(i) < 128) ascii++; else other++;
+        }
+        return (int) Math.ceil(ascii / 3.0 + other / 1.3);
+    }
+
+    private String memoryBlock(boolean includeSummary) {
         Map<String, String> facts = store.loadFacts();
-        String summary = store.getSummary();
         StringBuilder b = new StringBuilder();
         if (!facts.isEmpty()) {
             b.append("Persistent user memory (explicitly saved by the user):\n");
@@ -96,40 +155,30 @@ public final class MemoryManager {
                 if (b.length() >= MAX_MEMORY_CHARS) break;
             }
         }
-        if (summary != null && !summary.trim().isEmpty()) {
-            b.append("Earlier conversation extract:\n").append(summary.trim());
+        if (includeSummary) {
+            String summary = store.getSummary();
+            if (summary != null && !summary.trim().isEmpty()) {
+                b.append("Earlier topics in this chat (context only, do not answer them again):\n")
+                        .append(summary.trim());
+            }
         }
         return b.length() > MAX_MEMORY_CHARS ? b.substring(0, MAX_MEMORY_CHARS) : b.toString();
     }
 
-    /**
-     * Recomputes the extractive summary only every SUMMARY_REFRESH_INTERVAL user
-     * turns. Recomputing on every turn changes the memory block's text on every
-     * request, which invalidates the native KV-cache prefix match and forces a
-     * full context reprocess each time -- this is the main cause of the app
-     * getting progressively slower during a long conversation.
-     */
-    public void refreshExtractiveSummary(List<ChatMessage> history) {
-        if (history.size() < 10) return;
-        if (history.size() % SUMMARY_REFRESH_INTERVAL != 0) return;
-
-        LinkedHashSet<String> pieces = new LinkedHashSet<>();
-        int recentStart = Math.max(0, history.size() - 20);
-        for (int i = 0; i < recentStart; i++) {
+    /** Extracts the most recent user requests among the messages that left the window. */
+    private void rebuildSummary(List<ChatMessage> history, int endExclusive) {
+        List<String> pieces = new ArrayList<>();
+        int total = 0;
+        for (int i = endExclusive - 1; i >= 0; i--) {
             ChatMessage m = history.get(i);
             if (m.role != ChatMessage.ROLE_USER) continue;
-            String text = m.text.replaceAll("\\s+", " ").trim();
-            if (text.isEmpty()) continue;
-            int dot = text.indexOf('.');
-            int end = dot > 40 ? dot + 1 : Math.min(text.length(), 140);
-            pieces.add(text.substring(0, end));
+            String t = m.text.replaceAll("\\s+", " ").trim();
+            if (t.isEmpty()) continue;
+            if (t.length() > SUMMARY_PIECE_CHARS) t = t.substring(0, SUMMARY_PIECE_CHARS) + "…";
+            if (total + t.length() + 3 > MAX_SUMMARY_CHARS) break;
+            pieces.add(0, t);
+            total += t.length() + 3;
         }
-        StringBuilder summary = new StringBuilder();
-        for (String piece : pieces) {
-            if (summary.length() + piece.length() + 2 > MAX_SUMMARY_CHARS) break;
-            if (summary.length() > 0) summary.append(" | ");
-            summary.append(piece);
-        }
-        store.setSummary(summary.toString());
+        store.setSummary(String.join(" | ", pieces));
     }
 }
