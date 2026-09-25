@@ -22,6 +22,9 @@ public class AgentsAndSkillsTest {
     @Test public void autoAgentFollowsTheRequest() {
         assertEquals(AgentProfile.CODER, AgentProfile.choose("write a calculator", false));
         assertEquals(AgentProfile.AUTOMATOR, AgentProfile.choose("كم نسبة البطارية", false));
+        assertEquals(AgentProfile.AUTOMATOR, AgentProfile.choose("افتح يوتيوب", false));
+        assertEquals(AgentProfile.AUTOMATOR, AgentProfile.choose("set an alarm for 7", false));
+        assertEquals(AgentProfile.CODER, AgentProfile.choose("write a program to open csv files", false));
         assertEquals(AgentProfile.EXPLAINER, AgentProfile.choose("how does main.py work?", true));
         assertEquals(AgentProfile.CODER, AgentProfile.choose("how does main.py work?", false));
         assertEquals(AgentProfile.TESTER, AgentProfile.choose("add unit tests", true));

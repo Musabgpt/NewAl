@@ -426,7 +426,7 @@ public class MainActivity extends AppCompatActivity {
         }
         if(agentMode){
             TextView hint=new TextView(this);
-            hint.setText("\nأوامر سريعة: /code /plan /test /fix /explain /auto-phone\nومهارات: /interactive /scraper /api /data /sqlite /bash /files /algo …");
+            hint.setText("\nأوامر سريعة: /code /plan /test /fix /explain /phone\nومهارات: /interactive /scraper /api /data /sqlite /bash /files /algo …");
             hint.setTextColor(getResources().getColor(R.color.text_secondary,getTheme()));
             hint.setTextSize(13);
             examples.addView(hint);

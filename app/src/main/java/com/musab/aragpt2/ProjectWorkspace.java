@@ -61,8 +61,10 @@ public final class ProjectWorkspace {
     }
 
     public static ProjectWorkspace create(File root) throws IOException {
-        String id = "p" + System.currentTimeMillis();
-        File dir = new File(root, id);
+        long stamp = System.currentTimeMillis();
+        File dir = new File(root, "p" + stamp);
+        while (dir.exists()) dir = new File(root, "p" + (++stamp)); // unique even within one millisecond
+        String id = dir.getName();
         if (!new File(dir, META).mkdirs()) throw new IOException("تعذر إنشاء مجلد المشروع");
         ProjectWorkspace w = new ProjectWorkspace(id, dir);
         w.saveJournal();

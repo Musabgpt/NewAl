@@ -106,6 +106,14 @@ public final class AgentLoop {
     private final ProjectWorkspace ws;
     private final Listener listener;
     private AgentProfile agent = AgentProfile.CODER;
+    /** Device tools run by the app itself (optional). */
+    public LocalTools localTools;
+    /** Learns from outcomes: example recall, known fixes, strategy choice (optional). */
+    public ExperienceStore experience;
+    /** Manager model used for planning; defaults to the main model. */
+    public Model planner;
+    private String category = "general";
+    private String pendingFixSignature, pendingFixText;
     private Skills.Skill skill;
     private String plan = "";
     private volatile boolean cancelled;
@@ -133,9 +141,18 @@ public final class AgentLoop {
 
     /** Starts a task with a specific agent and optional skill (AUTO picks an agent from the request). */
     public Outcome run(String request, AgentProfile agentProfile, Skills.Skill chosenSkill) {
-        agent = agentProfile == null || agentProfile == AgentProfile.AUTO
-                ? AgentProfile.choose(request, !ws.isEmpty()) : agentProfile;
         skill = chosenSkill != null ? chosenSkill : Skills.match(request);
+        category = skill != null ? skill.id : "general";
+        if (agentProfile == null || agentProfile == AgentProfile.AUTO) {
+            agent = AgentProfile.choose(request, !ws.isEmpty());
+            // Learned choice between the two build strategies, from past rewards in this category.
+            if (experience != null && (agent == AgentProfile.CODER || agent == AgentProfile.ARCHITECT)) {
+                agent = AgentProfile.byId(experience.choose(category,
+                        java.util.Arrays.asList(AgentProfile.CODER.id, AgentProfile.ARCHITECT.id), agent.id));
+            }
+        } else {
+            agent = agentProfile;
+        }
         ws.agentId = agent.id;
         ws.skillId = skill == null ? "" : skill.id;
         ws.request = request;
@@ -189,10 +206,16 @@ public final class AgentLoop {
     private Outcome loop(String prompt, boolean executeFirst) {
         // Connect to Termux while the model is generating, so files stream into Termux live
         // and execution starts without a connection delay.
+        final org.json.JSONArray local = localTools == null ? new org.json.JSONArray() : localTools.list();
+        toolsSection = describeTools(local);
         Thread warm = new Thread(() -> {
             try {
                 bridge.ensureConnected(15_000);
-                toolsSection = describeTools(bridge.listTools());
+                org.json.JSONArray all = new org.json.JSONArray();
+                for (int i = 0; i < local.length(); i++) all.put(local.opt(i));
+                org.json.JSONArray remote = bridge.listTools();
+                for (int i = 0; i < remote.length(); i++) all.put(remote.opt(i));
+                toolsSection = describeTools(all);
             } catch (IOException ignored) {
             }
         }, "termux-prewarm");
@@ -219,6 +242,7 @@ public final class AgentLoop {
                 }
                 ws.attempt++;
                 Generation g = generate(prompt, failure != null, metrics);
+                if (failure != null && g.result != null) pendingFixText = g.result.text;
                 if (cancelled) return finish(State.FAILED, "أُلغي بطلب المستخدم");
                 if (g.error != null) return finish(State.FAILED, "خطأ في النموذج: " + g.error);
                 changed.addAll(g.changed);
@@ -278,6 +302,7 @@ public final class AgentLoop {
             setState(State.ANALYZING, null);
             long analysisStart = System.nanoTime();
             String signature = result != null ? result.signature() : signatureOf(failure);
+            pendingFixSignature = signature;
             note(signature, changed);
             String stuck = detectStuck(signature, changed);
             prompt = fixPrompt(failure, result);
@@ -655,6 +680,23 @@ public final class AgentLoop {
 
     // ---------------------------------------------------------------- prompts
 
+    /** A similar task solved before, as a worked example (learned from earlier successes). */
+    private String recallExamples() {
+        if (experience == null || !ws.isEmpty()) return "";
+        List<ExperienceStore.Experience> similar = experience.similar(ws.request, 1);
+        if (similar.isEmpty()) return "";
+        ExperienceStore.Experience e = similar.get(0);
+        StringBuilder b = new StringBuilder("\nA similar task you solved before (its code worked):\nTask: ").append(e.request).append('\n');
+        int budget = Math.max(0, promptBudgetChars() / 3);
+        for (Map.Entry<String, String> f : e.files.entrySet()) {
+            if (f.getValue().length() > budget) break;
+            b.append("FILE: ").append(f.getKey()).append("\n```").append(languageFor(f.getKey())).append('\n')
+                    .append(f.getValue()).append(f.getValue().endsWith("\n") ? "" : "\n").append("```\n");
+            budget -= f.getValue().length();
+        }
+        return b.append("Adapt it to the new task; do not copy what does not fit.\n").toString();
+    }
+
     /** Stable per task (agent, skill and tools do not change between attempts), so its KV cache is reused. */
     private String systemPrompt() {
         StringBuilder b = new StringBuilder(SYSTEM_PROMPT);
@@ -681,7 +723,8 @@ public final class AgentLoop {
             @Override public void onSay(String text) { out.append("- ").append(text).append('\n'); }
         }, null);
         try {
-            GenerationResult r = model.generate(turns, delta -> { listener.onModelText(delta); parser.feed(delta); });
+            Model m = planner != null ? planner : model;
+            GenerationResult r = m.generate(turns, delta -> { listener.onModelText(delta); parser.feed(delta); });
             parser.finish(r.finishedNaturally());
         } catch (Exception e) {
             return "";
@@ -692,6 +735,7 @@ public final class AgentLoop {
     private String initialPrompt() {
         StringBuilder b = new StringBuilder("Task: ").append(ws.request).append('\n');
         if (!plan.isEmpty()) b.append("\nPlan:\n").append(plan);
+        b.append(recallExamples());
         if (!ws.isEmpty()) {
             b.append("\nThe project already contains these files; change only what the task needs:\n");
             appendFiles(b, allPaths(), promptBudgetChars() - b.length());
@@ -717,6 +761,9 @@ public final class AgentLoop {
             for (String n : ws.attemptNotes.subList(0, ws.attemptNotes.size() - 1)) tailPart.append("- ").append(n).append('\n');
             tailPart.append('\n');
         }
+        String rememberedFix = experience == null ? null
+                : experience.knownFix(result != null ? result.signature() : signatureOf(failure));
+        if (rememberedFix != null) tailPart.append("This change fixed the same error before:\n").append(tail(rememberedFix, 1200)).append("\n\n");
         tailPart.append("Attempt ").append(ws.attempt).append(" failed.\n").append(failure.trim()).append("\n\n")
                 .append("Fix the cause with the smallest change. Output only EDIT or FILE blocks.");
         b.append("Current files:\n");
@@ -760,6 +807,22 @@ public final class AgentLoop {
         return b.toString();
     }
 
+    private boolean isLocalTool(String name) { return localToolEntry(name) != null; }
+
+    private boolean needsConfirm(String name) {
+        JSONObject e = localToolEntry(name);
+        return e != null && e.optBoolean("confirm");
+    }
+
+    private JSONObject localToolEntry(String name) {
+        org.json.JSONArray l = localTools.list();
+        for (int i = 0; i < l.length(); i++) {
+            JSONObject t = l.optJSONObject(i);
+            if (t != null && name.equals(t.optString("name"))) return t;
+        }
+        return null;
+    }
+
     private String runTools(List<String[]> calls, JSONObject metrics) {
         StringBuilder b = new StringBuilder();
         long t = System.nanoTime();
@@ -769,16 +832,26 @@ public final class AgentLoop {
             String output;
             boolean ok;
             try {
-                bridge.ensureConnected(15_000);
                 JSONObject args;
                 try { args = new JSONObject(c[1]); } catch (JSONException e) { args = new JSONObject(); }
-                try { args.put("_project", ws.id); } catch (JSONException ignored) {}
-                JSONObject r = bridge.callTool(c[0], args);
+                JSONObject r = null;
+                if (localTools != null && isLocalTool(c[0])) {
+                    if (needsConfirm(c[0]) && !listener.confirm("تنفيذ على الهاتف: " + c[0] + " " + c[1])) {
+                        r = new JSONObject().put("ok", false).put("output", "the user declined this action");
+                    } else {
+                        r = localTools.call(c[0], args);
+                    }
+                }
+                if (r == null) {
+                    bridge.ensureConnected(15_000);
+                    args.put("_project", ws.id);
+                    r = bridge.callTool(c[0], args);
+                }
                 ok = r.optBoolean("ok");
                 output = r.optString("output");
-            } catch (IOException e) {
+            } catch (Exception e) {
                 ok = false;
-                output = e.getMessage();
+                output = e.getMessage() == null ? e.getClass().getSimpleName() : e.getMessage();
             }
             String line = c[0] + (ok ? " -> " : " FAILED -> ") + tail(output, 1500);
             listener.onOutput(!ok, "🔧 " + line + "\n");
@@ -836,12 +909,25 @@ public final class AgentLoop {
     private Outcome finish(State state, String message) {
         setState(state, message);
         saveJournal();
+        learn(state);
         JSONObject rec = new JSONObject();
         put(rec, "final_state", state.name());
         put(rec, "attempts", ws.attempt);
         put(rec, "message", message);
         log("final", rec);
         return new Outcome(state, message);
+    }
+
+    /** Turns the outcome into experience: reward for the strategy, remembered fix, solved example. */
+    private void learn(State state) {
+        if (experience == null || ws.request.isEmpty() || cancelled) return;
+        boolean success = state == State.SUCCESS;
+        experience.reward(category, agent.id, ExperienceStore.reward(success, Math.max(1, ws.attempt)));
+        if (success && pendingFixSignature != null && pendingFixText != null) {
+            experience.recordFix(pendingFixSignature, pendingFixText);
+        }
+        experience.record(new ExperienceStore.Experience(ws.request, category, agent.id, skill == null ? "" : skill.id,
+                success, ws.attempt, success ? ExperienceStore.snapshot(ws) : new java.util.LinkedHashMap<>()));
     }
 
     private void setState(State s, String detail) {

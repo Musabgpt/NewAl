@@ -75,7 +75,12 @@ public class AgentLoopIntegrationTest {
         @Override public boolean confirm(String reason) { return approve; }
     }
 
-    private ProjectWorkspace workspace() throws Exception { return ProjectWorkspace.create(tmp.newFolder("projects")); }
+    private File projectsRoot;
+
+    private ProjectWorkspace workspace() throws Exception {
+        if (projectsRoot == null) projectsRoot = tmp.newFolder("projects");
+        return ProjectWorkspace.create(projectsRoot);
+    }
 
     @Test public void fixesRuntimeErrorWithMinimalEdit() throws Exception {
         ScriptedModel model = new ScriptedModel(
@@ -245,6 +250,62 @@ public class AgentLoopIntegrationTest {
                 .run("greeting program", AgentProfile.ARCHITECT, null);
         assertEquals(AgentLoop.State.SUCCESS, out.state);
         assertTrue(model.prompts.get(1), model.prompts.get(1).contains("Plan:\n- main.py - entry point"));
+    }
+
+    /** Fake device: records what the assistant did; "call_number" needs confirmation. */
+    static final class FakeDevice implements LocalTools {
+        final List<String> done = new ArrayList<>();
+        @Override public org.json.JSONArray list() {
+            try {
+                return new org.json.JSONArray()
+                        .put(new org.json.JSONObject().put("name", "open_app").put("description", "Open an app").put("parameters", new org.json.JSONObject().put("name", "string")))
+                        .put(new org.json.JSONObject().put("name", "call_number").put("description", "Call").put("confirm", true));
+            } catch (org.json.JSONException e) { throw new RuntimeException(e); }
+        }
+        @Override public org.json.JSONObject call(String name, org.json.JSONObject args) throws Exception {
+            if (!name.equals("open_app") && !name.equals("call_number")) return null;
+            done.add(name + ":" + args.optString("name"));
+            return new org.json.JSONObject().put("ok", true).put("output", "opened " + args.optString("name"));
+        }
+    }
+
+    @Test public void assistantControlsTheDeviceWithConfirmationForSensitiveActions() throws Exception {
+        ScriptedModel model = new ScriptedModel(
+                "TOOL: open_app {\"name\": \"YouTube\"}\nTOOL: call_number {\"number\": \"123\"}", "SAY: تم فتح يوتيوب");
+        FakeDevice device = new FakeDevice();
+        Recorder ui = new Recorder();
+        ui.approve = false;
+        AgentLoop loop = new AgentLoop(model, bridge, workspace(), ui);
+        loop.localTools = device;
+        AgentLoop.Outcome out = loop.run("افتح يوتيوب", AgentProfile.AUTO, null);
+        assertEquals(AgentProfile.AUTOMATOR, loop.agent());
+        assertEquals("تم فتح يوتيوب", out.message);
+        assertEquals(List.of("open_app:YouTube"), device.done);
+        assertTrue(model.prompts.get(1).contains("open_app -> opened YouTube"));
+        assertTrue(model.prompts.get(1).contains("call_number FAILED -> the user declined this action"));
+    }
+
+    @Test public void learnsFromOutcomes() throws Exception {
+        ExperienceStore memory = new ExperienceStore(tmp.newFolder("memory"));
+        ScriptedModel first = new ScriptedModel(
+                "FILE: main.py\n```python\nprint(undefined_value)\n```",
+                "EDIT: main.py\n```\n<<<<<<< SEARCH\nprint(undefined_value)\n=======\nprint('primes: 2 3 5')\n>>>>>>> REPLACE\n```");
+        AgentLoop a = new AgentLoop(first, bridge, workspace(), new Recorder());
+        a.experience = memory;
+        assertEquals(AgentLoop.State.SUCCESS, a.run("print some prime numbers").state);
+        assertEquals(1, memory.successes());
+
+        // A similar new task gets the solved one as an example; the same error gets the known fix.
+        ScriptedModel second = new ScriptedModel(
+                "FILE: main.py\n```python\nprint(undefined_value)\n```", "FILE: main.py\n```python\nprint(7)\n```");
+        AgentLoop b = new AgentLoop(second, bridge, workspace(), new Recorder());
+        b.experience = memory;
+        assertEquals(AgentLoop.State.SUCCESS, b.run("print prime numbers up to 50").state);
+        assertTrue(second.prompts.get(0), second.prompts.get(0).contains("A similar task you solved before"));
+        assertTrue(second.prompts.get(0), second.prompts.get(0).contains("print('primes: 2 3 5')"));
+        assertTrue(second.prompts.get(1), second.prompts.get(1).contains("This change fixed the same error before"));
+        // "prime numbers" is classified under the algorithms skill; its strategy was rewarded twice.
+        assertTrue(memory.summary(), memory.summary().contains("algo:\n  code: 2 runs"));
     }
 
     @Test public void unknownToolIsReportedToTheModel() throws Exception {

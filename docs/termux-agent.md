@@ -98,7 +98,7 @@ loop:
 | 🧪 Tester | `/test` | Writes and runs tests |
 | 🔧 Fixer | `/fix` | Takes pasted code and an error, and fixes it |
 | 📖 Explainer | `/explain` | Answers only, reading project files with tools |
-| 📱 Phone | `/auto-phone` | Termux:API tools and scripts |
+| 📱 Phone | `/phone` | Personal assistant: device control tools |
 
 Skills are focused recipes added to the prompt: `/interactive`, `/scraper`, `/api`, `/data`, `/sqlite`, `/bash`,
 `/files`, `/tests`, `/phone`, `/algo`, `/telegram`, `/cli`. They are also picked automatically by keywords. You
