@@ -59,3 +59,28 @@ The loop stops with `WAITING_FOR_USER` in these cases:
 - repeated failure → stop
 - destructive command → confirmation
 - agent killed → reconnect and resume
+
+## Tools and plugins (all local and free)
+
+The model can call tools with `TOOL: name {json}`, gets the real result back, and continues. Tool rounds don't
+count as repair attempts. A plain answer is `SAY: text`. Tools come from three sources, all discovered by the
+agent inside Termux, with nothing to rebuild in the app:
+
+| Source | How to add |
+|---|---|
+| Termux:API | Install the Termux:API app (F-Droid), then `pkg install termux-api`. Adds `battery_status`, `notify`, `clipboard_get/set`, `vibrate`, `speak`, `location`, `wifi_info`, `torch`. |
+| Script plugin | `~/newal/tools/<name>/tool.json`: `{"name","description","parameters","command"}`. The command runs in that folder, receives the arguments as JSON on stdin, and prints the result. |
+| MCP server | `~/newal/mcp.json`: `{"servers": {"<name>": {"command": "...", "args": [...], "env": {}}}}`. Standard Model Context Protocol over stdio; tools appear as `<name>.<tool>`. |
+
+Long-press the 🛠 Termux button to see the installed tools.
+
+## Other behaviour
+
+- **Output grammar:** in agent mode, a GBNF grammar allows only `FILE` / `EDIT` / `STDIN` / `RUN` / `TOOL` / `SAY`
+  blocks.
+- **Interactive programs:** a `STDIN:` block gives sample keyboard input, so interactive programs are tested
+  automatically.
+- **Missing modules:** a missing Python/Node module is installed (`pip` / `npm`) and the program re-run, without
+  spending a model attempt.
+- **Background running:** a foreground service with a progress notification keeps a task running while you use
+  other apps.

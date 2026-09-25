@@ -29,7 +29,7 @@ import java.util.concurrent.atomic.AtomicInteger;
  */
 public final class TermuxBridge implements Closeable {
     static final int HELLO = 0x01, PING = 0x02, FOPEN = 0x10, FWRITE = 0x11, FCLOSE = 0x12,
-            SYNC = 0x14, VALIDATE = 0x20, EXEC = 0x30, KILL = 0x31;
+            SYNC = 0x14, VALIDATE = 0x20, EXEC = 0x30, KILL = 0x31, TOOLS = 0x40, TOOL_CALL = 0x41;
     static final int HELLO_OK = 0x81, PONG = 0x82, FCLOSED = 0x92, SYNC_RESULT = 0x94,
             VALIDATE_RESULT = 0xA0, STARTED = 0xB0, STDOUT = 0xB1, STDERR = 0xB2, EXIT = 0xB3, ERROR = 0xFF;
 
@@ -304,6 +304,22 @@ public final class TermuxBridge implements Closeable {
             for (String s : files) f.put(s);
             for (String s : commands) c.put(s);
             return call(VALIDATE, new JSONObject().put("project", project).put("files", f).put("commands", c), 15000);
+        } catch (JSONException e) {
+            throw new IOException(e);
+        }
+    }
+
+    /** Tools the agent offers: Termux:API built-ins, script plugins and MCP server tools. */
+    public org.json.JSONArray listTools() throws IOException {
+        JSONObject r = call(TOOLS, new JSONObject(), 60_000);
+        org.json.JSONArray a = r.optJSONArray("tools");
+        return a == null ? new org.json.JSONArray() : a;
+    }
+
+    /** Runs one tool; the result has "ok" and "output". */
+    public JSONObject callTool(String name, JSONObject args) throws IOException {
+        try {
+            return call(TOOL_CALL, new JSONObject().put("name", name).put("args", args), 60_000);
         } catch (JSONException e) {
             throw new IOException(e);
         }

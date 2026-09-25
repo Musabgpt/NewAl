@@ -27,6 +27,10 @@ public class CodeStreamParserTest {
         @Override public void onEdit(String path, String body, boolean ok) { edits.add(path + (ok ? "" : "!") + "|" + body); }
         @Override public void onRunCommand(String command) { runs.add(command); }
         @Override public void onStdin(String input) { stdin.add(input); }
+        final List<String> tools = new ArrayList<>();
+        final List<String> says = new ArrayList<>();
+        @Override public void onToolCall(String name, String args) { tools.add(name + " " + args); }
+        @Override public void onSay(String text) { says.add(text); }
     }
 
     static Recorder parse(String text, int[] cuts) throws Exception {
@@ -155,6 +159,13 @@ public class CodeStreamParserTest {
         Recorder r = parse("FILE: main.py\n```python\nprint(input())\n```\nSTDIN:\n```\n1\n5\n```\n");
         assertEquals(List.of("1\n5\n"), r.stdin);
         assertEquals(1, r.files.size());
+    }
+
+    @Test public void toolCallsAndSayLines() throws Exception {
+        Recorder r = parse("TOOL: battery_status {}\nTOOL: demo.add {\"a\": 1}\nSAY: Battery is 80%\n");
+        assertEquals(List.of("battery_status {}", "demo.add {\"a\": 1}"), r.tools);
+        assertEquals(List.of("Battery is 80%"), r.says);
+        assertTrue(r.files.isEmpty());
     }
 
     @Test public void cutOffBeforeFirstLineDoesNotOpenFile() throws Exception {

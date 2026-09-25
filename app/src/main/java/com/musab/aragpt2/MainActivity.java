@@ -92,6 +92,7 @@ public class MainActivity extends AppCompatActivity {
         sendButton.setOnClickListener(v->onSendOrStopClicked());
         clearButton.setOnClickListener(v->clearChat());
         agentButton.setOnClickListener(v->setAgentMode(!agentMode));
+        agentButton.setOnLongClickListener(v->{showTools();return true;});
         agentMode=prefs.getBoolean(PREF_AGENT_MODE,false);
         renderAgentButton();
         restoreSavedModel();
@@ -282,7 +283,8 @@ public class MainActivity extends AppCompatActivity {
                 b.ensureConnected(12000);
                 long rtt=b.ping(3000);
                 String py=b.agentInfo()==null?"":b.agentInfo().optString("python");
-                runOnUiThread(()->setWorking(false,"Termux جاهز • Python "+py+" • "+rtt+"ms"));
+                int tools=b.listTools().length();
+                runOnUiThread(()->setWorking(false,"Termux جاهز • Python "+py+" • "+rtt+"ms • "+tools+" أداة (اضغط مطولاً على Termux)"));
             }catch(Exception e){runOnUiThread(this::showTermuxSetup);}
         },"termux-connect").start();
     }
@@ -311,6 +313,42 @@ public class MainActivity extends AppCompatActivity {
                 .setNeutralButton("أعد المحاولة",(d,w)->ensureTermuxReady())
                 .setNegativeButton("إلغاء",(d,w)->setAgentMode(false))
                 .show();
+    }
+
+    /** Lists the tools the model can use and explains how to add more (all free and local). */
+    private void showTools(){
+        if(!TermuxLauncher.hasPermission(this)){setAgentMode(true);return;}
+        setWorking(true,"جاري قراءة الأدوات…");
+        new Thread(()->{
+            StringBuilder b=new StringBuilder();
+            try{
+                TermuxBridge br=termuxBridge();
+                br.ensureConnected(12000);
+                org.json.JSONArray tools=br.listTools();
+                if(tools.length()==0)b.append("لا توجد أدوات بعد.\n");
+                for(int i=0;i<tools.length();i++){
+                    org.json.JSONObject t=tools.optJSONObject(i);
+                    b.append("• ").append(t.optString("name")).append(" (").append(t.optString("source")).append(")\n  ")
+                            .append(t.optString("description")).append('\n');
+                }
+            }catch(Exception e){b.append("تعذر الاتصال بـTermux: ").append(safeMessage(e)).append('\n');}
+            b.append("\nإضافة أدوات (مجانية وتعمل محلياً):\n")
+                    .append("1) ميزات الهاتف: ثبّت تطبيق Termux:API من F-Droid ثم في Termux:\n   pkg install termux-api\n")
+                    .append("2) أداة خاصة: مجلد في ~/newal/tools/<الاسم>/ فيه tool.json:\n")
+                    .append("   {\"name\":\"...\",\"description\":\"...\",\"parameters\":{\"x\":\"string\"},\"command\":\"python run.py\"}\n")
+                    .append("   يستلم الأمر المدخلات JSON على stdin ويطبع النتيجة.\n")
+                    .append("3) خوادم MCP: ملف ~/newal/mcp.json:\n")
+                    .append("   {\"servers\":{\"اسم\":{\"command\":\"...\",\"args\":[...]}}}\n")
+                    .append("الأدوات الجديدة تظهر للنموذج تلقائياً في الطلب التالي.");
+            String text=b.toString();
+            runOnUiThread(()->{
+                setWorking(false,"جاهز");
+                TextView v=new TextView(this);
+                v.setText(text);v.setTextIsSelectable(true);v.setTextDirection(View.TEXT_DIRECTION_LTR);v.setPadding(48,24,48,24);
+                android.widget.ScrollView sv=new android.widget.ScrollView(this);sv.addView(v);
+                new AlertDialog.Builder(this).setTitle("الأدوات والإضافات").setView(sv).setPositiveButton("حسناً",null).show();
+            });
+        },"termux-tools").start();
     }
 
     private synchronized TermuxBridge termuxBridge()throws java.io.IOException{

@@ -32,6 +32,10 @@ public final class CodeStreamParser {
         void onRunCommand(String command);
         /** Sample keyboard input for an interactive program (STDIN: block). */
         default void onStdin(String input) {}
+        /** TOOL: name {json args} */
+        default void onToolCall(String name, String argsJson) {}
+        /** SAY: text — a direct answer for the user. */
+        default void onSay(String text) {}
     }
 
     /** Chooses a file for a fenced block that has no name, or null to ignore the block. */
@@ -44,6 +48,8 @@ public final class CodeStreamParser {
             Pattern.CASE_INSENSITIVE);
     static final Pattern STDIN_HEADER = Pattern.compile("^[\\s#>*_`-]*(stdin|input)\\s*[:：]?\\s*[`*_]*\\s*$",
             Pattern.CASE_INSENSITIVE);
+    static final Pattern TOOL = Pattern.compile("^\\s*TOOL\\s*[:：]\\s*([\\w.-]+)\\s*(\\{.*\\})?\\s*$");
+    static final Pattern SAY = Pattern.compile("^\\s*SAY\\s*[:：]\\s?(.*)$");
     static final Pattern FENCE_OPEN = Pattern.compile("^ {0,3}(`{3,})\\s*([^`]*)$");
     static final Pattern PATH_TOKEN = Pattern.compile("^[\\w./-]*\\w\\.[A-Za-z0-9]+$");
     static final String SEARCH_MARK = "<<<<<<<";
@@ -249,7 +255,11 @@ public final class CodeStreamParser {
             return;
         }
         Matcher run = RUN.matcher(l);
-        if (run.matches()) sink.onRunCommand(run.group(1));
+        if (run.matches()) { sink.onRunCommand(run.group(1)); return; }
+        Matcher tool = TOOL.matcher(l);
+        if (tool.matches()) { sink.onToolCall(tool.group(1), tool.group(2) == null ? "{}" : tool.group(2)); return; }
+        Matcher say = SAY.matcher(l);
+        if (say.matches()) sink.onSay(say.group(1));
     }
 
     private void startFile() throws IOException {

@@ -158,6 +158,56 @@ public class AgentLoopIntegrationTest {
         assertEquals(2, model.calls);
     }
 
+    /** Minimal MCP server (stdio JSON-RPC) with one tool, as a real MCP server would expose. */
+    static final String MCP_SERVER = String.join("\n",
+            "import json, sys",
+            "for line in sys.stdin:",
+            "    m = json.loads(line)",
+            "    if 'id' not in m: continue",
+            "    meth = m['method']",
+            "    if meth == 'initialize': r = {'protocolVersion': '2024-11-05', 'capabilities': {'tools': {}}, 'serverInfo': {'name': 'demo', 'version': '1'}}",
+            "    elif meth == 'tools/list': r = {'tools': [{'name': 'add', 'description': 'Add two numbers', 'inputSchema': {'type': 'object', 'properties': {'a': {'type': 'number'}, 'b': {'type': 'number'}}}}]}",
+            "    elif meth == 'tools/call': a = m['params']['arguments']; r = {'content': [{'type': 'text', 'text': str(a['a'] + a['b'])}]}",
+            "    else: r = {}",
+            "    print(json.dumps({'jsonrpc': '2.0', 'id': m['id'], 'result': r}), flush=True)",
+            "");
+
+    @Test public void pluginAndMcpToolsAreListedCalledAndAnsweredWithSay() throws Exception {
+        File plugin = new File(agentHome, "tools/echo");
+        assertTrue(plugin.mkdirs());
+        Files.write(new File(plugin, "tool.json").toPath(),
+                "{\"name\":\"echo\",\"description\":\"Echo the arguments\",\"parameters\":{\"text\":\"string\"},\"command\":\"cat\"}".getBytes());
+        File server = new File(agentHome, "demo_mcp.py");
+        Files.write(server.toPath(), MCP_SERVER.getBytes());
+        Files.write(new File(agentHome, "mcp.json").toPath(),
+                ("{\"servers\":{\"demo\":{\"command\":\"python3\",\"args\":[\"" + server.getAbsolutePath() + "\"]}}}").getBytes());
+
+        bridge.ensureConnected(15000);
+        String tools = bridge.listTools().toString();
+        assertTrue(tools, tools.contains("\"echo\"") && tools.contains("demo.add"));
+
+        ScriptedModel model = new ScriptedModel(
+                "TOOL: echo {\"text\": \"hi\"}\nTOOL: demo.add {\"a\": 2, \"b\": 3}",
+                "SAY: the sum is 5");
+        ProjectWorkspace ws = workspace();
+        Recorder ui = new Recorder();
+        AgentLoop.Outcome out = new AgentLoop(model, bridge, ws, ui).run("add 2 and 3 with the tool");
+        assertEquals(out.message, AgentLoop.State.SUCCESS, out.state);
+        assertEquals("the sum is 5", out.message);
+        assertEquals(2, model.calls);
+        assertEquals(1, ws.attempt);
+        // The second prompt carried both real tool results back to the model.
+        assertTrue(model.prompts.get(1), model.prompts.get(1).contains("echo -> {\"text\": \"hi\"}"));
+        assertTrue(model.prompts.get(1), model.prompts.get(1).contains("demo.add -> 5"));
+    }
+
+    @Test public void unknownToolIsReportedToTheModel() throws Exception {
+        ScriptedModel model = new ScriptedModel("TOOL: nope {}", "SAY: sorry");
+        AgentLoop.Outcome out = new AgentLoop(model, bridge, workspace(), new Recorder()).run("x");
+        assertEquals(AgentLoop.State.SUCCESS, out.state);
+        assertTrue(model.prompts.get(1).contains("nope FAILED -> unknown tool: nope"));
+    }
+
     @Test public void repeatedIdenticalFailureStopsForTheUser() throws Exception {
         ScriptedModel model = new ScriptedModel(
                 "FILE: main.py\n```python\nraise SystemExit('boom 1')\n```\n",

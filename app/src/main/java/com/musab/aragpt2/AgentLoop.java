@@ -68,7 +68,8 @@ public final class AgentLoop {
             + "- Prefer the standard library; list third-party Python packages in requirements.txt.\n"
             + "- The project runs with the usual command for its language (python main.py, node index.js, "
             + "bash main.sh). For another command add one line: RUN: <command>\n"
-            + "- Output only the files you create or change.";
+            + "- Output only the files you create or change.\n"
+            + "- If the request is a question that needs no program, answer in one line: SAY: <answer>";
 
     /**
      * GBNF grammar for the agent's output: only FILE / EDIT / STDIN / RUN blocks, so the model
@@ -77,12 +78,14 @@ public final class AgentLoop {
     static final String OUTPUT_GRAMMAR =
             "root ::= [\\n]* item (sep item)* [\\n]?\n"
             + "sep ::= \"\\n\" [\\n]*\n"
-            + "item ::= file | edit | stdin | run\n"
+            + "item ::= file | edit | stdin | run | tool | say\n"
             + "file ::= \"FILE: \" path \"\\n```\" lang \"\\n\" body \"```\"\n"
             + "edit ::= \"EDIT: \" path \"\\n```\" lang \"\\n\" hunk+ \"```\"\n"
             + "hunk ::= \"<<<<<<< SEARCH\\n\" body \"=======\\n\" body \">>>>>>> REPLACE\\n\"\n"
             + "stdin ::= \"STDIN:\\n```\\n\" body \"```\"\n"
             + "run ::= \"RUN: \" [^\\n`]+\n"
+            + "tool ::= \"TOOL: \" [A-Za-z0-9_.-]+ \" {\" [^\\n]* \"}\"\n"
+            + "say ::= \"SAY: \" [^\\n]+\n"
             + "path ::= [A-Za-z0-9_] [A-Za-z0-9_./-]*\n"
             + "lang ::= [A-Za-z0-9+#-]*\n"
             + "body ::= line*\n"
@@ -96,6 +99,7 @@ public final class AgentLoop {
     public long execTimeoutMs = 60_000;
     public long installTimeoutMs = 600_000;
     public int repeatLimit = 3;
+    public int maxToolRounds = 4;
 
     private final Model model;
     private final TermuxBridge bridge;
@@ -105,6 +109,8 @@ public final class AgentLoop {
     private volatile int runningExec = -1;
     private final List<String> signatures = new ArrayList<>();
     private String lastFilesFingerprint = "";
+    /** Tool list for the system prompt; fetched while connecting, empty when Termux is unavailable. */
+    private volatile String toolsSection = "";
     private int noProgress;
 
     public AgentLoop(Model model, TermuxBridge bridge, ProjectWorkspace ws, Listener listener) {
@@ -157,11 +163,19 @@ public final class AgentLoop {
         // Connect to Termux while the model is generating, so files stream into Termux live
         // and execution starts without a connection delay.
         Thread warm = new Thread(() -> {
-            try { bridge.ensureConnected(15_000); } catch (IOException ignored) {}
+            try {
+                bridge.ensureConnected(15_000);
+                toolsSection = describeTools(bridge.listTools());
+            } catch (IOException ignored) {
+            }
         }, "termux-prewarm");
         warm.setDaemon(true);
         warm.start();
+        // Tools must be known before the first prompt; don't hold generation up for long.
+        try { warm.join(4000); } catch (InterruptedException e) { Thread.currentThread().interrupt(); }
         String failure = null;
+        Set<String> carried = new LinkedHashSet<>();
+        int toolRounds = 0;
         while (true) {
             if (cancelled) return finish(State.FAILED, "أُلغي بطلب المستخدم");
             long iterationStart = System.nanoTime();
@@ -177,7 +191,25 @@ public final class AgentLoop {
                 if (cancelled) return finish(State.FAILED, "أُلغي بطلب المستخدم");
                 if (g.error != null) return finish(State.FAILED, "خطأ في النموذج: " + g.error);
                 changed.addAll(g.changed);
+                if (!g.toolCalls.isEmpty() && toolRounds < maxToolRounds) {
+                    // Tool rounds gather information; they are not repair attempts.
+                    toolRounds++;
+                    carried.addAll(g.changed);
+                    prompt = prompt + "\n\nYour previous output:\n" + tail(g.result == null ? "" : g.result.text, 1500)
+                            + "\n\nTool results:\n" + runTools(g.toolCalls, metrics)
+                            + "\nContinue: write files, call another tool, or answer with SAY:.";
+                    ws.attempt--;
+                    report(metrics);
+                    continue;
+                }
+                changed.addAll(carried);
+                carried.clear();
                 failure = g.problem();
+                if (failure == null && changed.isEmpty() && g.says.length() > 0) {
+                    put(metrics, "iteration_ms", ms(iterationStart));
+                    report(metrics);
+                    return finish(State.SUCCESS, g.says.toString().trim());
+                }
             }
             executeFirst = false;
 
@@ -232,6 +264,8 @@ public final class AgentLoop {
         final Set<String> changed = new LinkedHashSet<>();
         final List<String> editErrors = new ArrayList<>();
         final List<String> incomplete = new ArrayList<>();
+        final List<String[]> toolCalls = new ArrayList<>();
+        final StringBuilder says = new StringBuilder();
         final int attemptNo;
         ProjectWorkspace.FileWriter writer;
         long startNanos, firstWriteNanos = -1, writeNanos, editNanos;
@@ -290,6 +324,16 @@ public final class AgentLoop {
             ws.stdinInput = input;
         }
 
+        @Override public void onToolCall(String name, String argsJson) {
+            namedSeen = true;
+            toolCalls.add(new String[]{name, argsJson});
+        }
+
+        @Override public void onSay(String text) {
+            if (says.length() > 0) says.append('\n');
+            says.append(text);
+        }
+
         @Override public String pathFor(String language) {
             if (namedSeen || SHELL_LANGS.contains(language)) return null;
             String ext = extensionFor(language);
@@ -316,7 +360,7 @@ public final class AgentLoop {
                 b.append("Your output was cut off before these blocks were finished: ").append(incomplete)
                         .append(". Keep files shorter or change them with small EDIT blocks.\n");
             }
-            if (b.length() == 0 && changed.isEmpty()) {
+            if (b.length() == 0 && changed.isEmpty() && says.length() == 0 && toolCalls.isEmpty()) {
                 if (ws.isEmpty()) b.append("No FILE block was produced. Output the program as FILE blocks.\n");
                 else b.append("No file was changed, so the same result would repeat. Change the code that causes the problem.\n");
             }
@@ -330,7 +374,7 @@ public final class AgentLoop {
         Generation g = new Generation(ws.attempt);
         CodeStreamParser parser = new CodeStreamParser(g, g);
         List<ChatMessage> turns = new ArrayList<>(2);
-        turns.add(new ChatMessage(-1, ChatMessage.ROLE_SYSTEM, SYSTEM_PROMPT, 0));
+        turns.add(new ChatMessage(-1, ChatMessage.ROLE_SYSTEM, SYSTEM_PROMPT + toolsSection, 0));
         turns.add(new ChatMessage(-1, ChatMessage.ROLE_USER, prompt, 0));
         g.startNanos = System.nanoTime();
         try {
@@ -632,6 +676,55 @@ public final class AgentLoop {
     /** Characters of project text that fit in half the context (the rest is left for the answer). */
     private int promptBudgetChars() {
         return Math.max(1500, model.contextTokens() * 3 / 2) - SYSTEM_PROMPT.length();
+    }
+
+    // ---------------------------------------------------------------- tools
+
+    static String describeTools(org.json.JSONArray tools) {
+        if (tools == null || tools.length() == 0) return "";
+        StringBuilder b = new StringBuilder("\nTools on this phone. Call one per line and you get the result back:\n"
+                + "TOOL: name {\"arg\": value}\n");
+        for (int i = 0; i < tools.length() && i < 40; i++) {
+            JSONObject t = tools.optJSONObject(i);
+            if (t == null) continue;
+            JSONObject params = t.optJSONObject("parameters");
+            b.append("- ").append(t.optString("name")).append(' ').append(params == null ? "{}" : params.toString())
+                    .append(": ").append(tail(t.optString("description").replace('\n', ' '), 160)).append('\n');
+        }
+        return b.toString();
+    }
+
+    private String runTools(List<String[]> calls, JSONObject metrics) {
+        StringBuilder b = new StringBuilder();
+        long t = System.nanoTime();
+        for (String[] c : calls) {
+            if (cancelled) break;
+            setState(State.RUNNING, "TOOL " + c[0]);
+            String output;
+            boolean ok;
+            try {
+                bridge.ensureConnected(15_000);
+                JSONObject args;
+                try { args = new JSONObject(c[1]); } catch (JSONException e) { args = new JSONObject(); }
+                JSONObject r = bridge.callTool(c[0], args);
+                ok = r.optBoolean("ok");
+                output = r.optString("output");
+            } catch (IOException e) {
+                ok = false;
+                output = e.getMessage();
+            }
+            String line = c[0] + (ok ? " -> " : " FAILED -> ") + tail(output, 1500);
+            listener.onOutput(!ok, "🔧 " + line + "\n");
+            b.append(line).append('\n');
+            JSONObject rec = new JSONObject();
+            put(rec, "tool", c[0]);
+            put(rec, "args", c[1]);
+            put(rec, "ok", ok);
+            put(rec, "output", tail(output, 1000));
+            log("tool", rec);
+        }
+        put(metrics, "tools_ms", ms(t));
+        return b.toString();
     }
 
     // ---------------------------------------------------------------- analysis

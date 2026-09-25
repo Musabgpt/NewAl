@@ -24,6 +24,9 @@ VERSION = 1
 
 HELLO, PING, FOPEN, FWRITE, FCLOSE, SYNC, VALIDATE, EXEC, KILL = 0x01, 0x02, 0x10, 0x11, 0x12, 0x14, 0x20, 0x30, 0x31
 HELLO_OK, PONG, FCLOSED, SYNC_RESULT, VALIDATE_RESULT = 0x81, 0x82, 0x92, 0x94, 0xA0
+TOOLS, TOOL_CALL, TOOLS_RESULT, TOOL_RESULT = 0x40, 0x41, 0xC0, 0xC1
+TOOL_TIMEOUT = 30.0
+TOOL_OUTPUT_MAX = 8000
 STARTED, STDOUT, STDERR, EXIT, ERROR = 0xB0, 0xB1, 0xB2, 0xB3, 0xFF
 HEADER = struct.Struct(">BII")
 READ_CHUNK = 65536
@@ -171,6 +174,19 @@ class Connection:
             self.send(VALIDATE_RESULT, rid, {"errors": errors, "missing_commands": missing})
         elif op == EXEC:
             asyncio.ensure_future(self.run(rid, json.loads(payload)))
+        elif op == TOOLS:
+            self.send(TOOLS_RESULT, rid, {"tools": await TOOLBOX.list()})
+        elif op == TOOL_CALL:
+            req = json.loads(payload)
+
+            async def call():
+                try:
+                    result = await TOOLBOX.call(req["name"], req.get("args") or {})
+                except Exception as e:  # a failing tool is reported to the model, not fatal
+                    result = {"ok": False, "output": "%s: %s" % (type(e).__name__, e)}
+                result["output"] = result["output"][:TOOL_OUTPUT_MAX]
+                self.send(TOOL_RESULT, rid, result)
+            asyncio.ensure_future(call())
         elif op == KILL:
             proc = self.procs.get(rid)
             if proc:
@@ -278,6 +294,189 @@ class Connection:
                               "start_ms": int(start * 1000), "end_ms": int(end * 1000),
                               "duration_ms": int((end - start) * 1000)})
 
+
+
+# ---------------------------------------------------------------- tools / plugins
+#
+# Three kinds of tools, all offered to the model the same way:
+#   * built-in Termux:API tools (only when the termux-api package is installed)
+#   * script plugins:  ~/newal/tools/<name>/tool.json  {"name","description","parameters","command"}
+#                      the command runs in that folder with the arguments as JSON on stdin
+#   * MCP servers:     ~/newal/mcp.json  {"servers": {"<name>": {"command", "args", "env"}}}
+#                      standard Model Context Protocol over stdio; tools appear as <server>.<tool>
+
+def _arg(a, key, default=""):
+    v = a.get(key, default)
+    return str(v) if v is not None else str(default)
+
+
+BUILTIN_TOOLS = {
+    "battery_status": ("Battery level, charging state and temperature", {},
+                       lambda a: ["termux-battery-status"]),
+    "notify": ("Show an Android notification", {"title": "string", "content": "string"},
+               lambda a: ["termux-notification", "--title", _arg(a, "title"), "--content", _arg(a, "content")]),
+    "clipboard_get": ("Read the text on the clipboard", {}, lambda a: ["termux-clipboard-get"]),
+    "clipboard_set": ("Copy text to the clipboard", {"text": "string"},
+                      lambda a: ["termux-clipboard-set", _arg(a, "text")]),
+    "vibrate": ("Vibrate the phone", {"ms": "integer"},
+                lambda a: ["termux-vibrate", "-d", str(int(a.get("ms") or 300))]),
+    "speak": ("Say text aloud (text to speech)", {"text": "string"},
+              lambda a: ["termux-tts-speak", _arg(a, "text")]),
+    "location": ("Current approximate location (latitude, longitude)", {},
+                 lambda a: ["termux-location", "-p", "network", "-r", "once"]),
+    "wifi_info": ("Current Wi-Fi connection", {}, lambda a: ["termux-wifi-connectioninfo"]),
+    "torch": ("Turn the flashlight on or off", {"on": "boolean"},
+              lambda a: ["termux-torch", "on" if a.get("on", True) not in (False, "false", 0) else "off"]),
+}
+
+
+async def run_argv(argv, stdin_bytes=None, cwd=None, timeout=TOOL_TIMEOUT):
+    proc = await asyncio.create_subprocess_exec(
+        *argv, cwd=cwd, stdin=asyncio.subprocess.PIPE if stdin_bytes is not None else asyncio.subprocess.DEVNULL,
+        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE, start_new_session=True)
+    try:
+        out, err = await asyncio.wait_for(proc.communicate(stdin_bytes), timeout)
+    except asyncio.TimeoutError:
+        terminate(proc)
+        await proc.wait()
+        return {"ok": False, "output": "timed out after %ds" % timeout}
+    text = out.decode("utf-8", "replace")
+    if proc.returncode != 0:
+        text += ("\n" if text else "") + err.decode("utf-8", "replace")
+    return {"ok": proc.returncode == 0, "output": text.strip()}
+
+
+class McpServer:
+    """Minimal MCP client for one stdio server (JSON-RPC 2.0, one message per line)."""
+
+    def __init__(self, name, cfg):
+        self.name, self.cfg = name, cfg
+        self.proc = None
+        self.ids = 0
+        self.pending = {}
+        self.tools = []
+
+    async def ensure(self):
+        if self.proc is not None and self.proc.returncode is None:
+            return
+        env = dict(os.environ)
+        env.update(self.cfg.get("env") or {})
+        self.proc = await asyncio.create_subprocess_exec(
+            self.cfg["command"], *(self.cfg.get("args") or []), cwd=HOME, env=env,
+            stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
+            limit=1 << 22)
+        asyncio.ensure_future(self._read(self.proc))
+        await self.request("initialize", {"protocolVersion": "2024-11-05", "capabilities": {},
+                                          "clientInfo": {"name": "newal", "version": str(VERSION)}})
+        self._send({"jsonrpc": "2.0", "method": "notifications/initialized"})
+        result = await self.request("tools/list", {})
+        self.tools = result.get("tools", [])
+
+    async def _read(self, proc):
+        while True:
+            line = await proc.stdout.readline()
+            if not line:
+                break
+            try:
+                msg = json.loads(line)
+            except ValueError:
+                continue
+            fut = self.pending.pop(msg.get("id"), None)
+            if fut is not None and not fut.done():
+                if "error" in msg:
+                    fut.set_exception(RuntimeError(msg["error"].get("message", "MCP error")))
+                else:
+                    fut.set_result(msg.get("result") or {})
+        for fut in self.pending.values():
+            if not fut.done():
+                fut.set_exception(RuntimeError("MCP server %s exited" % self.name))
+        self.pending.clear()
+
+    def _send(self, msg):
+        self.proc.stdin.write((json.dumps(msg) + "\n").encode("utf-8"))
+
+    async def request(self, method, params):
+        self.ids += 1
+        fut = asyncio.get_running_loop().create_future()
+        self.pending[self.ids] = fut
+        self._send({"jsonrpc": "2.0", "id": self.ids, "method": method, "params": params})
+        await self.proc.stdin.drain()
+        return await asyncio.wait_for(fut, TOOL_TIMEOUT)
+
+    async def call(self, tool, args):
+        await self.ensure()
+        result = await self.request("tools/call", {"name": tool, "arguments": args})
+        parts = [c.get("text", "") if c.get("type") == "text" else "[%s]" % c.get("type")
+                 for c in result.get("content", [])]
+        return {"ok": not result.get("isError", False), "output": "\n".join(parts).strip()}
+
+
+class Toolbox:
+    def __init__(self):
+        self.mcp = {}
+
+    def _plugins(self):
+        root = os.path.join(HOME, "tools")
+        found = {}
+        if os.path.isdir(root):
+            for d in sorted(os.listdir(root)):
+                spec_path = os.path.join(root, d, "tool.json")
+                try:
+                    with open(spec_path) as f:
+                        spec = json.load(f)
+                    found[spec.get("name") or d] = (spec, os.path.join(root, d))
+                except (OSError, ValueError):
+                    continue
+        return found
+
+    def _mcp_config(self):
+        try:
+            with open(os.path.join(HOME, "mcp.json")) as f:
+                return json.load(f).get("servers", {})
+        except (OSError, ValueError):
+            return {}
+
+    async def list(self):
+        tools = []
+        for name, (desc, params, argv) in BUILTIN_TOOLS.items():
+            if shutil.which(argv({})[0]):
+                tools.append({"name": name, "description": desc, "parameters": params, "source": "termux-api"})
+        for name, (spec, _) in self._plugins().items():
+            tools.append({"name": name, "description": spec.get("description", ""),
+                          "parameters": spec.get("parameters", {}), "source": "plugin"})
+        for sname, cfg in self._mcp_config().items():
+            server = self.mcp.get(sname)
+            if server is None or server.cfg != cfg:
+                server = self.mcp[sname] = McpServer(sname, cfg)
+            try:
+                await asyncio.wait_for(server.ensure(), TOOL_TIMEOUT)
+            except Exception as e:
+                log("mcp %s failed: %r" % (sname, e))
+                continue
+            for t in server.tools:
+                props = (t.get("inputSchema") or {}).get("properties", {})
+                tools.append({"name": "%s.%s" % (sname, t["name"]), "description": t.get("description", ""),
+                              "parameters": {k: v.get("type", "string") for k, v in props.items()},
+                              "source": "mcp"})
+        return tools
+
+    async def call(self, name, args):
+        if name in BUILTIN_TOOLS:
+            return await run_argv(BUILTIN_TOOLS[name][2](args), timeout=15.0)
+        plugins = self._plugins()
+        if name in plugins:
+            spec, folder = plugins[name]
+            return await run_argv(["bash", "-c", spec["command"]], json.dumps(args).encode("utf-8"), folder)
+        if "." in name:
+            sname, tool = name.split(".", 1)
+            if sname in self._mcp_config():
+                if sname not in self.mcp:
+                    self.mcp[sname] = McpServer(sname, self._mcp_config()[sname])
+                return await self.mcp[sname].call(tool, args)
+        return {"ok": False, "output": "unknown tool: %s" % name}
+
+
+TOOLBOX = Toolbox()
 
 def terminate(proc):
     try:
