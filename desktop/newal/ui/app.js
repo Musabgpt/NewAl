@@ -457,6 +457,7 @@ const panels = {
       <div class="card"><h4>GitHub ${c.github ? `<span class="ok">✓ مربوط ${escapeHtml(st.github_user ? "@" + st.github_user : "")}</span>` : '<span class="hint">غير مربوط</span>'}</h4>
         <div class="about">يفتح نافذة تسجيل دخول GitHub وتضغط «Authorize» فقط (عبر Git for Windows). إذا سجلت دخول من VS Code قبل، يربط فوراً.</div>
         <div class="row">${c.github ? '<button data-off="github">فصل</button>' : '<button class="primary" data-connect="github">🔗 ربط GitHub بضغطة زر</button>'}<span class="hint" data-out="github"></span></div>
+        ${c.git ? "" : `<div class="row"><button id="installGit">⬇ تثبيت Git</button><span class="hint" id="gitOut">مطلوب لنسخ المشاريع ورفعها (clone / push). مجاني، يتثبت بضغطة.</span></div>`}
         <details><summary class="hint">أو ألصق توكن يدوياً</summary>
         <div class="field"><input type="password" id="github_token" placeholder="ghp_…" value="${st.github_token}"></div></details></div>
       <div class="card"><h4>GitLab ${c.gitlab ? `<span class="ok">✓ مربوط ${escapeHtml(st.gitlab_user ? "@" + st.gitlab_user : "")}</span>` : '<span class="hint">غير مربوط</span>'}</h4>
@@ -496,6 +497,14 @@ const panels = {
       if (r.ok) panels.connect(body);
       else { out.textContent = r.error; out.className = "bad"; }
     });
+    const ig = body.querySelector("#installGit");
+    if (ig) ig.onclick = async () => {
+      ig.disabled = true;
+      body.querySelector("#gitOut").textContent = "يثبّت Git… (دقيقة أو دقيقتين، وافق إذا سألك ويندوز)";
+      const r = await api("/api/install/git", {});
+      if (r.ok) panels.connect(body);
+      else { ig.disabled = false; const o = body.querySelector("#gitOut"); o.className = "bad"; o.textContent = "لم يكتمل: " + r.output; }
+    };
     body.querySelectorAll("[data-off]").forEach(b => b.onclick = async () => {
       await api("/api/disconnect", {service: b.dataset.off});
       panels.connect(body);

@@ -89,22 +89,52 @@ def _gh():
 
 # ------------------------------------------------------------------ one-click sign-in
 
+def git_exe():
+    """git on PATH, or where Git for Windows installs (PATH of a running app is not refreshed after install)."""
+    exe = shutil.which("git")
+    if exe:
+        return exe
+    for base in (os.environ.get("ProgramFiles", ""), os.environ.get("LOCALAPPDATA", "") + "\\Programs"):
+        p = os.path.join(base, "Git", "cmd", "git.exe")
+        if base and os.path.exists(p):
+            return p
+    return None
+
+
+def install_git():
+    """Installs Git for Windows with winget (free, from Microsoft's package source)."""
+    winget = shutil.which("winget")
+    if not winget:
+        return False, "winget غير موجود. نزّل Git من git-scm.com وثبّته."
+    code, out = run([winget, "install", "--id", "Git.Git", "-e", "--silent", "--accept-package-agreements",
+                     "--accept-source-agreements"], timeout=900)
+    return bool(git_exe()), clip(out, 1500)
+
+
 def git_credential(host):
-    """Asks Git Credential Manager (part of Git for Windows) for a token: it reuses a saved sign-in
-    or opens the site's own sign-in window. Returns (token, error)."""
-    git = shutil.which("git")
-    if not git:
-        return None, "Git غير مثبت. ثبّته من git-scm.com (مجاني) ثم أعد المحاولة، أو ألصق توكن يدوياً."
+    """A token from Git Credential Manager: it reuses a saved sign-in or opens the site's own sign-in window.
+    Uses Git when installed, else the copy of Git Credential Manager shipped with NewAl. Returns (token, error)."""
+    request = "protocol=https\nhost=%s\n\n" % host
+    git, gcm = git_exe(), config.find_tool("git-credential-manager")
+    if git:
+        args = [git, "credential", "fill"]
+    elif gcm:
+        args = [gcm, "get"]
+    else:
+        return None, "أداة تسجيل الدخول غير موجودة. اضغط «تثبيت Git» أو ألصق توكن يدوياً."
     env = dict(os.environ, GIT_TERMINAL_PROMPT="0")
     try:
-        p = subprocess.run([git, "credential", "fill"], input="protocol=https\nhost=%s\n\n" % host,
-                           capture_output=True, text=True, timeout=300, env=env, creationflags=NO_WINDOW)
+        p = subprocess.run(args, input=request, capture_output=True, text=True, timeout=300, env=env,
+                           creationflags=NO_WINDOW)
     except subprocess.TimeoutExpired:
         return None, "انتهت المهلة قبل إكمال تسجيل الدخول."
     fields = dict(line.split("=", 1) for line in p.stdout.splitlines() if "=" in line)
     if p.returncode != 0 or not fields.get("password"):
-        return None, ("لم يكتمل تسجيل الدخول. تأكد أن Git for Windows مثبت مع Git Credential Manager. "
-                      + (p.stderr.strip()[-200:] if p.stderr else ""))
+        return None, "لم يكتمل تسجيل الدخول. " + (p.stderr.strip()[-200:] if p.stderr else "")
+    if not git and gcm:
+        # Git would ask the helper to remember a working sign-in; without Git, do it ourselves.
+        store = "".join("%s=%s\n" % kv for kv in fields.items()) + "\n"
+        subprocess.run([gcm, "store"], input=store, capture_output=True, text=True, timeout=60, creationflags=NO_WINDOW)
     return fields["password"], None
 
 
@@ -200,9 +230,9 @@ def git_clone(url, host="github"):
     name = os.path.splitext(url.rstrip("/").split("/")[-1])[0]
     dest = os.path.join(config.WORKSPACE, name)
     if os.path.exists(dest):
-        code, out = run(["git"] + _git_auth(host) + ["pull"], cwd=dest)
+        code, out = run([git_exe() or "git"] + _git_auth(host) + ["pull"], cwd=dest)
     else:
-        code, out = run(["git"] + _git_auth(host) + ["clone", url, dest])
+        code, out = run([git_exe() or "git"] + _git_auth(host) + ["clone", url, dest])
     return "%s\n%s" % (dest, clip(out))
 
 
@@ -210,7 +240,7 @@ def git_push(path, message, host="github"):
     path = os.path.join(config.WORKSPACE, path) if not os.path.isabs(path) else path
     out = []
     for args in (["add", "-A"], ["commit", "-m", message], _git_auth(host) + ["push"]):
-        code, o = run(["git"] + args, cwd=path)
+        code, o = run([git_exe() or "git"] + args, cwd=path)
         out.append(o)
         if code != 0 and args[0] != "commit":
             break

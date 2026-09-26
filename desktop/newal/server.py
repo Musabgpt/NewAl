@@ -87,6 +87,8 @@ def state():
             "drive": connectors.drive_connected(),
             "rclone": bool(config.find_tool("rclone")),
             "vscode": bool(connectors.vscode_path()),
+            "git": bool(connectors.git_exe()),
+            "signin": bool(connectors.git_exe() or config.find_tool("git-credential-manager")),
             "engine": bool(config.find_tool("llama-server")),
         },
         "index": memory.index_state(),
@@ -280,6 +282,9 @@ class Handler(BaseHTTPRequestHandler):
             config.update({"project_dirs": dirs})
             memory.index_dirs(dirs)
             return self._json({"ok": True, "dirs": dirs})
+        if p == "/api/install/git":
+            ok, out = connectors.install_git()
+            return self._json({"ok": ok, "output": out})
         if p == "/api/connect/github":
             return self._json(connectors.connect_github())
         if p == "/api/connect/gitlab":

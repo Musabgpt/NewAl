@@ -32,9 +32,9 @@ def find_tool(name):
         return env
     for base in (os.path.join(APP_DIR, "bin"), os.path.join(BUNDLE, "bin"), os.environ.get("NEWAL_BIN", "")):
         if base:
-            p = os.path.join(base, name + EXE)
-            if os.path.exists(p):
-                return p
+            for p in (os.path.join(base, name + EXE), os.path.join(base, "gcm", name + EXE)):
+                if os.path.exists(p):
+                    return p
     return shutil.which(name)
 
 
