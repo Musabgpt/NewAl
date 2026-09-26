@@ -1,0 +1,87 @@
+<!doctype html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>NewAl</title>
+<link rel="stylesheet" href="/ui/style.css">
+<link rel="icon" href="/ui/icon.png">
+</head>
+<body>
+<aside id="side">
+  <button id="newChat" class="wide">✎ محادثة جديدة</button>
+  <div class="side-title">المحادثات</div>
+  <div id="convs"></div>
+  <nav>
+    <button data-panel="models">🧠 النماذج</button>
+    <button data-panel="connect">🔗 الربط</button>
+    <button data-panel="memory">🗂 الذاكرة والمشروع</button>
+    <button data-panel="settings">⚙ الإعدادات</button>
+    <button data-panel="update">📈 تحديث</button>
+  </nav>
+</aside>
+
+<main>
+  <header>
+    <button id="toggleSide" title="القائمة">☰</button>
+    <div id="title">NewAl</div>
+    <div id="loaded"></div>
+  </header>
+  <div id="notice" hidden></div>
+  <section id="chat">
+    <div id="welcome">
+      <h1>NewAl</h1>
+      <p>مساعدك المحلي: يبرمج، يبحث بالنت، يشغّل الطرفية، ويتذكر مشروعك. كل شي على جهازك ومجاني.</p>
+      <div class="examples">
+        <button>اكتب سكربت بايثون ينظم مجلد التنزيلات حسب نوع الملف وجرّبه</button>
+        <button>شو آخر أخبار الذكاء الاصطناعي هالأسبوع؟</button>
+        <button>اعمل ملف plan.md فيه خطة تعلم بايثون بشهر</button>
+        <button>صغلي فكرتي كطلب واضح: تطبيق يذكّرني بشرب المي</button>
+      </div>
+    </div>
+    <div id="messages"></div>
+  </section>
+
+  <footer>
+    <div id="attachments"></div>
+    <div id="composer">
+      <button id="attach" title="إرفاق ملف">＋</button>
+      <textarea id="input" rows="1" placeholder="اسأل أي شيء… (Enter للإرسال، Shift+Enter لسطر جديد)" dir="auto"></textarea>
+      <button id="send" title="إرسال">↑</button>
+    </div>
+    <div id="modes">
+      <label class="chip"><input type="radio" name="mode" value="auto" checked>🧭 تلقائي</label>
+      <label class="chip"><input type="radio" name="mode" value="code">💻 برمجة</label>
+      <label class="chip"><input type="radio" name="mode" value="tools">🛠 أدوات</label>
+      <label class="chip"><input type="radio" name="mode" value="analyze">🧠 تحليل</label>
+      <label class="chip"><input type="radio" name="mode" value="chat">💬 محادثة</label>
+      <label class="chip toggle"><input type="checkbox" id="think">💭 تفكير عميق</label>
+    </div>
+    <input type="file" id="fileInput" multiple hidden>
+  </footer>
+</main>
+
+<div id="panel" hidden>
+  <div class="panel-box">
+    <button class="close" id="closePanel">✕</button>
+    <div id="panelBody"></div>
+  </div>
+</div>
+
+<div id="approval" hidden>
+  <div class="panel-box small">
+    <h3>⚠ موافقة مطلوبة</h3>
+    <pre id="approvalText" dir="ltr"></pre>
+    <div class="row">
+      <button id="approveYes" class="primary">سماح</button>
+      <button id="approveNo">رفض</button>
+      <label><input type="checkbox" id="approveAlways"> اسمح دائماً بدون سؤال</label>
+    </div>
+  </div>
+</div>
+
+<div id="drop" hidden>أفلت الملفات هنا</div>
+<script src="/ui/markdown.js"></script>
+<script src="/ui/app.js"></script>
+</body>
+</html>
