@@ -34,8 +34,17 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           $ErrorActionPreference = "Stop"
-          $rel = Invoke-RestMethod -Uri "https://api.github.com/repos/ggml-org/llama.cpp/releases/latest" -Headers @{ Authorization = "Bearer $env:GH_TOKEN"; "User-Agent" = "NewAl" }
-          $asset = $rel.assets | Where-Object { $_.name -match "bin-win-cpu-x64\.zip$" } | Select-Object -First 1
+          # The newest release that ships a Windows x64 CPU build (not every release has one).
+          $rels = Invoke-RestMethod -Uri "https://api.github.com/repos/ggml-org/llama.cpp/releases?per_page=30" -Headers @{ Authorization = "Bearer $env:GH_TOKEN"; "User-Agent" = "NewAl" }
+          $rel = $null; $asset = $null
+          foreach ($r in $rels) {
+            $a = $r.assets | Where-Object { $_.name -match "win" -and $_.name -match "cpu" -and $_.name -match "x64" -and $_.name -match "\.zip$" } | Select-Object -First 1
+            if ($a) { $rel = $r; $asset = $a; break }
+          }
+          if (-not $asset) {
+            $rels | Select-Object -First 3 | ForEach-Object { Write-Host "$($_.tag_name): $(($_.assets | ForEach-Object name) -join ', ')" }
+            throw "no Windows CPU build found in the llama.cpp releases"
+          }
           Write-Host "llama.cpp $($rel.tag_name): $($asset.name)"
           Invoke-WebRequest $asset.browser_download_url -OutFile llama.zip
           Expand-Archive llama.zip -DestinationPath llama -Force
