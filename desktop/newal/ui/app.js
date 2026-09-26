@@ -438,13 +438,17 @@ const panels = {
     const st = s.settings, c = s.connectors;
     const mark = ok => ok ? '<span class="ok">✓ مربوط</span>' : '<span class="hint">غير مربوط</span>';
     body.innerHTML = `<h2>🔗 الربط</h2>
-      <div class="card"><h4>GitHub ${mark(c.github)}</h4>
-        <div class="about">أنشئ Personal access token (classic) من github.com ← Settings ← Developer settings، بصلاحية repo.</div>
-        <div class="field"><input type="password" id="github_token" placeholder="ghp_…" value="${st.github_token}"></div></div>
-      <div class="card"><h4>GitLab ${mark(c.gitlab)}</h4>
-        <div class="about">Access token من gitlab.com ← Preferences ← Access tokens، بصلاحيات api و read_repository و write_repository.</div>
+      <div class="card"><h4>GitHub ${c.github ? `<span class="ok">✓ مربوط ${escapeHtml(st.github_user ? "@" + st.github_user : "")}</span>` : '<span class="hint">غير مربوط</span>'}</h4>
+        <div class="about">يفتح نافذة تسجيل دخول GitHub وتضغط «Authorize» فقط (عبر Git for Windows). إذا سجلت دخول من VS Code قبل، يربط فوراً.</div>
+        <div class="row">${c.github ? '<button data-off="github">فصل</button>' : '<button class="primary" data-connect="github">🔗 ربط GitHub بضغطة زر</button>'}<span class="hint" data-out="github"></span></div>
+        <details><summary class="hint">أو ألصق توكن يدوياً</summary>
+        <div class="field"><input type="password" id="github_token" placeholder="ghp_…" value="${st.github_token}"></div></details></div>
+      <div class="card"><h4>GitLab ${c.gitlab ? `<span class="ok">✓ مربوط ${escapeHtml(st.gitlab_user ? "@" + st.gitlab_user : "")}</span>` : '<span class="hint">غير مربوط</span>'}</h4>
+        <div class="about">نفس الطريقة: نافذة تسجيل دخول GitLab.</div>
+        <div class="row">${c.gitlab ? '<button data-off="gitlab">فصل</button>' : '<button class="primary" data-connect="gitlab">🔗 ربط GitLab بضغطة زر</button>'}<span class="hint" data-out="gitlab"></span></div>
+        <details><summary class="hint">خيارات متقدمة: خادم GitLab خاص أو توكن يدوي</summary>
         <div class="field"><input type="text" id="gitlab_url" dir="ltr" value="${escapeHtml(st.gitlab_url)}"></div>
-        <div class="field"><input type="password" id="gitlab_token" placeholder="glpat-…" value="${st.gitlab_token}"></div></div>
+        <div class="field"><input type="password" id="gitlab_token" placeholder="glpat-…" value="${st.gitlab_token}"></div></details></div>
       <div class="card"><h4>Kaggle ${mark(c.kaggle)}</h4>
         <div class="about">من kaggle.com ← Settings ← API ← Create New Token، ينزل kaggle.json فيه username و key.</div>
         <div class="row"><input type="text" id="kaggle_username" placeholder="username" value="${escapeHtml(st.kaggle_username)}">
@@ -466,6 +470,20 @@ const panels = {
       body.querySelector("#saved").textContent = "✓ حُفظ";
       setTimeout(() => panels.connect(body), 600);
     };
+    body.querySelectorAll("[data-connect]").forEach(b => b.onclick = async () => {
+      const out = body.querySelector(`[data-out=${b.dataset.connect}]`);
+      b.disabled = true;
+      out.textContent = "أكمل تسجيل الدخول في النافذة التي فُتحت…";
+      await api("/api/settings", {gitlab_url: body.querySelector("#gitlab_url").value.trim()});
+      const r = await api("/api/connect/" + b.dataset.connect, {});
+      b.disabled = false;
+      if (r.ok) panels.connect(body);
+      else { out.textContent = r.error; out.className = "bad"; }
+    });
+    body.querySelectorAll("[data-off]").forEach(b => b.onclick = async () => {
+      await api("/api/disconnect", {service: b.dataset.off});
+      panels.connect(body);
+    });
     body.querySelector("#driveConnect").onclick = async () => {
       body.querySelector("#driveOut").textContent = "أكمل تسجيل الدخول في المتصفح…";
       const r = await api("/api/drive/connect", {});

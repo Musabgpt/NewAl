@@ -48,6 +48,8 @@ DEFAULTS = {
     "language": "ar",
     "project_dirs": [],           # folders indexed for the project memory
     "github_token": "",
+    "github_user": "",
+    "gitlab_user": "",
     "gitlab_token": "",
     "gitlab_url": "https://gitlab.com",
     "kaggle_username": "",

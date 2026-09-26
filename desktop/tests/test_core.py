@@ -157,6 +157,31 @@ class RouterTest(unittest.TestCase):
         self.assertEqual(router.route("مرحبا"), "chat")        # no models: safe default
 
 
+class SignInTest(unittest.TestCase):
+    def test_git_credential_reads_the_helper(self):
+        from newal import connectors
+        cfg = os.path.join(HOME, "gitconfig")
+        with open(cfg, "w") as f:
+            f.write('[credential]\n\thelper = "!f() { echo username=me; echo password=tok123; }; f"\n')
+        old = os.environ.get("GIT_CONFIG_GLOBAL")
+        os.environ["GIT_CONFIG_GLOBAL"] = cfg
+        try:
+            self.assertEqual(connectors.git_credential("example.com"), ("tok123", None))
+        finally:
+            if old is None:
+                del os.environ["GIT_CONFIG_GLOBAL"]
+            else:
+                os.environ["GIT_CONFIG_GLOBAL"] = old
+
+    def test_gitlab_header_kind(self):
+        from newal import connectors
+        config.update({"gitlab_token": "glpat-abc"})
+        self.assertEqual(connectors._gl(), {"PRIVATE-TOKEN": "glpat-abc"})
+        config.update({"gitlab_token": "oauth-xyz"})
+        self.assertEqual(connectors._gl(), {"Authorization": "Bearer oauth-xyz"})
+        config.update({"gitlab_token": ""})
+
+
 class ConfigTest(unittest.TestCase):
     def test_secrets_hidden(self):
         config.update({"github_token": "ghp_secret"})

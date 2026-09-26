@@ -87,6 +87,68 @@ def _gh():
     return h
 
 
+# ------------------------------------------------------------------ one-click sign-in
+
+def git_credential(host):
+    """Asks Git Credential Manager (part of Git for Windows) for a token: it reuses a saved sign-in
+    or opens the site's own sign-in window. Returns (token, error)."""
+    git = shutil.which("git")
+    if not git:
+        return None, "Git غير مثبت. ثبّته من git-scm.com (مجاني) ثم أعد المحاولة، أو ألصق توكن يدوياً."
+    env = dict(os.environ, GIT_TERMINAL_PROMPT="0")
+    try:
+        p = subprocess.run([git, "credential", "fill"], input="protocol=https\nhost=%s\n\n" % host,
+                           capture_output=True, text=True, timeout=300, env=env, creationflags=NO_WINDOW)
+    except subprocess.TimeoutExpired:
+        return None, "انتهت المهلة قبل إكمال تسجيل الدخول."
+    fields = dict(line.split("=", 1) for line in p.stdout.splitlines() if "=" in line)
+    if p.returncode != 0 or not fields.get("password"):
+        return None, ("لم يكتمل تسجيل الدخول. تأكد أن Git for Windows مثبت مع Git Credential Manager. "
+                      + (p.stderr.strip()[-200:] if p.stderr else ""))
+    return fields["password"], None
+
+
+def gh_cli_token():
+    gh = shutil.which("gh")
+    if not gh:
+        return None
+    code, out = run([gh, "auth", "token"], timeout=20)
+    token = out.strip().splitlines()[-1] if out.strip() else ""
+    return token if code == 0 and token else None
+
+
+def connect_github():
+    """One-click GitHub: GitHub CLI's saved token, else Git Credential Manager's sign-in window."""
+    token, err = gh_cli_token(), None
+    if not token:
+        token, err = git_credential("github.com")
+    if not token:
+        return {"ok": False, "error": err}
+    try:
+        me = _api("https://api.github.com/user", {"Authorization": "Bearer " + token})
+    except RuntimeError as e:
+        return {"ok": False, "error": "التوكن لا يعمل مع GitHub: %s" % e}
+    config.update({"github_token": token, "github_user": me.get("login", "")})
+    return {"ok": True, "user": me.get("login", "")}
+
+
+def connect_gitlab():
+    host = urllib.parse.urlparse(config.get("gitlab_url")).netloc or "gitlab.com"
+    token, err = git_credential(host)
+    if not token:
+        return {"ok": False, "error": err}
+    try:
+        # OAuth tokens from the sign-in window go in a Bearer header, personal tokens in PRIVATE-TOKEN.
+        me = _api(_gl_url("/user"), {"Authorization": "Bearer " + token})
+    except RuntimeError:
+        try:
+            me = _api(_gl_url("/user"), {"PRIVATE-TOKEN": token})
+        except RuntimeError as e:
+            return {"ok": False, "error": "التوكن لا يعمل مع GitLab: %s" % e}
+    config.update({"gitlab_token": token, "gitlab_user": me.get("username", "")})
+    return {"ok": True, "user": me.get("username", "")}
+
+
 def github_repos():
     if not config.get("github_token"):
         return "اربط GitHub أولاً من الإعدادات (Personal access token)."
@@ -158,7 +220,11 @@ def git_push(path, message, host="github"):
 # ------------------------------------------------------------------ GitLab
 
 def _gl():
-    return {"PRIVATE-TOKEN": config.get("gitlab_token")} if config.get("gitlab_token") else {}
+    t = config.get("gitlab_token")
+    if not t:
+        return {}
+    # Personal access tokens start with glpat-; tokens from the sign-in window are OAuth tokens.
+    return {"PRIVATE-TOKEN": t} if t.startswith("glpat-") else {"Authorization": "Bearer " + t}
 
 
 def _gl_url(path):

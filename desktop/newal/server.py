@@ -280,6 +280,15 @@ class Handler(BaseHTTPRequestHandler):
             config.update({"project_dirs": dirs})
             memory.index_dirs(dirs)
             return self._json({"ok": True, "dirs": dirs})
+        if p == "/api/connect/github":
+            return self._json(connectors.connect_github())
+        if p == "/api/connect/gitlab":
+            return self._json(connectors.connect_gitlab())
+        if p == "/api/disconnect":
+            key = {"github": ("github_token", "github_user"), "gitlab": ("gitlab_token", "gitlab_user"),
+                   "kaggle": ("kaggle_username", "kaggle_key")}.get(body.get("service"), ())
+            config.update({k: "" for k in key})
+            return self._json({"ok": True})
         if p == "/api/drive/connect":
             ok, out = connectors.drive_connect()
             return self._json({"ok": ok, "output": out[-1500:]})
