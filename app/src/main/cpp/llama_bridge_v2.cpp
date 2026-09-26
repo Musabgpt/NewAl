@@ -45,6 +45,7 @@ struct EngineHandle {
 // Flags passed from Java.
 constexpr int FLAG_CODE_MODE = 1;  // add the built-in programming system prompt
 constexpr int FLAG_RAW = 2;        // caller supplies its own system turn; no chat-only stop markers
+constexpr int FLAG_THINK = 4;      // let Qwen3-style models reason in a <think> block first
 
 enum StopReason { STOP_EOG = 0, STOP_MAX_TOKENS = 1, STOP_CONTEXT_FULL = 2, STOP_CANCELLED = 3,
                   STOP_STRING = 4, STOP_DECODE_ERROR = 5, STOP_CALLBACK = 6 };
@@ -103,7 +104,7 @@ std::string fallback(const std::vector<Turn> & v) {
     return o;
 }
 
-std::string templ(const EngineHandle * h, const std::vector<Turn> & turns, bool code_mode) {
+std::string templ(const EngineHandle * h, const std::vector<Turn> & turns, bool code_mode, bool think) {
     if (!h || !h->model || turns.empty()) return {};
 
     std::vector<llama_chat_message> messages;
@@ -148,7 +149,7 @@ std::string templ(const EngineHandle * h, const std::vector<Turn> & turns, bool 
     static const std::string assistant_open = "<|im_start|>assistant\n";
     if (std::strstr(model_tmpl, "<think>") && out.size() >= assistant_open.size()
         && out.compare(out.size() - assistant_open.size(), assistant_open.size(), assistant_open) == 0) {
-        out += "<think>\n\n</think>\n\n";
+        out += think ? "<think>\n" : "<think>\n\n</think>\n\n";
     }
     return out;
 }
@@ -162,10 +163,10 @@ bool tokenize(const EngineHandle * h, const std::string & prompt, std::vector<ll
 }
 
 // Drop only old non-system turns. The newest user request is never discarded wholesale.
-bool fit_prompt(const EngineHandle * h, std::vector<Turn> turns, bool code_mode,
+bool fit_prompt(const EngineHandle * h, std::vector<Turn> turns, bool code_mode, bool think,
                 int max_prompt_tokens, std::string & prompt, std::vector<llama_token> & tokens) {
     while (true) {
-        prompt = templ(h, turns, code_mode);
+        prompt = templ(h, turns, code_mode, think);
         if (prompt.empty()) prompt = fallback(turns);
         if (!tokenize(h, prompt, tokens)) return false;
         if (static_cast<int>(tokens.size()) <= max_prompt_tokens) return true;
@@ -529,7 +530,7 @@ JNIEXPORT jstring JNICALL Java_com_musab_aragpt2_LlamaEngine_nativeGenerate(
 
     std::string prompt;
     std::vector<llama_token> prompt_tokens;
-    if (!fit_prompt(h, turns, code_mode, max_prompt_tokens, prompt, prompt_tokens)) {
+    if (!fit_prompt(h, turns, code_mode, (flags & FLAG_THINK) != 0, max_prompt_tokens, prompt, prompt_tokens)) {
         fail(env, "فشل تجهيز prompt");
         return nullptr;
     }
@@ -556,10 +557,12 @@ JNIEXPORT jstring JNICALL Java_com_musab_aragpt2_LlamaEngine_nativeGenerate(
     if (greedy) {
         llama_sampler_chain_add(sampler, llama_sampler_init_greedy());
     } else {
+        // llama.cpp's own order: penalties see the full distribution, then truncation, then temperature.
+        llama_sampler_chain_add(sampler, llama_sampler_init_penalties(llama_vocab_n_tokens(h->vocab), 64, 1.05f, 0.0f, 0.0f));
         llama_sampler_chain_add(sampler, llama_sampler_init_top_k(std::max(1, static_cast<int>(topk))));
+        llama_sampler_chain_add(sampler, llama_sampler_init_top_p(0.95f, 1));
         llama_sampler_chain_add(sampler, llama_sampler_init_min_p(0.05f, 1));
         llama_sampler_chain_add(sampler, llama_sampler_init_temp(temp));
-        llama_sampler_chain_add(sampler, llama_sampler_init_penalties(llama_vocab_n_tokens(h->vocab), 64, 1.10f, 0.0f, 0.0f));
         llama_sampler_chain_add(sampler, llama_sampler_init_dist(LLAMA_DEFAULT_SEED));
     }
 
@@ -725,6 +728,12 @@ JNIEXPORT jstring JNICALL Java_com_musab_aragpt2_LlamaEngine_nativeGenerate(
     return env->NewStringUTF((result_pack(static_cast<int>(prompt_tokens.size()), generated, first_ms,
                                           tok_per_sec, total_ms, stop_reason, reused)
                               + RESULT_SEP + std::to_string(drafted) + RESULT_SEP + std::to_string(accepted)).c_str());
+}
+
+JNIEXPORT jstring JNICALL Java_com_musab_aragpt2_LlamaEngine_nativeChatTemplate(JNIEnv * env, jobject, jlong hp) {
+    auto * h = reinterpret_cast<EngineHandle *>(hp);
+    const char * t = h && h->model ? llama_model_chat_template(h->model, nullptr) : nullptr;
+    return env->NewStringUTF(t ? t : "");
 }
 
 JNIEXPORT jint JNICALL Java_com_musab_aragpt2_LlamaEngine_nativeContextSize(JNIEnv *, jobject, jlong hp) {

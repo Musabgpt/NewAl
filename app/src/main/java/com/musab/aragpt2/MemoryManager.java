@@ -64,6 +64,9 @@ public final class MemoryManager {
         return recent;
     }
 
+    /** What the user asked to be remembered, and an extract of the earlier conversation ("" when none). */
+    public String memoryText() { return memoryBlock(); }
+
     private String memoryBlock() {
         Map<String, String> facts = store.loadFacts();
         String summary = store.getSummary();

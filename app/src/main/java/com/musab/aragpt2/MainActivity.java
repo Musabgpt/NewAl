@@ -42,12 +42,13 @@ public class MainActivity extends AppCompatActivity {
             PREF_MAX_ATTEMPTS="max_attempts", PREF_TIMEOUT_S="exec_timeout_s", PREF_GRAMMAR="grammar", PREF_AUTO_TEST="auto_test",
             PREF_ROLE="role_path_", PREF_ORCHESTRATE="orchestrate", PREF_LANG_SUMMARY="lang_summary",
             PREF_SPECULATIVE="speculative", PREF_DRAFT="draft_path",
-            PREF_ASSISTANT="assistant_mode", PREF_CONFIRM_SENDS="confirm_sends", PREF_SPEAK="speak_replies";
+            PREF_ASSISTANT="assistant_mode", PREF_CONFIRM_SENDS="confirm_sends", PREF_SPEAK="speak_replies",
+            PREF_WEB="web_search", PREF_THINK="think", PREF_ONLINE="online_tools", PREF_CONTEXT="context_tokens";
     /** Draft tokens per step; measured best on CPU for a 3B model with a 0.5B draft. */
     private static final int DRAFT_TOKENS=3;
     /** Model roles: each may use its own GGUF; models are loaded one at a time (sequentially). */
     private static final String ROLE_MANAGER="manager", ROLE_CODER="coder", ROLE_LANGUAGE="language";
-    private static final int CONTEXT_TOKENS=4096, MAX_NEW_TOKENS=256, TOP_K=40, AGENT_PORT=47811, REQ_TERMUX=41, REQ_NOTIFY=42, REQ_ASSIST=43;
+    private static final int CONTEXT_TOKENS=4096, MAX_NEW_TOKENS=2048, TOP_K=40, AGENT_PORT=47811, REQ_TERMUX=41, REQ_NOTIFY=42, REQ_ASSIST=43;
     private static final float TEMPERATURE=0.70f;
 
     private final ExecutorService executor=Executors.newSingleThreadExecutor();
@@ -86,7 +87,13 @@ public class MainActivity extends AppCompatActivity {
     private RecyclerView chatList;
     private EditText inputBox;
     private View rootView,headerView,inputBar;
-    private Button loadModelButton,sendButton,clearButton,agentButton,assistantButton,micButton;
+    private Button loadModelButton,sendButton,agentButton,assistantButton,webButton,thinkButton;
+    private TextView clearButton,micButton,attachButton,menuButton;
+    private androidx.drawerlayout.widget.DrawerLayout drawer;
+    private android.widget.ListView conversationList;
+    private ChatTools chatTools;
+    private volatile ChatSession chatSession;
+    private ActivityResultLauncher<String[]> attachLauncher;
     private int headerBasePaddingTop;
     private ActivityResultLauncher<String[]> pickModelLauncher;
 
@@ -97,6 +104,8 @@ public class MainActivity extends AppCompatActivity {
         historyStore=new ChatHistoryStore(this);
         device=new DeviceController(this);
         assistant=new PhoneAssistant(this,device,new AssistantUi());
+        chatTools=new ChatTools(new WebTools(WebTools.DEFAULT_HTTP));
+        chatTools.online=prefs.getBoolean(PREF_ONLINE,true);
         pool=new ModelPool<>(this::newEngine,this::availableRam);
         pool.setEvictListener((path,evicted)->{
             for(LlamaEngine e:pool.engines())if(e.draft()==evicted)e.setDraft(null,DRAFT_TOKENS);
@@ -116,6 +125,12 @@ public class MainActivity extends AppCompatActivity {
         agentButton=findViewById(R.id.agentButton);
         assistantButton=findViewById(R.id.assistantButton);
         micButton=findViewById(R.id.micButton);
+        webButton=findViewById(R.id.webButton);
+        thinkButton=findViewById(R.id.thinkButton);
+        attachButton=findViewById(R.id.attachButton);
+        menuButton=findViewById(R.id.menuButton);
+        drawer=findViewById(R.id.drawer);
+        conversationList=findViewById(R.id.conversationList);
         agentBar=findViewById(R.id.agentBar);
         emptyView=findViewById(R.id.emptyView);
         agentChips=findViewById(R.id.agentChips);
@@ -136,7 +151,20 @@ public class MainActivity extends AppCompatActivity {
         pickModelLauncher=registerForActivityResult(new ActivityResultContracts.OpenDocument(), this::onModelPicked);
         loadModelButton.setOnClickListener(v->chooseModelSource());
         sendButton.setOnClickListener(v->onSendOrStopClicked());
-        clearButton.setOnClickListener(v->clearChat());
+        clearButton.setOnClickListener(v->newChat());
+        menuButton.setOnClickListener(v->{refreshConversations();drawer.openDrawer(androidx.core.view.GravityCompat.START);});
+        findViewById(R.id.drawerNewChat).setOnClickListener(v->{drawer.closeDrawers();newChat();});
+        findViewById(R.id.drawerModels).setOnClickListener(v->{drawer.closeDrawers();showModelRoles();});
+        findViewById(R.id.drawerSettings).setOnClickListener(v->{drawer.closeDrawers();showSettings();});
+        findViewById(R.id.drawerClearAll).setOnClickListener(v->new AlertDialog.Builder(this).setTitle("حذف كل المحادثات؟")
+                .setMessage("تُحذف كل المحادثات وما طلبت من التطبيق تذكّره.").setPositiveButton("حذف",(d,w)->{drawer.closeDrawers();clearChat();})
+                .setNegativeButton("إلغاء",null).show());
+        conversationList.setOnItemClickListener((parent,view,pos,id)->{drawer.closeDrawers();openConversation(id);});
+        conversationList.setOnItemLongClickListener((parent,view,pos,id)->{conversationMenu(id);return true;});
+        webButton.setOnClickListener(v->{prefs.edit().putBoolean(PREF_WEB,!prefs.getBoolean(PREF_WEB,false)).apply();renderAgentButton();});
+        thinkButton.setOnClickListener(v->{prefs.edit().putBoolean(PREF_THINK,!prefs.getBoolean(PREF_THINK,false)).apply();renderAgentButton();});
+        attachLauncher=registerForActivityResult(new ActivityResultContracts.OpenDocument(),this::onAttach);
+        attachButton.setOnClickListener(v->attachLauncher.launch(new String[]{"text/*","application/json","application/xml","application/javascript","application/x-python"}));
         agentButton.setOnClickListener(v->setAgentMode(!agentMode));
         agentButton.setOnLongClickListener(v->{showTools();return true;});
         assistantButton.setOnClickListener(v->setAssistantMode(!assistantMode));
@@ -149,7 +177,7 @@ public class MainActivity extends AppCompatActivity {
         micButton.setOnClickListener(v->listen());
         assistant.confirmSends=prefs.getBoolean(PREF_CONFIRM_SENDS,true);
         agentMode=prefs.getBoolean(PREF_AGENT_MODE,false);
-        assistantMode=prefs.getBoolean(PREF_ASSISTANT,true)&&!agentMode;
+        assistantMode=prefs.getBoolean(PREF_ASSISTANT,false)&&!agentMode;
         AgentProfile saved=AgentProfile.byId(prefs.getString(PREF_AGENT_PROFILE,"auto"));
         if(saved!=null)selectedAgent=saved;
         renderAgentButton();
@@ -187,30 +215,37 @@ public class MainActivity extends AppCompatActivity {
 
     /** Free GGUF models from Hugging Face: name, size in GB, minimum phone RAM in GB, URL. */
     private static final Object[][] MODEL_CATALOG={
-            {"📱 Qwen3.5 4B — الأدق للتحكم بالهاتف (12/12 باختباراتنا)",2.74,8,"https://huggingface.co/unsloth/Qwen3.5-4B-GGUF/resolve/main/Qwen3.5-4B-Q4_K_M.gguf"},
-            {"📱 Qwen3.5 2B — أسرع للتحكم بالهاتف (9/12)",1.28,6,"https://huggingface.co/unsloth/Qwen3.5-2B-GGUF/resolve/main/Qwen3.5-2B-Q4_K_M.gguf"},
-            {"Qwen2.5-Coder 0.5B (Q8) — الأسرع",0.68,3,"https://huggingface.co/Qwen/Qwen2.5-Coder-0.5B-Instruct-GGUF/resolve/main/qwen2.5-coder-0.5b-instruct-q8_0.gguf"},
-            {"Qwen2.5-Coder 1.5B (Q4_K_M) — متوازن",1.12,4,"https://huggingface.co/Qwen/Qwen2.5-Coder-1.5B-Instruct-GGUF/resolve/main/qwen2.5-coder-1.5b-instruct-q4_k_m.gguf"},
-            {"Qwen2.5-Coder 3B (Q4_K_M) — أدق بكثير",2.1,6,"https://huggingface.co/Qwen/Qwen2.5-Coder-3B-Instruct-GGUF/resolve/main/qwen2.5-coder-3b-instruct-q4_k_m.gguf"},
-            {"Qwen2.5-Coder 7B (Q4_K_M) — الأقوى وبطيء",4.7,10,"https://huggingface.co/Qwen/Qwen2.5-Coder-7B-Instruct-GGUF/resolve/main/qwen2.5-coder-7b-instruct-q4_k_m.gguf"},
-            {"🗣 Qwen2.5 0.5B عام (مدير سريع)",0.68,3,"https://huggingface.co/Qwen/Qwen2.5-0.5B-Instruct-GGUF/resolve/main/qwen2.5-0.5b-instruct-q8_0.gguf"},
-            {"🗣 Qwen2.5 1.5B عام (لغة ومحادثة)",1.12,4,"https://huggingface.co/Qwen/Qwen2.5-1.5B-Instruct-GGUF/resolve/main/qwen2.5-1.5b-instruct-q4_k_m.gguf"},
-            {"🗣 Qwen2.5 3B عام (لغة أقوى)",2.1,6,"https://huggingface.co/Qwen/Qwen2.5-3B-Instruct-GGUF/resolve/main/qwen2.5-3b-instruct-q4_k_m.gguf"},
+            {"⭐ Qwen3.5 4B — الأذكى (محادثة، أدوات، تحكم بالهاتف)",2.74,8,"https://huggingface.co/unsloth/Qwen3.5-4B-GGUF/resolve/main/Qwen3.5-4B-Q4_K_M.gguf"},
+            {"⚡ Qwen3.5 2B — سريع ومتوازن",1.28,6,"https://huggingface.co/unsloth/Qwen3.5-2B-GGUF/resolve/main/Qwen3.5-2B-Q4_K_M.gguf"},
+            {"🪶 Qwen3.5 0.8B — خفيف جداً للهواتف الضعيفة",0.53,3,"https://huggingface.co/unsloth/Qwen3.5-0.8B-GGUF/resolve/main/Qwen3.5-0.8B-Q4_K_M.gguf"},
+            {"Qwen3 4B Instruct 2507 — بديل قوي",2.5,8,"https://huggingface.co/unsloth/Qwen3-4B-Instruct-2507-GGUF/resolve/main/Qwen3-4B-Instruct-2507-Q4_K_M.gguf"},
+            {"💻 Qwen2.5-Coder 3B — للبرمجة مع Termux",2.1,6,"https://huggingface.co/Qwen/Qwen2.5-Coder-3B-Instruct-GGUF/resolve/main/qwen2.5-coder-3b-instruct-q4_k_m.gguf"},
+            {"💻 Qwen2.5-Coder 7B — أقوى برمجة وبطيء",4.7,10,"https://huggingface.co/Qwen/Qwen2.5-Coder-7B-Instruct-GGUF/resolve/main/qwen2.5-coder-7b-instruct-q4_k_m.gguf"},
+            {"💻 Qwen2.5-Coder 0.5B — مسودة تسريع للـCoder",0.68,3,"https://huggingface.co/Qwen/Qwen2.5-Coder-0.5B-Instruct-GGUF/resolve/main/qwen2.5-coder-0.5b-instruct-q8_0.gguf"},
     };
+
 
     private void chooseModelSource(){
         android.app.ActivityManager am=(android.app.ActivityManager)getSystemService(ACTIVITY_SERVICE);
         android.app.ActivityManager.MemoryInfo mi=new android.app.ActivityManager.MemoryInfo();
         if(am!=null)am.getMemoryInfo(mi);
         double ramGb=mi.totalMem/1e9;
-        String[] items=new String[MODEL_CATALOG.length+1];
-        items[0]="📂 اختيار ملف GGUF من الهاتف";
-        for(int i=0;i<MODEL_CATALOG.length;i++){
-            Object[] m=MODEL_CATALOG[i];
+        // Models already on the phone first: one tap switches.
+        File dir=getExternalFilesDir("models");
+        File[] local=dir==null?new File[0]:dir.listFiles((d,n)->n.endsWith(".gguf"));
+        if(local==null)local=new File[0];
+        java.util.Arrays.sort(local,(a,b)->a.getName().compareToIgnoreCase(b.getName()));
+        final File[] files=local;
+        List<String> items=new java.util.ArrayList<>();
+        for(File f:files)items.add((f.getAbsolutePath().equals(loadedPath)?"✅ ":"📦 ")+modelTitle(f.getName()).replace(" ▾","")+String.format(java.util.Locale.US,"  • %.1f GB",f.length()/1e9));
+        items.add("📂 اختيار ملف GGUF من الهاتف");
+        for(Object[] m:MODEL_CATALOG){
             boolean fits=ramGb<=0||ramGb>=((Number)m[2]).doubleValue();
-            items[i+1]=(fits?"📥 ":"⚠️ ")+m[0]+String.format(java.util.Locale.US," • %.1f GB",((Number)m[1]).doubleValue())+(fits?"":" (يحتاج RAM أكبر)");
+            items.add((fits?"📥 ":"⚠️ ")+m[0]+String.format(java.util.Locale.US," • %.1f GB",((Number)m[1]).doubleValue())+(fits?"":" (يحتاج RAM أكبر)"));
         }
-        new AlertDialog.Builder(this).setTitle(String.format(java.util.Locale.US,"النموذج (ذاكرة الهاتف %.1f GB)",ramGb)).setItems(items,(d,which)->{
+        new AlertDialog.Builder(this).setTitle(String.format(java.util.Locale.US,"النموذج (ذاكرة الهاتف %.1f GB)",ramGb)).setItems(items.toArray(new String[0]),(d,which)->{
+            if(which<files.length){loadModelFromLocalFile(files[which],files[which].getName());return;}
+            which-=files.length;
             if(which==0)pickModelLauncher.launch(new String[]{"*/*"});
             else downloadModel((String)MODEL_CATALOG[which-1][0],(String)MODEL_CATALOG[which-1][3]);
         }).show();
@@ -291,7 +326,7 @@ public class MainActivity extends AppCompatActivity {
         loadModelButton.setEnabled(false);
         executor.execute(()->{
             try{
-                File staged=stageModelToAppStorage(uri,expectedSize);
+                File staged=stageModelToAppStorage(uri,expectedSize,displayName);
                 runOnUiThread(()->setWorking(true,"تم تجهيز النموذج — جاري فتحه: "+displayName));
                 loadModelFromLocalFileInternal(staged,displayName,uri.toString(),expectedSize);
             }catch(Exception ex){
@@ -300,11 +335,15 @@ public class MainActivity extends AppCompatActivity {
         });
     }
 
-    private File stageModelToAppStorage(Uri uri,long expectedSize)throws Exception{
+    /** Copies a picked GGUF into the app's models folder under its own file name (several models can be kept). */
+    private File stageModelToAppStorage(Uri uri,long expectedSize,String displayName)throws Exception{
         File dir=getExternalFilesDir("models");
         if(dir==null)throw new IllegalStateException("تخزين التطبيق غير متاح");
         if(!dir.exists()&&!dir.mkdirs())throw new IllegalStateException("تعذر إنشاء مجلد النماذج");
-        File tmp=new File(dir,"model.gguf.part"),target=new File(dir,"model.gguf");
+        String safe=displayName==null?"":displayName.replaceAll("[^\\p{L}\\p{N}._-]+","_");
+        if(safe.isEmpty()||safe.equals("_"))safe="model";
+        if(!safe.toLowerCase(java.util.Locale.ROOT).endsWith(".gguf"))safe+=".gguf";
+        File tmp=new File(dir,safe+".part"),target=new File(dir,safe);
         if(tmp.exists()&&!tmp.delete())throw new IllegalStateException("تعذر حذف ملف مؤقت قديم");
         try(InputStream raw=getContentResolver().openInputStream(uri)){
             if(raw==null)throw new IllegalStateException("تعذر فتح ملف GGUF");
@@ -341,10 +380,16 @@ public class MainActivity extends AppCompatActivity {
             engine=loaded;
             loadedPath=file.getAbsolutePath();
             prefs.edit().putString(PREF_MODEL_LOCAL_PATH,file.getAbsolutePath()).putString(PREF_MODEL_NAME,displayName).putString(PREF_MODEL_URI,sourceUri).putLong(PREF_MODEL_SIZE,file.length()>0?file.length():expectedSize).apply();
-            runOnUiThread(()->{loadModelButton.setEnabled(true);setWorking(false,"جاهز — "+displayName);resumeInterruptedAgentTask();});
+            runOnUiThread(()->{loadModelButton.setEnabled(true);loadModelButton.setText(modelTitle(displayName));setWorking(false,"جاهز — "+displayName);updateEmptyState();resumeInterruptedAgentTask();});
         }catch(Exception ex){
             runOnUiThread(()->{loadModelButton.setEnabled(true);setWorking(false,"تعذر تحميل النموذج: "+safeMessage(ex));});
         }
+    }
+
+    /** "Qwen3.5-4B-Q4_K_M.gguf" → "Qwen3.5 4B ▾". */
+    static String modelTitle(String file){
+        String n=file.replaceAll("(?i)\\.gguf$","").replaceAll("(?i)[-_.](q\\d.*|iq\\d.*|f16|bf16|f32|ud-.*)$","").replaceAll("(?i)-instruct(-\\d+)?","").replace('-',' ').replace('_',' ');
+        return (n.length()>24?n.substring(0,24)+"…":n)+" ▾";
     }
 
     private long querySize(Uri uri){
@@ -367,30 +412,14 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private void onSendOrStopClicked(){
-        if(generating){AgentLoop loop=agentLoop;if(loop!=null)loop.cancel();assistant.cancel();for(LlamaEngine e:pool.engines())e.cancel();return;}
+        if(generating){AgentLoop loop=agentLoop;if(loop!=null)loop.cancel();assistant.cancel();ChatSession cs=chatSession;if(cs!=null)cs.cancel();for(LlamaEngine e:pool.engines())e.cancel();return;}
         String question=inputBox.getText().toString().trim();
         if(question.isEmpty())return;
         if(assistantMode){inputBox.setText("");startAssistant(question,false);return;}
+        if(!agentMode){inputBox.setText("");startChat(question,false);return;}
         if(engine==null)return;
         inputBox.setText("");
-        if(agentMode){startAgent(question,false);return;}
-        setGenerating(true);
-        executor.execute(()->{
-            long userId=historyStore.append(ChatMessage.ROLE_USER,question);long userTime=System.currentTimeMillis();
-            memoryManager.rememberExplicit(question);
-            List<ChatMessage> turns=memoryManager.buildTurns(historyStore.loadAll());
-            runOnUiThread(()->{adapter.add(new ChatMessage(userId,ChatMessage.ROLE_USER,question,userTime));scrollToEnd();setWorking(true,"يفكر…");});
-            live.start("");
-            try{
-                // The reply streams into the bubble token by token instead of appearing at the end.
-                GenerationResult result=engineForRole(ROLE_LANGUAGE).generate(turns,MAX_NEW_TOKENS,TEMPERATURE,TOP_K,GenerationMode.DEFAULT_CODE_MODE?LlamaEngine.FLAG_CODE_MODE:0,live::append);
-                live.end();
-                String answerText=cleanAssistantText(result.text);if(answerText.isEmpty())answerText="…";final String displayAnswer=answerText;
-                long assistantId=historyStore.append(ChatMessage.ROLE_ASSISTANT,displayAnswer);long assistantTime=System.currentTimeMillis();
-                memoryManager.refreshExtractiveSummary(historyStore.loadAll());String metric=formatMetrics(result);
-                runOnUiThread(()->{adapter.updateLast(new ChatMessage(assistantId,ChatMessage.ROLE_ASSISTANT,displayAnswer,assistantTime));scrollToEnd();setGenerating(false);setWorking(false,metric);});
-            }catch(Exception ex){live.end();runOnUiThread(()->{setGenerating(false);setWorking(false,"خطأ أثناء التوليد: "+safeMessage(ex));});}
-        });
+        startAgent(question,false);
     }
 
     // ------------------------------------------------------------------ phone assistant
@@ -494,7 +523,9 @@ public class MainActivity extends AppCompatActivity {
                     reply=runScreenAgent(text);
                     metric="🤖 وكيل الشاشة • "+(System.currentTimeMillis()-start)/1000+"s";
                 }else if(engine!=null){
-                    reply=chatReply();
+                    reply=null;
+                    String said=runChatTurn();
+                    if(spoken&&said!=null)speak(said);
                 }else reply="الأوامر اليومية (افتح، اتصل، ابعت، منبه، كشاف، بلوتوث…) تعمل بدون نموذج. للأسئلة والمهام المركّبة حمّل نموذجاً من 📂 (المقترح: Qwen3.5 4B أو 2B).";
             }catch(Exception e){reply="❌ "+safeMessage(e);}
             final String r=reply,m=metric;
@@ -505,18 +536,6 @@ public class MainActivity extends AppCompatActivity {
             }
             runOnUiThread(()->{setGenerating(false);setWorking(false,m.isEmpty()?"جاهز":m);if(assistantMode)buildAssistantChips();});
         });
-    }
-
-    /** A plain answer from the language model, streamed into the chat (returns null: already shown). */
-    private String chatReply() throws Exception{
-        List<ChatMessage> turns=memoryManager.buildTurns(historyStore.loadAll());
-        live.start("");
-        GenerationResult result=engineForRole(ROLE_LANGUAGE).generate(turns,MAX_NEW_TOKENS,TEMPERATURE,TOP_K,0,live::append);
-        live.end();
-        String answer=cleanAssistantText(result.text);
-        long id=historyStore.append(ChatMessage.ROLE_ASSISTANT,answer.isEmpty()?"…":answer);long t=System.currentTimeMillis();
-        runOnUiThread(()->adapter.updateLast(new ChatMessage(id,ChatMessage.ROLE_ASSISTANT,answer.isEmpty()?"…":answer,t)));
-        return null;
     }
 
     private String runScreenAgent(String goal) throws Exception{
@@ -593,9 +612,13 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private void renderAgentButton(){
-        agentButton.setText(agentMode?"🛠 Termux ✓":"🛠 Termux");
-        assistantButton.setText(assistantMode?"📱 ✓":"📱");
-        inputBox.setHint(assistantMode?"افتح، اتصل، ابعت، شغّل… أو أي مهمة على الهاتف":agentMode?"اطلب برنامجاً… أو /test /fix /explain":"اكتب رسالتك…");
+        agentButton.setSelected(agentMode);
+        assistantButton.setSelected(assistantMode);
+        webButton.setSelected(prefs.getBoolean(PREF_WEB,false));
+        thinkButton.setSelected(prefs.getBoolean(PREF_THINK,false));
+        webButton.setVisibility(agentMode?View.GONE:View.VISIBLE);
+        thinkButton.setVisibility(agentMode?View.GONE:View.VISIBLE);
+        inputBox.setHint(assistantMode?"افتح، اتصل، ابعت، شغّل… أو أي مهمة على الهاتف":agentMode?"اطلب برنامجاً… أو /test /fix /explain":"اسأل أي شيء");
         agentBar.setVisibility(agentMode||assistantMode?View.VISIBLE:View.GONE);
         if(assistantMode)buildAssistantChips();
         else if(agentMode)buildAgentChips();
@@ -660,7 +683,8 @@ public class MainActivity extends AppCompatActivity {
         if(!empty)return;
         examples.removeAllViews();
         TextView title=new TextView(this);
-        title.setText(assistantMode?"📱 مساعد الهاتف\nالأوامر اليومية تُنفَّذ فوراً بدون نموذج. المهام الأخرى يقوم بها النموذج على الشاشة خطوة بخطوة.":agentMode?"🛠 وضع البرمجة مع Termux\nاكتب طلبك وسيُكتب الكود ويُشغَّل ويُصلَح تلقائياً.":"💬 محادثة محلية بالكامل على هاتفك");
+        title.setGravity(android.view.Gravity.CENTER);
+        title.setText(!assistantMode&&!agentMode?"كيف أقدر أساعدك؟\n"+(engine==null?"اختر نموذجاً من الأعلى (المقترح: Qwen3.5 4B)":"🌐 بحث في النت • 🧮 حسابات دقيقة • 🌤 طقس • 💱 عملات • 💭 تفكير"):assistantMode?"📱 مساعد الهاتف\nالأوامر اليومية تُنفَّذ فوراً بدون نموذج. المهام الأخرى يقوم بها النموذج على الشاشة خطوة بخطوة.":agentMode?"🛠 وضع البرمجة مع Termux\nاكتب طلبك وسيُكتب الكود ويُشغَّل ويُصلَح تلقائياً.":"💬 محادثة محلية بالكامل على هاتفك");
         title.setTextColor(getResources().getColor(R.color.text_primary,getTheme()));
         title.setTextSize(17);
         title.setPadding(0,0,0,24);
@@ -681,7 +705,7 @@ public class MainActivity extends AppCompatActivity {
                 "/sqlite اصنع دفتر ملاحظات بقاعدة بيانات",
                 "كم نسبة البطارية؟",
                 "/explain كيف يعمل main.py؟"}
-                :new String[]{"مرحباً! عرّفني بنفسك","اشرح لي الفرق بين list و tuple في Python","اكتب قصيدة قصيرة عن البحر"};
+                :new String[]{"شو آخر أخبار التكنولوجيا اليوم؟","كيف الطقس بدمشق بكرا؟","كم 17.5% من 2340؟","حوّل 100 دولار لليرة التركية","اكتب دالة Python ترتب قائمة بدون sort مع شرح","لخّص لي قصة فيلم Inception بخمس نقاط"};
         for(String p:prompts){
             com.google.android.material.button.MaterialButton b=new com.google.android.material.button.MaterialButton(this,null,com.google.android.material.R.attr.materialButtonOutlinedStyle);
             b.setText(p);b.setAllCaps(false);b.setTextColor(android.graphics.Color.WHITE);
@@ -841,11 +865,21 @@ public class MainActivity extends AppCompatActivity {
         EditText timeout=numberField(box,"مهلة تشغيل البرنامج (ثوانٍ)",prefs.getInt(PREF_TIMEOUT_S,60));
         android.widget.CheckBox grammar=new android.widget.CheckBox(this);
         grammar.setText("إجبار صيغة الإخراج (أدق للنماذج الصغيرة)");grammar.setChecked(prefs.getBoolean(PREF_GRAMMAR,true));box.addView(grammar);
+        android.widget.CheckBox online=new android.widget.CheckBox(this);
+        online.setText("أدوات الإنترنت (بحث، طقس، عملات) — مجانية");online.setChecked(prefs.getBoolean(PREF_ONLINE,true));box.addView(online);
+        EditText ctx=numberField(box,"طول الذاكرة (tokens): 2048 / 4096 / 8192 — الأكبر يحتاج RAM أكثر",prefs.getInt(PREF_CONTEXT,CONTEXT_TOKENS));
         android.widget.CheckBox autoTest=new android.widget.CheckBox(this);
         autoTest.setText("اختبارات تلقائية بعد نجاح البرنامج");autoTest.setChecked(prefs.getBoolean(PREF_AUTO_TEST,false));box.addView(autoTest);
         new AlertDialog.Builder(this).setTitle("⚙ الإعدادات").setView(box).setPositiveButton("حفظ",(d,w)->{
             prefs.edit().putInt(PREF_MAX_ATTEMPTS,clamp(attempts,1,20,6)).putInt(PREF_TIMEOUT_S,clamp(timeout,5,1800,60))
-                    .putBoolean(PREF_GRAMMAR,grammar.isChecked()).putBoolean(PREF_AUTO_TEST,autoTest.isChecked()).apply();
+                    .putBoolean(PREF_GRAMMAR,grammar.isChecked()).putBoolean(PREF_AUTO_TEST,autoTest.isChecked())
+                    .putBoolean(PREF_ONLINE,online.isChecked()).apply();
+            int newCtx=clamp(ctx,1024,32768,CONTEXT_TOKENS);
+            if(newCtx!=prefs.getInt(PREF_CONTEXT,CONTEXT_TOKENS)){
+                prefs.edit().putInt(PREF_CONTEXT,newCtx).apply();
+                engine=null;
+                executor.execute(()->{pool.closeAll();runOnUiThread(this::restoreSavedModel);});
+            }
             setWorking(false,"تم حفظ الإعدادات");
         }).setNegativeButton("إلغاء",null).show();
     }
@@ -894,6 +928,240 @@ public class MainActivity extends AppCompatActivity {
             });
         }
         @Override public void onCopy(String text){copy(text);}
+        @Override public void onRegenerate(ChatMessage answer){
+            if(generating)return;
+            int pos=adapter.indexOf(answer.id);
+            if(pos<1)return;
+            ChatMessage question=adapter.get(pos-1);
+            if(question.role!=ChatMessage.ROLE_USER)return;
+            adapter.truncate(pos-1);
+            executor.execute(()->historyStore.deleteFrom(question.id));
+            startChat(question.text,false);
+        }
+        @Override public void onEdit(ChatMessage question){
+            if(generating)return;
+            EditText e=new EditText(MainActivity.this);
+            e.setText(question.text);e.setSelection(question.text.length());
+            new AlertDialog.Builder(MainActivity.this).setTitle("تعديل السؤال").setView(e)
+                    .setPositiveButton("إرسال",(d,w)->{
+                        String t=e.getText().toString().trim();
+                        if(t.isEmpty())return;
+                        int pos=adapter.indexOf(question.id);
+                        if(pos>=0)adapter.truncate(pos);
+                        executor.execute(()->historyStore.deleteFrom(question.id));
+                        if(assistantMode)startAssistant(t,false);else startChat(t,false);
+                    })
+                    .setNeutralButton("نسخ",(d,w)->copy(question.text))
+                    .setNegativeButton("إلغاء",null).show();
+        }
+        @Override public void onSpeak(String text){speakNow(text);}
+        @Override public void onShare(String text){
+            startActivity(Intent.createChooser(new Intent(Intent.ACTION_SEND).setType("text/plain").putExtra(Intent.EXTRA_TEXT,text),null));
+        }
+        @Override public void onOpenUrl(String url){
+            try{startActivity(new Intent(Intent.ACTION_VIEW,Uri.parse(url)));}catch(Exception ignored){}
+        }
+    }
+
+    // ------------------------------------------------------------------ chat (ChatGPT-style)
+
+    /** Everyday phone commands also work in the chat, except web searches, which the chat answers itself. */
+    private static boolean phoneCommandInChat(List<QuickCommands.Command> c){
+        if(c==null)return false;
+        for(QuickCommands.Command x:c)if(x.kind.equals("web_search")||x.kind.equals("type"))return false;
+        return true;
+    }
+
+    private void startChat(String text,boolean spoken){
+        List<QuickCommands.Command> commands=QuickCommands.parse(text,java.time.LocalTime.now());
+        if(phoneCommandInChat(commands)){startAssistant(text,spoken);return;}
+        if(engine==null){setWorking(false,"اختر نموذجاً أولاً من زر النموذج في الأعلى");return;}
+        setGenerating(true);
+        executor.execute(()->{
+            long userId=historyStore.append(ChatMessage.ROLE_USER,text);long t0=System.currentTimeMillis();
+            memoryManager.rememberExplicit(text);
+            runOnUiThread(()->{adapter.add(new ChatMessage(userId,ChatMessage.ROLE_USER,text,t0));scrollToEnd();setWorking(true,"…");});
+            String answer=null;
+            try{answer=runChatTurn();}
+            catch(Exception e){final String err="❌ "+safeMessage(e);runOnUiThread(()->setWorking(false,err));}
+            final String said=answer;
+            if(spoken&&said!=null)speak(said);
+            runOnUiThread(()->{setGenerating(false);refreshConversations();});
+        });
+    }
+
+    /**
+     * Answers the last user message of the open conversation with tools and live streaming, and
+     * saves the answer. Runs on the worker thread; returns the answer text.
+     */
+    private String runChatTurn() throws Exception{
+        LlamaEngine model=engineForRole(ROLE_LANGUAGE);
+        List<ChatMessage> all=historyStore.loadAll();
+        List<ChatMessage> history=new java.util.ArrayList<>();
+        for(ChatMessage m:all)if(m.role==ChatMessage.ROLE_USER||m.role==ChatMessage.ROLE_ASSISTANT)history.add(m);
+        if(history.size()>24)history=history.subList(history.size()-24,history.size());
+        ChatSession.Options o=new ChatSession.Options();
+        o.web=prefs.getBoolean(PREF_WEB,false);
+        o.xmlToolCalls=model.xmlToolCalls();
+        o.date=new java.text.SimpleDateFormat("EEEE yyyy-MM-dd",java.util.Locale.ENGLISH).format(new java.util.Date());
+        o.extraSystem=memoryManager.memoryText();
+        chatTools.online=prefs.getBoolean(PREF_ONLINE,true);
+        chatTools.local=device;
+        boolean think=prefs.getBoolean(PREF_THINK,false);
+        int flags=LlamaEngine.FLAG_RAW|(think?LlamaEngine.FLAG_THINK:0);
+        ChatSession session=new ChatSession((turns,l)->model.generate(turns,MAX_NEW_TOKENS,think?0.6f:TEMPERATURE,20,flags,null,l),chatTools);
+        chatSession=session;
+        AnswerStream stream=new AnswerStream();
+        runOnUiThread(()->{adapter.add(stream.message(true));scrollToEnd();});
+        ChatSession.Reply r;
+        try{
+            r=session.run(history,o,new ChatSession.Listener(){
+                @Override public void onUpdate(String thinking,String answer){stream.update(thinking,answer);}
+                @Override public void onTool(String name,String args,String result){stream.tool(name,args,result);}
+            });
+        }finally{chatSession=null;}
+        stream.finish(r);
+        org.json.JSONObject meta=stream.meta();
+        String answer=r.answer.isEmpty()?"…":r.answer;
+        long id=historyStore.append(ChatMessage.ROLE_ASSISTANT,answer,meta.toString());
+        memoryManager.refreshExtractiveSummary(historyStore.loadAll());
+        ChatMessage done=new ChatMessage(id,ChatMessage.ROLE_ASSISTANT,answer,System.currentTimeMillis(),meta.toString(),false);
+        String metric=r.last==null?"":formatMetrics(r.last);
+        runOnUiThread(()->{adapter.updateLast(done);setWorking(false,metric);});
+        return answer;
+    }
+
+    /** The answer being written: throttled screen updates with thinking, tools and sources. */
+    private final class AnswerStream{
+        private String thinking="",answer="",stats="";
+        private final java.util.LinkedHashMap<String,String> tools=new java.util.LinkedHashMap<>();
+        private final org.json.JSONArray sources=new org.json.JSONArray();
+        private boolean scheduled;
+
+        synchronized void update(String th,String an){thinking=th;answer=an;post();}
+
+        synchronized void tool(String name,String args,String result){
+            String icon=name.equals("web_search")?"🔎 بحث":name.equals("calculator")?"🧮 حاسبة":name.equals("weather")?"🌤 طقس":name.equals("currency")?"💱 عملات"
+                    :name.equals("read_page")?"📄 قراءة صفحة":name.equals("wikipedia")?"📚 ويكيبيديا":name.equals("current_time")?"🕒 الوقت":"🔧 "+name;
+            tools.put(name,result==null?icon+"…":icon);
+            post();
+        }
+
+        synchronized void finish(ChatSession.Reply r){
+            thinking=r.thinking;answer=r.answer;
+            for(String t:r.toolsUsed)if(t.equals("calculator")&&!tools.containsKey(t))tools.put(t,"🧮 حاسبة");
+            for(WebTools.Result s:r.sources){
+                try{sources.put(new org.json.JSONObject().put("t",s.title).put("u",s.url));}catch(org.json.JSONException ignored){}
+            }
+            if(r.last!=null&&r.last.tokensPerSecond>0)stats=String.format(java.util.Locale.US,"%.1f tok/s • %.1fs",r.last.tokensPerSecond,r.last.totalMs/1000.0);
+        }
+
+        synchronized org.json.JSONObject meta(){
+            org.json.JSONObject m=new org.json.JSONObject();
+            try{
+                if(!thinking.isEmpty())m.put("thinking",thinking);
+                if(!tools.isEmpty())m.put("tools",String.join("  •  ",tools.values()));
+                if(sources.length()>0)m.put("sources",sources);
+                if(!stats.isEmpty())m.put("stats",stats);
+            }catch(org.json.JSONException ignored){}
+            return m;
+        }
+
+        synchronized ChatMessage message(boolean streaming){
+            return new ChatMessage(-1,ChatMessage.ROLE_ASSISTANT,answer,System.currentTimeMillis(),meta().toString(),streaming);
+        }
+
+        private void post(){
+            if(scheduled)return;
+            scheduled=true;
+            ui.postDelayed(()->{
+                ChatMessage m;
+                synchronized(this){scheduled=false;m=message(true);}
+                adapter.updateLast(m);
+                scrollToEnd();
+            },80);
+        }
+    }
+
+    private void newChat(){
+        if(generating)return;
+        executor.execute(()->{
+            historyStore.newConversation();
+            for(LlamaEngine e:pool.engines())e.resetContext();
+            runOnUiThread(()->{adapter.setAll(java.util.Collections.emptyList());setWorking(false,"محادثة جديدة");});
+        });
+    }
+
+    private void openConversation(long id){
+        if(generating)return;
+        executor.execute(()->{
+            historyStore.open(id);
+            List<ChatMessage> all=historyStore.loadAll();
+            runOnUiThread(()->{adapter.setAll(all);scrollToEnd();});
+        });
+    }
+
+    private void refreshConversations(){
+        executor.execute(()->{
+            List<ChatHistoryStore.Conversation> list=historyStore.conversations();
+            long current=historyStore.current();
+            runOnUiThread(()->conversationList.setAdapter(new android.widget.BaseAdapter(){
+                @Override public int getCount(){return list.size();}
+                @Override public Object getItem(int i){return list.get(i);}
+                @Override public long getItemId(int i){return list.get(i).id;}
+                @Override public View getView(int i,View v,android.view.ViewGroup parent){
+                    TextView t=v instanceof TextView?(TextView)v:new TextView(MainActivity.this);
+                    ChatHistoryStore.Conversation c=list.get(i);
+                    t.setText(c.title.isEmpty()?"محادثة":c.title);
+                    t.setSingleLine(true);t.setEllipsize(android.text.TextUtils.TruncateAt.END);
+                    t.setTextSize(15);t.setTextColor(getResources().getColor(R.color.text_primary,getTheme()));
+                    t.setPadding(MarkdownView.dp(MainActivity.this,18),MarkdownView.dp(MainActivity.this,12),MarkdownView.dp(MainActivity.this,18),MarkdownView.dp(MainActivity.this,12));
+                    t.setBackgroundColor(c.id==current?android.graphics.Color.parseColor("#1E2433"):android.graphics.Color.TRANSPARENT);
+                    t.setTextDirection(View.TEXT_DIRECTION_FIRST_STRONG);
+                    return t;
+                }
+            }));
+        });
+    }
+
+    private void conversationMenu(long id){
+        new AlertDialog.Builder(this).setItems(new String[]{"✏️ إعادة تسمية","🗑 حذف"},(d,w)->{
+            if(w==0){
+                EditText e=new EditText(this);
+                new AlertDialog.Builder(this).setTitle("اسم المحادثة").setView(e).setPositiveButton("حفظ",(x,y)->
+                        executor.execute(()->{historyStore.rename(id,e.getText().toString().trim());refreshConversations();})).setNegativeButton("إلغاء",null).show();
+            }else executor.execute(()->{
+                boolean wasOpen=historyStore.current()==id;
+                historyStore.deleteConversation(id);
+                List<ChatMessage> all=wasOpen?java.util.Collections.emptyList():null;
+                runOnUiThread(()->{if(all!=null)adapter.setAll(all);refreshConversations();});
+            });
+        }).show();
+    }
+
+    /** A text file (code, notes, CSV …) goes into the message so the model can read it. */
+    private void onAttach(Uri uri){
+        if(uri==null)return;
+        executor.execute(()->{
+            try(InputStream in=getContentResolver().openInputStream(uri)){
+                if(in==null)return;
+                ByteArrayOutputStream out=new ByteArrayOutputStream();
+                byte[] buf=new byte[8192];int n;
+                while((n=in.read(buf))>0&&out.size()<60_000)out.write(buf,0,n);
+                String text=new String(out.toByteArray(),java.nio.charset.StandardCharsets.UTF_8);
+                if(text.length()>12_000)text=text.substring(0,12_000)+"\n…";
+                String name=uri.getLastPathSegment()==null?"file":uri.getLastPathSegment().replaceFirst(".*[/:]","");
+                String block="📎 "+name+"\n```\n"+text+"\n```\n";
+                runOnUiThread(()->{inputBox.setText(block+inputBox.getText());inputBox.setSelection(inputBox.getText().length());});
+            }catch(Exception e){runOnUiThread(()->setWorking(false,"تعذر قراءة الملف: "+safeMessage(e)));}
+        });
+    }
+
+    private void speakNow(String text){
+        boolean on=prefs.getBoolean(PREF_SPEAK,true);
+        prefs.edit().putBoolean(PREF_SPEAK,true).apply();
+        speak(text.replaceAll("(?s)```.*?```"," ").replaceAll("[#*`|>]",""));
+        prefs.edit().putBoolean(PREF_SPEAK,on).apply();
     }
 
     /** One-time setup: Termux installed, permission granted, agent reachable. Afterwards it is automatic. */
@@ -1215,7 +1483,7 @@ public class MainActivity extends AppCompatActivity {
 
     private LlamaEngine newEngine(String path){
         int threads=Math.max(2,Math.min(6,Runtime.getRuntime().availableProcessors()));
-        return new LlamaEngine(getApplicationContext(),path,CONTEXT_TOKENS,threads);
+        return new LlamaEngine(getApplicationContext(),path,prefs.getInt(PREF_CONTEXT,CONTEXT_TOKENS),threads);
     }
 
     private long availableRam(){
@@ -1374,13 +1642,13 @@ public class MainActivity extends AppCompatActivity {
             historyStore.clear();for(LlamaEngine e:pool.engines())e.resetContext();
             // In agent mode a cleared chat also starts a fresh project; old projects stay on disk.
             if(agentMode){try{workspace=ProjectWorkspace.create(new File(getFilesDir(),"projects"));}catch(Exception ignored){}}
-            runOnUiThread(()->{adapter.setAll(java.util.Collections.emptyList());setGenerating(false);setWorking(false,agentMode?"مشروع جديد — المحادثة والذاكرة مُسحت":"تم مسح المحادثة والذاكرة");});
+            runOnUiThread(()->{adapter.setAll(java.util.Collections.emptyList());setGenerating(false);refreshConversations();setWorking(false,agentMode?"مشروع جديد — المحادثات والذاكرة مُسحت":"تم حذف كل المحادثات");});
         });
     }
 
     private void setGenerating(boolean value){
         generating=value;
-        sendButton.setText(value?"⏹":"➤");
+        sendButton.setText(value?"■":"↑");
         // Keep the button enabled while generating so it remains a Stop button.
         sendButton.setEnabled(engine!=null||assistantMode);
         assistantButton.setEnabled(!value);

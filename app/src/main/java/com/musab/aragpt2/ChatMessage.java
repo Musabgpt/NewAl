@@ -10,11 +10,21 @@ public final class ChatMessage {
     public final int role;
     public final String text;
     public final long timeMs;
+    /** Display extras for an answer as JSON: thinking, tools used, web sources, speed ("" when none). */
+    public final String meta;
+    /** Still being written (shows the cursor, hides the action row). */
+    public final boolean streaming;
 
     public ChatMessage(long id, int role, String text, long timeMs) {
+        this(id,role,text,timeMs,"",false);
+    }
+
+    public ChatMessage(long id, int role, String text, long timeMs, String meta, boolean streaming) {
         this.id=id;
         this.role=role;
         this.text=text;
         this.timeMs=timeMs;
+        this.meta=meta==null?"":meta;
+        this.streaming=streaming;
     }
 }

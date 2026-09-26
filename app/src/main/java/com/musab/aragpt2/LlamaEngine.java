@@ -8,7 +8,7 @@ public final class LlamaEngine implements AutoCloseable {
     private static final char FIELD_SEP = '\u001F';
     private static final char RECORD_SEP = '\u001E';
     private static final char RESULT_SEP = '\u001D';
-    static final int FLAG_CODE_MODE = 1, FLAG_RAW = 2;
+    static final int FLAG_CODE_MODE = 1, FLAG_RAW = 2, FLAG_THINK = 4;
 
     static { System.loadLibrary("llama_bridge"); }
     private volatile long handle;
@@ -120,6 +120,12 @@ public final class LlamaEngine implements AutoCloseable {
     /** Actual context window (the native side may fall back to a smaller one on low RAM). */
     public int contextTokens() { long h = handle; return h != 0 ? nativeContextSize(h) : 0; }
 
+    /** The model's Jinja chat template ("" when the GGUF has none). */
+    public String chatTemplate() { long h = handle; return h != 0 ? nativeChatTemplate(h) : ""; }
+
+    /** Qwen3.5 / Qwen3-Coder templates call tools in XML; Qwen2.5 / Qwen3 in JSON. */
+    public boolean xmlToolCalls() { return chatTemplate().contains("<function="); }
+
     public void resetContext() { long h = handle; if (h != 0) nativeReset(h); }
     public void cancel() { long h = handle; if (h != 0) nativeCancel(h); }
 
@@ -135,6 +141,7 @@ public final class LlamaEngine implements AutoCloseable {
                                          int topK, int flags, String grammar, long draftHandle, int draftTokens,
                                          StreamCollector sink);
     private native int nativeContextSize(long handle);
+    private native String nativeChatTemplate(long handle);
     private native void nativeCancel(long handle);
     private native void nativeReset(long handle);
     private native void nativeFree(long handle);
