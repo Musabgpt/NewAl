@@ -173,8 +173,7 @@ public class MainActivity extends AppCompatActivity {
         voiceLauncher=registerForActivityResult(new ActivityResultContracts.StartActivityForResult(),r->{
             java.util.ArrayList<String> said=r.getData()==null?null:r.getData().getStringArrayListExtra(android.speech.RecognizerIntent.EXTRA_RESULTS);
             if(r.getResultCode()!=RESULT_OK||said==null||said.isEmpty())return;
-            if(!assistantMode)setAssistantMode(true);
-            startAssistant(said.get(0),true);
+            if(assistantMode)startAssistant(said.get(0),true);else startChat(said.get(0),true);
         });
         micButton.setOnClickListener(v->listen());
         assistant.confirmSends=prefs.getBoolean(PREF_CONFIRM_SENDS,true);
@@ -534,14 +533,78 @@ public class MainActivity extends AppCompatActivity {
     }
 
     /** Speech to text with the phone's own recogniser (works offline when the language pack is installed). */
+    private android.speech.SpeechRecognizer recognizer;
+    private boolean listening;
+    /** Tried in order: Google has no Levantine code, so Saudi then Egyptian Arabic, then plain "ar". */
+    private static final String[] VOICE_LANGS={"ar-SA","ar-EG","ar","en-US"};
+
+    /**
+     * Voice input with Android's recogniser inside the app (no Google pop-up, online or offline,
+     * whatever the phone has). Tapping 🎙 again stops listening.
+     */
     private void listen(){
+        if(listening){if(recognizer!=null)recognizer.stopListening();return;}
+        if(checkSelfPermission(android.Manifest.permission.RECORD_AUDIO)!=android.content.pm.PackageManager.PERMISSION_GRANTED){
+            requestPermissions(new String[]{android.Manifest.permission.RECORD_AUDIO},REQ_ASSIST);
+            setWorking(false,"اسمح بالميكروفون ثم اضغط 🎙 مرة ثانية");
+            return;
+        }
+        if(!android.speech.SpeechRecognizer.isRecognitionAvailable(this)){listenWithIntent();return;}
+        listenIn(0);
+    }
+
+    private void listenIn(int lang){
+        if(recognizer!=null)recognizer.destroy();
+        recognizer=android.speech.SpeechRecognizer.createSpeechRecognizer(this);
+        recognizer.setRecognitionListener(new android.speech.RecognitionListener(){
+            @Override public void onReadyForSpeech(Bundle b){listening=true;micButton.setText("⏺");setWorking(false,"🎙 أسمعك… تكلّم");}
+            @Override public void onBeginningOfSpeech(){}
+            @Override public void onRmsChanged(float v){}
+            @Override public void onBufferReceived(byte[] b){}
+            @Override public void onEndOfSpeech(){setWorking(false,"🎙 …");}
+            @Override public void onPartialResults(Bundle b){
+                java.util.ArrayList<String> r=b.getStringArrayList(android.speech.SpeechRecognizer.RESULTS_RECOGNITION);
+                if(r!=null&&!r.isEmpty())inputBox.setText(r.get(0));
+            }
+            @Override public void onEvent(int t,Bundle b){}
+            @Override public void onResults(Bundle b){
+                stopListeningUi();
+                java.util.ArrayList<String> r=b.getStringArrayList(android.speech.SpeechRecognizer.RESULTS_RECOGNITION);
+                if(r==null||r.isEmpty()||r.get(0).trim().isEmpty()){setWorking(false,"ما سمعت شي، جرّب مرة ثانية");return;}
+                String said=r.get(0).trim();
+                inputBox.setText("");
+                if(generating)return;
+                if(assistantMode)startAssistant(said,true);else if(agentMode)startAgent(said,false);else startChat(said,true);
+            }
+            @Override public void onError(int error){
+                stopListeningUi();
+                boolean language=error==12||error==13;   // ERROR_LANGUAGE_NOT_SUPPORTED / _UNAVAILABLE (API 31)
+                if(language&&lang+1<VOICE_LANGS.length){listenIn(lang+1);return;}
+                if(error==android.speech.SpeechRecognizer.ERROR_NO_MATCH||error==android.speech.SpeechRecognizer.ERROR_SPEECH_TIMEOUT){setWorking(false,"ما سمعت شي واضح، جرّب مرة ثانية");return;}
+                if(error==android.speech.SpeechRecognizer.ERROR_NETWORK||error==android.speech.SpeechRecognizer.ERROR_NETWORK_TIMEOUT){
+                    setWorking(false,"التعرّف على الصوت يحتاج نت، أو نزّل العربية للاستخدام بدون نت من إعدادات Google ← الصوت");return;}
+                // The phone's service refused: the classic Google dialog is the last resort.
+                listenWithIntent();
+            }
+        });
         Intent i=new Intent(android.speech.RecognizerIntent.ACTION_RECOGNIZE_SPEECH)
                 .putExtra(android.speech.RecognizerIntent.EXTRA_LANGUAGE_MODEL,android.speech.RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
-                .putExtra(android.speech.RecognizerIntent.EXTRA_LANGUAGE,"ar")
-                .putExtra(android.speech.RecognizerIntent.EXTRA_PROMPT,"قل طلبك…")
-                .putExtra(android.speech.RecognizerIntent.EXTRA_PREFER_OFFLINE,true);
+                .putExtra(android.speech.RecognizerIntent.EXTRA_LANGUAGE,VOICE_LANGS[lang])
+                .putExtra(android.speech.RecognizerIntent.EXTRA_LANGUAGE_PREFERENCE,VOICE_LANGS[lang])
+                .putExtra(android.speech.RecognizerIntent.EXTRA_PARTIAL_RESULTS,true)
+                .putExtra(android.speech.RecognizerIntent.EXTRA_MAX_RESULTS,1);
+        try{recognizer.startListening(i);}catch(RuntimeException e){stopListeningUi();listenWithIntent();}
+    }
+
+    private void stopListeningUi(){listening=false;micButton.setText("🎙");}
+
+    private void listenWithIntent(){
+        Intent i=new Intent(android.speech.RecognizerIntent.ACTION_RECOGNIZE_SPEECH)
+                .putExtra(android.speech.RecognizerIntent.EXTRA_LANGUAGE_MODEL,android.speech.RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
+                .putExtra(android.speech.RecognizerIntent.EXTRA_LANGUAGE,"ar-SA")
+                .putExtra(android.speech.RecognizerIntent.EXTRA_PROMPT,"قل طلبك…");
         try{voiceLauncher.launch(i);}
-        catch(android.content.ActivityNotFoundException e){setWorking(false,"لا يوجد تعرّف على الكلام بهذا الهاتف (ثبّت تطبيق Google)");}
+        catch(android.content.ActivityNotFoundException e){setWorking(false,"لا يوجد تعرّف على الكلام بهذا الهاتف: ثبّت أو حدّث تطبيق Google");}
     }
 
     private void speak(String text){
@@ -565,10 +628,7 @@ public class MainActivity extends AppCompatActivity {
         com.google.android.material.chip.Chip screen=chip(on?"🖐 التحكم مفعّل":"🖐 فعّل التحكم بالشاشة",on);
         screen.setOnClickListener(v->{
             if(ScreenControlService.instance!=null){setWorking(false,"التحكم بالشاشة مفعّل");return;}
-            new AlertDialog.Builder(this).setTitle("🖐 التحكم بالشاشة")
-                    .setMessage("ليستطيع المساعد فتح التطبيقات والضغط والكتابة والإرسال داخلها، فعّل «NewAl screen control» في إعدادات إمكانية الوصول.\n\nفي Android 13+ إن ظهر «إعداد مقيّد»: معلومات التطبيق ← ⋮ ← السماح بالإعدادات المقيّدة، ثم فعّله.")
-                    .setPositiveButton("فتح الإعدادات",(d,w)->startActivity(new Intent(android.provider.Settings.ACTION_ACCESSIBILITY_SETTINGS)))
-                    .setNegativeButton("لاحقاً",null).show();
+            guideScreenControl();
         });
         agentChips.addView(screen);
         boolean confirm=prefs.getBoolean(PREF_CONFIRM_SENDS,true);
@@ -748,10 +808,7 @@ public class MainActivity extends AppCompatActivity {
         com.google.android.material.chip.Chip screen=chip(ScreenControlService.instance==null?"🖐 تحكم بالشاشة":"🖐 التحكم مفعّل",ScreenControlService.instance!=null);
         screen.setOnClickListener(v->{
             if(ScreenControlService.instance!=null){setWorking(false,"التحكم بالشاشة مفعّل");return;}
-            new AlertDialog.Builder(this).setTitle("🖐 التحكم بالشاشة")
-                    .setMessage("ليستطيع المساعد قراءة الشاشة والضغط والكتابة في التطبيقات الأخرى، فعّل «NewAl screen control» في إعدادات إمكانية الوصول.\n\nفي Android 13+ إن ظهر «إعداد مقيّد»: معلومات التطبيق ← ⋮ ← السماح بالإعدادات المقيّدة، ثم فعّله.")
-                    .setPositiveButton("فتح الإعدادات",(d,w)->startActivity(new Intent(android.provider.Settings.ACTION_ACCESSIBILITY_SETTINGS)))
-                    .setNegativeButton("لاحقاً",null).show();
+            guideScreenControl();
         });
         agentChips.addView(screen);
         com.google.android.material.chip.Chip settings=chip("⚙",false);
@@ -1835,7 +1892,7 @@ public class MainActivity extends AppCompatActivity {
 
     private String[] runtimePermissions(){
         List<String> p=new java.util.ArrayList<>(java.util.Arrays.asList(android.Manifest.permission.READ_CONTACTS,
-                android.Manifest.permission.CALL_PHONE,android.Manifest.permission.SEND_SMS));
+                android.Manifest.permission.CALL_PHONE,android.Manifest.permission.SEND_SMS,android.Manifest.permission.RECORD_AUDIO));
         if(Build.VERSION.SDK_INT>=33)p.add(android.Manifest.permission.POST_NOTIFICATIONS);
         if(Build.VERSION.SDK_INT<30)p.add(android.Manifest.permission.WRITE_EXTERNAL_STORAGE);
         if(TermuxLauncher.isInstalled(this))p.add(TermuxLauncher.PERMISSION);
@@ -1865,6 +1922,22 @@ public class MainActivity extends AppCompatActivity {
         catch(Exception e){startActivity(new Intent(android.provider.Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION));}
     }
 
+    /**
+     * Android 13+ blocks Accessibility for apps installed from an APK file ("إعداد مقيّد" /
+     * "تم منع التطبيق من الوصول"). The user unlocks it once from App info → ⋮, then enables it.
+     */
+    private void guideScreenControl(){
+        new AlertDialog.Builder(this).setTitle("🖐 تفعيل التحكم بالشاشة")
+                .setMessage("أندرويد يمنع التطبيقات المثبتة من ملف من هذا الإذن حتى تسمح أنت مرة واحدة:\n\n"
+                        +"1️⃣ اضغط «معلومات التطبيق» ← ثم ⋮ (النقاط الثلاث أعلى الشاشة) ← «السماح بالإعدادات المقيدة» وأكّد ببصمتك/رمزك.\n"
+                        +"   (إذا لم تظهر ⋮: حاول تفعيله مرة من الخطوة 2 أولاً ثم ارجع هنا.)\n\n"
+                        +"2️⃣ اضغط «إمكانية الوصول» ← التطبيقات المثبتة ← NewAl screen control ← تشغيل.\n\n"
+                        +"في سامسونج: إذا بقي ممنوعاً، أوقف «أداة الحظر التلقائي» مؤقتاً من الإعدادات ← الأمان والخصوصية.")
+                .setPositiveButton("2️⃣ إمكانية الوصول",(d,w)->openAccessibility())
+                .setNeutralButton("1️⃣ معلومات التطبيق",(d,w)->startActivity(new Intent(android.provider.Settings.ACTION_APPLICATION_DETAILS_SETTINGS,Uri.parse("package:"+getPackageName()))))
+                .setNegativeButton("لاحقاً",null).show();
+    }
+
     private void openAccessibility(){
         Intent i=new Intent(android.provider.Settings.ACTION_ACCESSIBILITY_SETTINGS);
         // Highlights this app's entry on phones that support it.
@@ -1890,7 +1963,7 @@ public class MainActivity extends AppCompatActivity {
         boolean runtime=missingRuntime().isEmpty(),screen=ScreenControlService.instance!=null,files=allFilesGranted(),
                 battery=batteryUnrestricted(),assist=isAssistantApp(),autonomous=!prefs.getBoolean(PREF_CONFIRM_SENDS,true);
         String[] items={
-                (runtime?"✅":"⬜")+" جهات الاتصال، المكالمات، الرسائل، الإشعارات",
+                (runtime?"✅":"⬜")+" جهات الاتصال، المكالمات، الرسائل، الميكروفون، الإشعارات",
                 (screen?"✅":"⬜")+" التحكم بالشاشة (فتح التطبيقات والضغط والكتابة)",
                 (files?"✅":"⬜")+" الوصول لكل الملفات (النماذج في التنزيلات)",
                 (battery?"✅":"⬜")+" العمل بالخلفية بلا قيود البطارية",
@@ -1900,7 +1973,7 @@ public class MainActivity extends AppCompatActivity {
                 .setItems(items,(d,w)->{
                     switch(w){
                         case 0:if(!runtime)requestPermissions(missingRuntime().toArray(new String[0]),REQ_ASSIST);break;
-                        case 1:openAccessibility();break;
+                        case 1:guideScreenControl();break;
                         case 2:openAllFilesAccess();break;
                         case 3:openBattery();break;
                         case 4:openAssistantSetting();break;
@@ -1930,7 +2003,7 @@ public class MainActivity extends AppCompatActivity {
         if(!grantFlow||!resumed)return;
         if(ScreenControlService.instance==null&&grantTried.add("screen")){
             setWorking(false,"فعّل «NewAl screen control» ثم ارجع");
-            openAccessibility();return;
+            guideScreenControl();return;
         }
         if(!allFilesGranted()&&grantTried.add("files")){setWorking(false,"فعّل «السماح بإدارة كل الملفات» ثم ارجع");openAllFilesAccess();return;}
         if(!batteryUnrestricted()&&grantTried.add("battery")){openBattery();return;}
@@ -1948,6 +2021,7 @@ public class MainActivity extends AppCompatActivity {
 
     @Override protected void onDestroy(){
         if(tts!=null)tts.shutdown();
+        if(recognizer!=null)recognizer.destroy();
         AgentLoop loop=agentLoop;if(loop!=null)loop.cancel();
         TermuxBridge b=bridge;if(b!=null)b.close();
         engine=null;

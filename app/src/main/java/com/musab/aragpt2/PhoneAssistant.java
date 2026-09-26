@@ -134,7 +134,7 @@ final class PhoneAssistant {
     }
 
     static String needScreenControl() {
-        return "❌ هذا يحتاج «التحكم بالشاشة»: فعّل NewAl screen control من إعدادات إمكانية الوصول (زر 🖐).";
+        return "❌ هذا يحتاج «التحكم بالشاشة». من ☰ ← 🔓 الصلاحيات ← التحكم بالشاشة: أولاً معلومات التطبيق ← ⋮ ← «السماح بالإعدادات المقيدة»، ثم فعّل NewAl screen control.";
     }
 
     /** Wi-Fi / Bluetooth: Android only lets apps open the page, so the switch is flipped on screen. */
