@@ -91,7 +91,7 @@ jobs:
 
       - name: Check the built app
         run: |
-          $p = Start-Process dist/NewAl/NewAl.exe -ArgumentList "--smoke smoke.json" -Wait -PassThru
+          $p = Start-Process dist/NewAl/NewAl.exe -ArgumentList "--smoke smoke.json tiny.gguf" -Wait -PassThru
           Get-Content smoke.json -ErrorAction SilentlyContinue | Select-Object -First 40
           if ($p.ExitCode -ne 0) { throw "smoke test failed ($($p.ExitCode))" }
 

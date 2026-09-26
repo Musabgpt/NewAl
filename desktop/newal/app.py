@@ -33,12 +33,28 @@ def smoke(out_path):
         data["ui_bytes"] = len(r.read())
     import newal
     data["tls"] = newal.TLS
+    if len(sys.argv) > sys.argv.index("--smoke") + 2:
+        # Start a real engine from inside the packaged app, the way a chat does.
+        from newal import catalog, engine
+        catalog.MODELS["smoke"] = dict(catalog.MODELS["router"], file=os.path.abspath(sys.argv[sys.argv.index("--smoke") + 2]),
+                                       title="smoke")
+        srv = engine.Server("smoke")
+        try:
+            srv.start(timeout=120)
+            req = urllib.request.Request(srv.url + "/completion", json.dumps({"prompt": "Once upon", "n_predict": 8}).encode(),
+                                         {"Content-Type": "application/json"})
+            with urllib.request.urlopen(req, timeout=60) as r:
+                data["engine_output"] = json.loads(r.read().decode("utf-8")).get("content", "")
+        except Exception as e:  # noqa: BLE001
+            data["engine_error"] = str(e)
+        finally:
+            srv.stop()
     req = urllib.request.Request("https://huggingface.co/api/models?limit=1", headers={"User-Agent": "NewAl"})
     with urllib.request.urlopen(req, timeout=20) as r:
         data["https"] = r.status
     with open(out_path, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=1)
-    ok = data["connectors"]["engine"] and data["ui_bytes"] > 1000 and data["https"] == 200
+    ok = data["connectors"]["engine"] and data["ui_bytes"] > 1000 and data["https"] == 200 and "engine_error" not in data
     sys.exit(0 if ok else 1)
 
 

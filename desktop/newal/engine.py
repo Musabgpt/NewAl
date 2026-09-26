@@ -24,6 +24,53 @@ def _free_port():
     return port
 
 
+def child_env():
+    """The environment for engine processes, without what PyInstaller adds for the app itself.
+
+    The packaged app puts its _internal folder (older VCRUNTIME140.dll, ucrtbase.dll...) first in the DLL
+    search; llama-server launched from it then loads those and dies before writing a line."""
+    env = dict(os.environ)
+    bundle = getattr(__import__("sys"), "_MEIPASS", None)
+    if bundle:
+        env["PATH"] = os.pathsep.join(p for p in env.get("PATH", "").split(os.pathsep)
+                                      if p and not os.path.normcase(p).startswith(os.path.normcase(bundle)))
+        for k in ("TCL_LIBRARY", "TK_LIBRARY", "PYTHONHOME", "PYTHONPATH", "SSL_CERT_FILE"):
+            env.pop(k, None)
+    return env
+
+
+def reset_dll_search():
+    """Undo PyInstaller's SetDllDirectory for processes we start (inherited otherwise)."""
+    if config.IS_WINDOWS and getattr(__import__("sys"), "frozen", False):
+        try:
+            import ctypes
+            ctypes.windll.kernel32.SetDllDirectoryW(None)
+        except Exception:  # noqa: BLE001
+            pass
+
+
+EXIT_CODES = {
+    0xC0000135: "ملف DLL ناقص (غالباً Microsoft Visual C++ Redistributable)",
+    0xC0000139: "نسخة DLL غير متوافقة",
+    0xC000001D: "المعالج لا يدعم تعليمات في هذه النسخة",
+    0xC0000005: "خطأ ذاكرة داخل المحرك",
+    0xC0000409: "توقف المحرك بسبب خطأ داخلي",
+    0xC0000142: "فشل تهيئة DLL",
+}
+
+
+def _hex(code):
+    return hex(code & 0xFFFFFFFF) if code and code < 0 or (code or 0) > 0xFFFF else str(code)
+
+
+def explain_exit(code):
+    text = EXIT_CODES.get((code or 0) & 0xFFFFFFFF)
+    return ": " + text if text else ""
+
+
+reset_dll_search()
+
+
 class Server:
     def __init__(self, role):
         self.role = role
@@ -59,11 +106,13 @@ class Server:
         log = open(self.log_path, "w", encoding="utf-8", errors="replace")
         flags = 0x08000000 if config.IS_WINDOWS else 0   # CREATE_NO_WINDOW
         self.proc = subprocess.Popen(args, stdout=log, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
-                                     creationflags=flags)
+                                     creationflags=flags, cwd=os.path.dirname(exe), env=child_env())
         deadline = time.time() + timeout
         while time.time() < deadline:
             if self.proc.poll() is not None:
-                raise RuntimeError("توقف محرك %s. السجل: %s\n%s" % (self.role, self.log_path, self.tail()))
+                code = self.proc.returncode
+                raise RuntimeError("توقف محرك %s (رمز الخروج %s%s). السجل: %s\n%s" % (
+                    self.role, _hex(code), explain_exit(code), self.log_path, self.tail()))
             try:
                 with urllib.request.urlopen(self.url + "/health", timeout=2) as r:
                     if r.status == 200:
