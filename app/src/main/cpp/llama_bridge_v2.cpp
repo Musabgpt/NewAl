@@ -33,6 +33,13 @@ struct EngineHandle {
     // next prompt skip re-decoding the prefix it shares with the previous one.
     std::vector<llama_token> kv;
     std::atomic<bool> cancel{false};
+    // Recurrent / hybrid models (Qwen3.5, Mamba, LFM2 ...) cannot drop the end of their state, so
+    // the shared prefix of consecutive prompts is kept as a saved state instead (as llama-server
+    // does): the tokens it covers and the model's recurrent state right after them.
+    bool recurrent = false;
+    std::vector<llama_token> ckpt_tokens;
+    std::vector<uint8_t> ckpt_state;
+    std::vector<llama_token> last_prompt;
 };
 
 // Flags passed from Java.
@@ -134,7 +141,16 @@ std::string templ(const EngineHandle * h, const std::vector<Turn> & turns, bool 
         n = llama_chat_apply_template(model_tmpl, messages.data(), messages.size(), true,
                                       buffer.data(), static_cast<int32_t>(buffer.size()));
     }
-    return n > 0 ? std::string(buffer.data(), static_cast<size_t>(n)) : fallback(turns);
+    if (n <= 0) return fallback(turns);
+    std::string out(buffer.data(), static_cast<size_t>(n));
+    // Qwen3 / Qwen3.5 style templates: an empty think block is their documented "no thinking"
+    // switch. The built-in ChatML formatter omits it, so the model would reason at length first.
+    static const std::string assistant_open = "<|im_start|>assistant\n";
+    if (std::strstr(model_tmpl, "<think>") && out.size() >= assistant_open.size()
+        && out.compare(out.size() - assistant_open.size(), assistant_open.size(), assistant_open) == 0) {
+        out += "<think>\n\n</think>\n\n";
+    }
+    return out;
 }
 
 bool tokenize(const EngineHandle * h, const std::string & prompt, std::vector<llama_token> & tokens) {
@@ -233,29 +249,87 @@ void append_piece(const llama_vocab * vocab, llama_token token, std::string & ou
 }
 
 // Decodes tokens[from..] after the reusable prefix, in n_batch chunks, tracking the KV cache.
-bool decode_prompt(EngineHandle * h, const std::vector<llama_token> & tokens, int & reused) {
-    size_t common = 0;
-    while (common < h->kv.size() && common < tokens.size() && h->kv[common] == tokens[common]) ++common;
-    // The last prompt token must be decoded again to get fresh logits for sampling.
-    if (common == tokens.size() && common > 0) --common;
-    auto * mem = llama_get_memory(h->ctx);
-    if (common == 0 || !llama_memory_seq_rm(mem, 0, static_cast<llama_pos>(common), -1)) {
-        llama_memory_clear(mem, true);
-        common = 0;
-    }
-    h->kv.resize(common);
-    reused = static_cast<int>(common);
-    for (size_t i = common; i < tokens.size(); i += static_cast<size_t>(h->n_batch)) {
-        const int n = static_cast<int>(std::min(tokens.size() - i, static_cast<size_t>(h->n_batch)));
+bool decode_range(EngineHandle * h, const std::vector<llama_token> & tokens, size_t from, size_t to) {
+    for (size_t i = from; i < to; i += static_cast<size_t>(h->n_batch)) {
+        const int n = static_cast<int>(std::min(to - i, static_cast<size_t>(h->n_batch)));
         auto batch = llama_batch_get_one(const_cast<llama_token *>(tokens.data() + i), n);
         if (llama_decode(h->ctx, batch) != 0) {
-            llama_memory_clear(mem, true);
+            llama_memory_clear(llama_get_memory(h->ctx), true);
             h->kv.clear();
             return false;
         }
         h->kv.insert(h->kv.end(), tokens.begin() + static_cast<long>(i), tokens.begin() + static_cast<long>(i) + n);
     }
     return true;
+}
+
+size_t common_prefix(const std::vector<llama_token> & a, const std::vector<llama_token> & b) {
+    size_t n = 0;
+    while (n < a.size() && n < b.size() && a[n] == b[n]) ++n;
+    return n;
+}
+
+// Restores the saved prefix state when it matches the start of this prompt.
+bool restore_checkpoint(EngineHandle * h, const std::vector<llama_token> & tokens) {
+    const size_t n = h->ckpt_tokens.size();
+    if (n == 0 || n >= tokens.size() || common_prefix(h->ckpt_tokens, tokens) != n) return false;
+    auto * mem = llama_get_memory(h->ctx);
+    llama_memory_clear(mem, true);
+    if (llama_state_seq_set_data_ext(h->ctx, h->ckpt_state.data(), h->ckpt_state.size(), 0,
+                                     LLAMA_STATE_SEQ_FLAGS_NONE) == 0) {
+        llama_memory_clear(mem, true);
+        h->ckpt_tokens.clear();
+        h->ckpt_state.clear();
+        return false;
+    }
+    h->kv = h->ckpt_tokens;
+    return true;
+}
+
+void save_checkpoint(EngineHandle * h) {
+    const size_t size = llama_state_seq_get_size_ext(h->ctx, 0, LLAMA_STATE_SEQ_FLAGS_NONE);
+    h->ckpt_state.resize(size);
+    if (size == 0 || llama_state_seq_get_data_ext(h->ctx, h->ckpt_state.data(), size, 0, LLAMA_STATE_SEQ_FLAGS_NONE) != size) {
+        h->ckpt_tokens.clear();
+        h->ckpt_state.clear();
+        return;
+    }
+    h->ckpt_tokens = h->kv;
+    LOGI("prefix checkpoint saved: %zu tokens, %.1f MB", h->ckpt_tokens.size(), size / 1048576.0);
+}
+
+bool decode_prompt(EngineHandle * h, const std::vector<llama_token> & tokens, int & reused) {
+    size_t common = common_prefix(h->kv, tokens);
+    // The last prompt token must be decoded again to get fresh logits for sampling.
+    if (common == tokens.size() && common > 0) --common;
+    auto * mem = llama_get_memory(h->ctx);
+    if (common == 0 || !llama_memory_seq_rm(mem, 0, static_cast<llama_pos>(common), -1)) {
+        if (h->recurrent && restore_checkpoint(h, tokens)) {
+            common = h->kv.size();
+        } else {
+            llama_memory_clear(mem, true);
+            common = 0;
+            h->kv.clear();
+        }
+    }
+    h->kv.resize(common);
+    reused = static_cast<int>(common);
+
+    // Where this prompt departs from the previous one: the part before it is likely shared with
+    // the next prompt too (system prompt, goal, earlier steps), so save the state there.
+    size_t split = 0;
+    if (h->recurrent) {
+        split = common_prefix(h->last_prompt, tokens);
+        if (split >= tokens.size()) split = tokens.size() - 1;
+        if (split < common + 32) split = 0;
+    }
+    h->last_prompt = tokens;
+    if (split > 0) {
+        if (!decode_range(h, tokens, common, split)) return false;
+        save_checkpoint(h);
+        common = split;
+    }
+    return decode_range(h, tokens, common, tokens.size());
 }
 
 std::string result_pack(int prompt_tokens, int generated_tokens, long long first_ms, double tok_per_sec,
@@ -411,6 +485,7 @@ JNIEXPORT jlong JNICALL Java_com_musab_aragpt2_LlamaEngine_nativeLoadModel(
 
     const char * tmpl_ptr = llama_model_chat_template(model, nullptr);
     handle->has_template = tmpl_ptr && *tmpl_ptr;
+    handle->recurrent = llama_model_is_recurrent(model) || llama_model_is_hybrid(model);
     LOGI("model loaded; context=%d batch=%d threads=%d kv=%s chat_template=%s",
          handle->n_ctx, handle->n_batch, static_cast<int>(cp.n_threads),
          cp.type_k == GGML_TYPE_Q8_0 ? "q8_0" : "f16", handle->has_template ? "yes" : "no");
@@ -464,7 +539,9 @@ JNIEXPORT jstring JNICALL Java_com_musab_aragpt2_LlamaEngine_nativeGenerate(
     if (!decode_prompt(h, prompt_tokens, reused)) { fail(env, "فشل llama_decode للـprompt"); return nullptr; }
 
     auto * draft = reinterpret_cast<EngineHandle *>(draft_hp);
-    if (draft && (!greedy || !draft->ctx || draft == h || !same_vocab(h, draft) || draft->n_ctx < h->n_ctx)) {
+    // Rejected draft tokens are removed from the cache, which recurrent state cannot do.
+    if (draft && (!greedy || !draft->ctx || draft == h || h->recurrent || draft->recurrent || !same_vocab(h, draft)
+                  || draft->n_ctx < h->n_ctx)) {
         LOGI("speculative decoding off for this call (greedy=%d)", greedy ? 1 : 0);
         draft = nullptr;
     }
@@ -665,6 +742,9 @@ JNIEXPORT void JNICALL Java_com_musab_aragpt2_LlamaEngine_nativeReset(JNIEnv *, 
     if (!h || !h->ctx) return;
     llama_memory_clear(llama_get_memory(h->ctx), true);
     h->kv.clear();
+    h->ckpt_tokens.clear();
+    h->ckpt_state.clear();
+    h->last_prompt.clear();
 }
 
 JNIEXPORT void JNICALL Java_com_musab_aragpt2_LlamaEngine_nativeFree(JNIEnv *, jobject, jlong hp) {

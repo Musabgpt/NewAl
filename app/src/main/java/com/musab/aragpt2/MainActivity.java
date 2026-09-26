@@ -41,12 +41,13 @@ public class MainActivity extends AppCompatActivity {
     private static final String PREF_AGENT_MODE="agent_mode", PREF_AGENT_TOKEN="agent_token", PREF_AGENT_PROFILE="agent_profile",
             PREF_MAX_ATTEMPTS="max_attempts", PREF_TIMEOUT_S="exec_timeout_s", PREF_GRAMMAR="grammar", PREF_AUTO_TEST="auto_test",
             PREF_ROLE="role_path_", PREF_ORCHESTRATE="orchestrate", PREF_LANG_SUMMARY="lang_summary",
-            PREF_SPECULATIVE="speculative", PREF_DRAFT="draft_path";
+            PREF_SPECULATIVE="speculative", PREF_DRAFT="draft_path",
+            PREF_ASSISTANT="assistant_mode", PREF_CONFIRM_SENDS="confirm_sends", PREF_SPEAK="speak_replies";
     /** Draft tokens per step; measured best on CPU for a 3B model with a 0.5B draft. */
     private static final int DRAFT_TOKENS=3;
     /** Model roles: each may use its own GGUF; models are loaded one at a time (sequentially). */
     private static final String ROLE_MANAGER="manager", ROLE_CODER="coder", ROLE_LANGUAGE="language";
-    private static final int CONTEXT_TOKENS=4096, MAX_NEW_TOKENS=256, TOP_K=40, AGENT_PORT=47811, REQ_TERMUX=41, REQ_NOTIFY=42;
+    private static final int CONTEXT_TOKENS=4096, MAX_NEW_TOKENS=256, TOP_K=40, AGENT_PORT=47811, REQ_TERMUX=41, REQ_NOTIFY=42, REQ_ASSIST=43;
     private static final float TEMPERATURE=0.70f;
 
     private final ExecutorService executor=Executors.newSingleThreadExecutor();
@@ -60,6 +61,15 @@ public class MainActivity extends AppCompatActivity {
     /** Several models stay loaded together while RAM allows (manager, coder, language, draft). */
     private ModelPool<LlamaEngine> pool;
     private DeviceController device;
+    /** Phone assistant: everyday commands without a model, anything else by the screen agent. */
+    private PhoneAssistant assistant;
+    private boolean assistantMode;
+    private volatile boolean resumed;
+    private android.speech.tts.TextToSpeech tts;
+    private volatile boolean ttsReady;
+    private volatile CountDownLatch permissionLatch;
+    private volatile boolean permissionGranted;
+    private ActivityResultLauncher<Intent> voiceLauncher;
     private ExperienceStore experience;
     private AgentProfile selectedAgent=AgentProfile.AUTO;
     private Skills.Skill selectedSkill;
@@ -76,7 +86,7 @@ public class MainActivity extends AppCompatActivity {
     private RecyclerView chatList;
     private EditText inputBox;
     private View rootView,headerView,inputBar;
-    private Button loadModelButton,sendButton,clearButton,agentButton;
+    private Button loadModelButton,sendButton,clearButton,agentButton,assistantButton,micButton;
     private int headerBasePaddingTop;
     private ActivityResultLauncher<String[]> pickModelLauncher;
 
@@ -86,6 +96,7 @@ public class MainActivity extends AppCompatActivity {
         prefs=getSharedPreferences(PREFS,MODE_PRIVATE);
         historyStore=new ChatHistoryStore(this);
         device=new DeviceController(this);
+        assistant=new PhoneAssistant(this,device,new AssistantUi());
         pool=new ModelPool<>(this::newEngine,this::availableRam);
         pool.setEvictListener((path,evicted)->{
             for(LlamaEngine e:pool.engines())if(e.draft()==evicted)e.setDraft(null,DRAFT_TOKENS);
@@ -103,6 +114,8 @@ public class MainActivity extends AppCompatActivity {
         sendButton=findViewById(R.id.sendButton);
         clearButton=findViewById(R.id.clearButton);
         agentButton=findViewById(R.id.agentButton);
+        assistantButton=findViewById(R.id.assistantButton);
+        micButton=findViewById(R.id.micButton);
         agentBar=findViewById(R.id.agentBar);
         emptyView=findViewById(R.id.emptyView);
         agentChips=findViewById(R.id.agentChips);
@@ -126,12 +139,23 @@ public class MainActivity extends AppCompatActivity {
         clearButton.setOnClickListener(v->clearChat());
         agentButton.setOnClickListener(v->setAgentMode(!agentMode));
         agentButton.setOnLongClickListener(v->{showTools();return true;});
+        assistantButton.setOnClickListener(v->setAssistantMode(!assistantMode));
+        voiceLauncher=registerForActivityResult(new ActivityResultContracts.StartActivityForResult(),r->{
+            java.util.ArrayList<String> said=r.getData()==null?null:r.getData().getStringArrayListExtra(android.speech.RecognizerIntent.EXTRA_RESULTS);
+            if(r.getResultCode()!=RESULT_OK||said==null||said.isEmpty())return;
+            if(!assistantMode)setAssistantMode(true);
+            startAssistant(said.get(0),true);
+        });
+        micButton.setOnClickListener(v->listen());
+        assistant.confirmSends=prefs.getBoolean(PREF_CONFIRM_SENDS,true);
         agentMode=prefs.getBoolean(PREF_AGENT_MODE,false);
+        assistantMode=prefs.getBoolean(PREF_ASSISTANT,true)&&!agentMode;
         AgentProfile saved=AgentProfile.byId(prefs.getString(PREF_AGENT_PROFILE,"auto"));
         if(saved!=null)selectedAgent=saved;
         renderAgentButton();
         updateEmptyState();
         restoreSavedModel();
+        handleAssistIntent(getIntent());
         // While a task runs, Back sends the app to the background instead of closing it.
         getOnBackPressedDispatcher().addCallback(this,new androidx.activity.OnBackPressedCallback(true){
             @Override public void handleOnBackPressed(){
@@ -163,6 +187,8 @@ public class MainActivity extends AppCompatActivity {
 
     /** Free GGUF models from Hugging Face: name, size in GB, minimum phone RAM in GB, URL. */
     private static final Object[][] MODEL_CATALOG={
+            {"📱 Qwen3.5 4B — الأدق للتحكم بالهاتف (12/12 باختباراتنا)",2.74,8,"https://huggingface.co/unsloth/Qwen3.5-4B-GGUF/resolve/main/Qwen3.5-4B-Q4_K_M.gguf"},
+            {"📱 Qwen3.5 2B — أسرع للتحكم بالهاتف (9/12)",1.28,6,"https://huggingface.co/unsloth/Qwen3.5-2B-GGUF/resolve/main/Qwen3.5-2B-Q4_K_M.gguf"},
             {"Qwen2.5-Coder 0.5B (Q8) — الأسرع",0.68,3,"https://huggingface.co/Qwen/Qwen2.5-Coder-0.5B-Instruct-GGUF/resolve/main/qwen2.5-coder-0.5b-instruct-q8_0.gguf"},
             {"Qwen2.5-Coder 1.5B (Q4_K_M) — متوازن",1.12,4,"https://huggingface.co/Qwen/Qwen2.5-Coder-1.5B-Instruct-GGUF/resolve/main/qwen2.5-coder-1.5b-instruct-q4_k_m.gguf"},
             {"Qwen2.5-Coder 3B (Q4_K_M) — أدق بكثير",2.1,6,"https://huggingface.co/Qwen/Qwen2.5-Coder-3B-Instruct-GGUF/resolve/main/qwen2.5-coder-3b-instruct-q4_k_m.gguf"},
@@ -341,9 +367,11 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private void onSendOrStopClicked(){
-        if(generating){AgentLoop loop=agentLoop;if(loop!=null)loop.cancel();for(LlamaEngine e:pool.engines())e.cancel();return;}
+        if(generating){AgentLoop loop=agentLoop;if(loop!=null)loop.cancel();assistant.cancel();for(LlamaEngine e:pool.engines())e.cancel();return;}
         String question=inputBox.getText().toString().trim();
-        if(question.isEmpty()||engine==null)return;
+        if(question.isEmpty())return;
+        if(assistantMode){inputBox.setText("");startAssistant(question,false);return;}
+        if(engine==null)return;
         inputBox.setText("");
         if(agentMode){startAgent(question,false);return;}
         setGenerating(true);
@@ -365,11 +393,200 @@ public class MainActivity extends AppCompatActivity {
         });
     }
 
+    // ------------------------------------------------------------------ phone assistant
+
+    private void setAssistantMode(boolean on){
+        assistantMode=on;
+        if(on)agentMode=false;
+        prefs.edit().putBoolean(PREF_ASSISTANT,on).putBoolean(PREF_AGENT_MODE,agentMode).apply();
+        renderAgentButton();
+        setWorking(false,on?(ScreenControlService.instance==null?"📱 المساعد — فعّل 🖐 التحكم بالشاشة ليعمل بالكامل":"📱 المساعد جاهز"):"وضع المحادثة العادية");
+    }
+
+    /** Opened as the phone's assistant (long-press home): start listening right away. */
+    private void handleAssistIntent(Intent intent){
+        if(intent==null)return;
+        String a=intent.getAction();
+        if(Intent.ACTION_ASSIST.equals(a)||Intent.ACTION_VOICE_COMMAND.equals(a)){
+            if(!assistantMode)setAssistantMode(true);
+            ui.postDelayed(this::listen,300);
+        }
+    }
+
+    /** Speech to text with the phone's own recogniser (works offline when the language pack is installed). */
+    private void listen(){
+        Intent i=new Intent(android.speech.RecognizerIntent.ACTION_RECOGNIZE_SPEECH)
+                .putExtra(android.speech.RecognizerIntent.EXTRA_LANGUAGE_MODEL,android.speech.RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
+                .putExtra(android.speech.RecognizerIntent.EXTRA_LANGUAGE,"ar")
+                .putExtra(android.speech.RecognizerIntent.EXTRA_PROMPT,"قل طلبك…")
+                .putExtra(android.speech.RecognizerIntent.EXTRA_PREFER_OFFLINE,true);
+        try{voiceLauncher.launch(i);}
+        catch(android.content.ActivityNotFoundException e){setWorking(false,"لا يوجد تعرّف على الكلام بهذا الهاتف (ثبّت تطبيق Google)");}
+    }
+
+    private void speak(String text){
+        if(text==null||text.isEmpty()||!prefs.getBoolean(PREF_SPEAK,true))return;
+        String clean=text.replaceAll("[\\p{So}\\p{Cn}\\x{FE0F}]","").replaceAll("[«»]","").trim();
+        if(tts==null){
+            tts=new android.speech.tts.TextToSpeech(getApplicationContext(),status->{
+                if(status!=android.speech.tts.TextToSpeech.SUCCESS)return;
+                tts.setLanguage(new java.util.Locale("ar"));
+                ttsReady=true;
+                tts.speak(clean,android.speech.tts.TextToSpeech.QUEUE_FLUSH,null,"reply");
+            });
+            return;
+        }
+        if(ttsReady)tts.speak(clean,android.speech.tts.TextToSpeech.QUEUE_FLUSH,null,"reply");
+    }
+
+    private void buildAssistantChips(){
+        agentChips.removeAllViews();
+        boolean on=ScreenControlService.instance!=null;
+        com.google.android.material.chip.Chip screen=chip(on?"🖐 التحكم مفعّل":"🖐 فعّل التحكم بالشاشة",on);
+        screen.setOnClickListener(v->{
+            if(ScreenControlService.instance!=null){setWorking(false,"التحكم بالشاشة مفعّل");return;}
+            new AlertDialog.Builder(this).setTitle("🖐 التحكم بالشاشة")
+                    .setMessage("ليستطيع المساعد فتح التطبيقات والضغط والكتابة والإرسال داخلها، فعّل «NewAl screen control» في إعدادات إمكانية الوصول.\n\nفي Android 13+ إن ظهر «إعداد مقيّد»: معلومات التطبيق ← ⋮ ← السماح بالإعدادات المقيّدة، ثم فعّله.")
+                    .setPositiveButton("فتح الإعدادات",(d,w)->startActivity(new Intent(android.provider.Settings.ACTION_ACCESSIBILITY_SETTINGS)))
+                    .setNegativeButton("لاحقاً",null).show();
+        });
+        agentChips.addView(screen);
+        boolean confirm=prefs.getBoolean(PREF_CONFIRM_SENDS,true);
+        com.google.android.material.chip.Chip c=chip(confirm?"✅ يسأل قبل الإرسال":"⚡ يرسل بدون سؤال",!confirm);
+        c.setOnClickListener(v->{
+            boolean next=!prefs.getBoolean(PREF_CONFIRM_SENDS,true);
+            prefs.edit().putBoolean(PREF_CONFIRM_SENDS,next).apply();
+            assistant.confirmSends=next;
+            buildAssistantChips();
+        });
+        agentChips.addView(c);
+        boolean speakOn=prefs.getBoolean(PREF_SPEAK,true);
+        com.google.android.material.chip.Chip sp=chip(speakOn?"🔈 يرد بالصوت":"🔇 بدون صوت",speakOn);
+        sp.setOnClickListener(v->{prefs.edit().putBoolean(PREF_SPEAK,!prefs.getBoolean(PREF_SPEAK,true)).apply();buildAssistantChips();});
+        agentChips.addView(sp);
+        com.google.android.material.chip.Chip models=chip("🧠 النماذج",false);
+        models.setOnClickListener(v->showModelRoles());
+        agentChips.addView(models);
+        com.google.android.material.chip.Chip assist=chip("🏠 اجعله مساعد الهاتف",false);
+        assist.setOnClickListener(v->{
+            try{startActivity(new Intent(android.provider.Settings.ACTION_VOICE_INPUT_SETTINGS));}
+            catch(Exception e){startActivity(new Intent(android.provider.Settings.ACTION_MANAGE_DEFAULT_APPS_SETTINGS));}
+            setWorking(false,"اختر NewAl كتطبيق المساعد الرقمي، ثم اضغط مطولاً على زر الرئيسية لتتكلم معه");
+        });
+        agentChips.addView(assist);
+    }
+
+    /** Everyday commands run at once without a model; other phone tasks go to the screen agent; questions to the chat model. */
+    private void startAssistant(String text,boolean spoken){
+        setGenerating(true);
+        executor.execute(()->{
+            long userId=historyStore.append(ChatMessage.ROLE_USER,text);long t0=System.currentTimeMillis();
+            runOnUiThread(()->{adapter.add(new ChatMessage(userId,ChatMessage.ROLE_USER,text,t0));scrollToEnd();setWorking(true,"📱 …");});
+            String reply;
+            String metric="";
+            try{
+                long start=System.currentTimeMillis();
+                List<QuickCommands.Command> commands=QuickCommands.parse(text,java.time.LocalTime.now());
+                if(commands!=null){
+                    reply=assistant.runQuick(commands);
+                    metric="⚡ بدون نموذج • "+(System.currentTimeMillis()-start)+"ms";
+                }else if(QuickCommands.looksLikePhoneTask(text)){
+                    reply=runScreenAgent(text);
+                    metric="🤖 وكيل الشاشة • "+(System.currentTimeMillis()-start)/1000+"s";
+                }else if(engine!=null){
+                    reply=chatReply();
+                }else reply="الأوامر اليومية (افتح، اتصل، ابعت، منبه، كشاف، بلوتوث…) تعمل بدون نموذج. للأسئلة والمهام المركّبة حمّل نموذجاً من 📂 (المقترح: Qwen3.5 4B أو 2B).";
+            }catch(Exception e){reply="❌ "+safeMessage(e);}
+            final String r=reply,m=metric;
+            if(r!=null){
+                long id=historyStore.append(ChatMessage.ROLE_ASSISTANT,r);long t=System.currentTimeMillis();
+                runOnUiThread(()->{adapter.add(new ChatMessage(id,ChatMessage.ROLE_ASSISTANT,r,t));scrollToEnd();});
+                if(spoken)speak(r);
+            }
+            runOnUiThread(()->{setGenerating(false);setWorking(false,m.isEmpty()?"جاهز":m);if(assistantMode)buildAssistantChips();});
+        });
+    }
+
+    /** A plain answer from the language model, streamed into the chat (returns null: already shown). */
+    private String chatReply() throws Exception{
+        List<ChatMessage> turns=memoryManager.buildTurns(historyStore.loadAll());
+        live.start("");
+        GenerationResult result=engineForRole(ROLE_LANGUAGE).generate(turns,MAX_NEW_TOKENS,TEMPERATURE,TOP_K,0,live::append);
+        live.end();
+        String answer=cleanAssistantText(result.text);
+        long id=historyStore.append(ChatMessage.ROLE_ASSISTANT,answer.isEmpty()?"…":answer);long t=System.currentTimeMillis();
+        runOnUiThread(()->adapter.updateLast(new ChatMessage(id,ChatMessage.ROLE_ASSISTANT,answer.isEmpty()?"…":answer,t)));
+        return null;
+    }
+
+    private String runScreenAgent(String goal) throws Exception{
+        if(engine==null)return "هذه المهمة تحتاج نموذجاً يفهم الشاشة: من 📂 نزّل «Qwen3.5 4B» (الأدق) أو «Qwen3.5 2B» (الأسرع).";
+        ScreenControlService s=ScreenControlService.instance;
+        if(s==null)return PhoneAssistant.needScreenControl();
+        AgentService.start(this,AgentLoop.tail(goal,200));
+        s.showStatus(AgentLoop.tail(goal,80),()->{assistant.cancel();for(LlamaEngine e:pool.engines())e.cancel();});
+        live.start("",ChatMessage.ROLE_TERMINAL);
+        PhoneAgent.Result res;
+        try{
+            res=assistant.runAgent(goal,(turns,grammar)->engineForRole(ROLE_MANAGER).generate(turns,96,0f,1,LlamaEngine.FLAG_RAW,grammar,null).text,
+                    new PhoneAgent.Listener(){
+                        @Override public void onStep(int step,PhoneAction action,String reason,String result){
+                            String line=step+". "+(action==null?"؟":action.toString())+(result.isEmpty()?"":" → "+result);
+                            live.append(line+"\n");
+                            s.showStatus(line,null);
+                            AgentService.update(getApplicationContext(),line);
+                        }
+                        @Override public boolean confirm(String what){return new AssistantUi().confirm("تأكيد",what+"؟");}
+                    });
+        }finally{
+            live.end();
+            s.hideStatus();
+        }
+        String reply=(res.done?"✅ ":"⚠️ ")+res.message;
+        AgentService.finish(getApplicationContext(),res.done?"✅ تمت المهمة":"⚠️ المهمة لم تكتمل",res.message);
+        // Unfinished or a question for the user: come back so the answer is seen.
+        if(!res.done)startActivity(new Intent(this,MainActivity.class).addFlags(Intent.FLAG_ACTIVITY_REORDER_TO_FRONT|Intent.FLAG_ACTIVITY_NEW_TASK));
+        return reply;
+    }
+
+    /** Dialogs and permissions for the assistant, asked from its worker thread. */
+    private final class AssistantUi implements PhoneAssistant.Ui{
+        @Override public boolean confirm(String title,String message){
+            // Another app is in front (the screen agent is working): ask over it.
+            ScreenControlService s=ScreenControlService.instance;
+            if(!resumed&&s!=null)return s.confirmOverlay(title+"\n"+message,"نعم",120_000);
+            CountDownLatch done=new CountDownLatch(1);boolean[] ok={false};
+            runOnUiThread(()->new AlertDialog.Builder(MainActivity.this).setTitle(title).setMessage(message).setCancelable(false)
+                    .setPositiveButton("نعم",(d,w)->{ok[0]=true;done.countDown();})
+                    .setNegativeButton("إلغاء",(d,w)->done.countDown()).show());
+            try{if(!done.await(5,TimeUnit.MINUTES))return false;}catch(InterruptedException e){Thread.currentThread().interrupt();return false;}
+            return ok[0];
+        }
+        @Override public int choose(String title,String[] options){
+            CountDownLatch done=new CountDownLatch(1);int[] pick={-1};
+            runOnUiThread(()->new AlertDialog.Builder(MainActivity.this).setTitle(title)
+                    .setItems(options,(d,w)->{pick[0]=w;done.countDown();})
+                    .setOnCancelListener(d->done.countDown()).show());
+            try{if(!done.await(5,TimeUnit.MINUTES))return -1;}catch(InterruptedException e){Thread.currentThread().interrupt();return -1;}
+            return pick[0];
+        }
+        @Override public boolean permission(String permission){
+            if(checkSelfPermission(permission)==android.content.pm.PackageManager.PERMISSION_GRANTED)return true;
+            CountDownLatch done=new CountDownLatch(1);
+            permissionLatch=done;permissionGranted=false;
+            runOnUiThread(()->requestPermissions(new String[]{permission},REQ_ASSIST));
+            try{if(!done.await(2,TimeUnit.MINUTES))return false;}catch(InterruptedException e){Thread.currentThread().interrupt();return false;}
+            return permissionGranted;
+        }
+        @Override public void progress(String line){runOnUiThread(()->status.setText(line));}
+    }
+
     // ------------------------------------------------------------------ Termux agent
 
     private void setAgentMode(boolean on){
         agentMode=on;
-        prefs.edit().putBoolean(PREF_AGENT_MODE,on).apply();
+        if(on)assistantMode=false;
+        prefs.edit().putBoolean(PREF_AGENT_MODE,on).putBoolean(PREF_ASSISTANT,assistantMode).apply();
         renderAgentButton();
         if(on)ensureTermuxReady();
         else setWorking(false,"وضع المحادثة العادية");
@@ -377,9 +594,12 @@ public class MainActivity extends AppCompatActivity {
 
     private void renderAgentButton(){
         agentButton.setText(agentMode?"🛠 Termux ✓":"🛠 Termux");
-        inputBox.setHint(agentMode?"اطلب برنامجاً… أو /test /fix /explain":"اكتب رسالتك…");
-        agentBar.setVisibility(agentMode?View.VISIBLE:View.GONE);
-        if(agentMode)buildAgentChips();
+        assistantButton.setText(assistantMode?"📱 ✓":"📱");
+        inputBox.setHint(assistantMode?"افتح، اتصل، ابعت، شغّل… أو أي مهمة على الهاتف":agentMode?"اطلب برنامجاً… أو /test /fix /explain":"اكتب رسالتك…");
+        agentBar.setVisibility(agentMode||assistantMode?View.VISIBLE:View.GONE);
+        if(assistantMode)buildAssistantChips();
+        else if(agentMode)buildAgentChips();
+        if(!generating)sendButton.setEnabled(engine!=null||assistantMode);
         updateEmptyState();
     }
 
@@ -440,12 +660,21 @@ public class MainActivity extends AppCompatActivity {
         if(!empty)return;
         examples.removeAllViews();
         TextView title=new TextView(this);
-        title.setText(agentMode?"🛠 وضع البرمجة مع Termux\nاكتب طلبك وسيُكتب الكود ويُشغَّل ويُصلَح تلقائياً.":"💬 محادثة محلية بالكامل على هاتفك");
+        title.setText(assistantMode?"📱 مساعد الهاتف\nالأوامر اليومية تُنفَّذ فوراً بدون نموذج. المهام الأخرى يقوم بها النموذج على الشاشة خطوة بخطوة.":agentMode?"🛠 وضع البرمجة مع Termux\nاكتب طلبك وسيُكتب الكود ويُشغَّل ويُصلَح تلقائياً.":"💬 محادثة محلية بالكامل على هاتفك");
         title.setTextColor(getResources().getColor(R.color.text_primary,getTheme()));
         title.setTextSize(17);
         title.setPadding(0,0,0,24);
         examples.addView(title);
-        String[] prompts=agentMode?new String[]{
+        String[] prompts=assistantMode?new String[]{
+                "افتح يوتيوب وابحث عن فيروز",
+                "ابعت لماما على الواتس: رح اتأخر شوي",
+                "اتصل بأحمد",
+                "صحيني الساعة 7 الصبح",
+                "شغّل الكشاف",
+                "شغّل البلوتوث",
+                "ابعت لسامر على تلغرام: وصلت",
+                "افتح الإعدادات وشوف نسخة أندرويد"}
+                :agentMode?new String[]{
                 "اكتب آلة حاسبة بسيطة بلغة Python",
                 "اكتب برنامجاً يطبع أول 20 عدداً أولياً مع اختبارات",
                 "/data اكتب برنامجاً يحسب متوسط الدرجات من ملف CSV",
@@ -691,6 +920,11 @@ public class MainActivity extends AppCompatActivity {
 
     @Override public void onRequestPermissionsResult(int requestCode,String[] permissions,int[] grantResults){
         super.onRequestPermissionsResult(requestCode,permissions,grantResults);
+        if(requestCode==REQ_ASSIST){
+            permissionGranted=grantResults.length>0&&grantResults[0]==android.content.pm.PackageManager.PERMISSION_GRANTED;
+            CountDownLatch l=permissionLatch;if(l!=null)l.countDown();
+            return;
+        }
         if(requestCode!=REQ_TERMUX)return;
         if(grantResults.length>0&&grantResults[0]==android.content.pm.PackageManager.PERMISSION_GRANTED)ensureTermuxReady();
         else setWorking(false,"بدون إذن Termux: مساعد الهاتف يعمل، وتشغيل البرامج معطّل");
@@ -949,9 +1183,8 @@ public class MainActivity extends AppCompatActivity {
     }
 
     /**
-     * The model of a role, loaded on demand. Only one model is in memory: switching frees the
-     * current one first, so the team runs one after another (sequentially), never in parallel.
-     * Called on the worker thread.
+     * The model of a role, loaded on demand and kept loaded while RAM allows ({@link ModelPool});
+     * roles run one after another, never in parallel. Called on the worker thread.
      */
     private LlamaEngine engineForRole(String role){
         String path=prefs.getString(PREF_ROLE+role,"");
@@ -1009,7 +1242,7 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private static String roleTitle(String role){
-        return ROLE_MANAGER.equals(role)?"المدير":ROLE_CODER.equals(role)?"المبرمج":"اللغة";
+        return ROLE_MANAGER.equals(role)?"المدير والمساعد":ROLE_CODER.equals(role)?"المبرمج":"اللغة";
     }
 
     private static String roleFor(AgentProfile a){
@@ -1149,7 +1382,8 @@ public class MainActivity extends AppCompatActivity {
         generating=value;
         sendButton.setText(value?"⏹":"➤");
         // Keep the button enabled while generating so it remains a Stop button.
-        sendButton.setEnabled(engine!=null);
+        sendButton.setEnabled(engine!=null||assistantMode);
+        assistantButton.setEnabled(!value);
         clearButton.setEnabled(!value);
         agentButton.setEnabled(!value);
         loadModelButton.setEnabled(!value&&!isWorkingStatus());
@@ -1159,12 +1393,21 @@ public class MainActivity extends AppCompatActivity {
 
     private void setWorking(boolean working,String message){
         status.setText(message);
-        if(!generating)sendButton.setEnabled(!working&&engine!=null);
+        if(!generating)sendButton.setEnabled(!working&&(engine!=null||assistantMode));
     }
 
     private static String safeMessage(Exception ex){String m=ex.getMessage();return TextUtils.isEmpty(m)?ex.getClass().getSimpleName():m;}
 
+    @Override protected void onResume(){super.onResume();resumed=true;if(assistantMode)buildAssistantChips();}
+    @Override protected void onPause(){resumed=false;super.onPause();}
+
+    @Override protected void onNewIntent(Intent intent){
+        super.onNewIntent(intent);
+        handleAssistIntent(intent);
+    }
+
     @Override protected void onDestroy(){
+        if(tts!=null)tts.shutdown();
         AgentLoop loop=agentLoop;if(loop!=null)loop.cancel();
         TermuxBridge b=bridge;if(b!=null)b.close();
         engine=null;

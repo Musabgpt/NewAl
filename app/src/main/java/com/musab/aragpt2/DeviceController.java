@@ -136,22 +136,19 @@ final class DeviceController implements LocalTools {
 
     // ------------------------------------------------------------------ actions
 
-    private JSONObject openApp(String name) throws JSONException {
+    /** Opens the installed app that best matches {@code name}; the result carries its package. */
+    JSONObject openApp(String name) throws JSONException {
         PackageManager pm = context.getPackageManager();
-        String wanted = norm(name);
         ResolveInfo best = null;
         int bestScore = 0;
         for (ResolveInfo r : launchers()) {
-            String label = norm(String.valueOf(r.loadLabel(pm)));
-            String pkg = r.activityInfo.packageName.toLowerCase(Locale.ROOT);
-            int score = label.equals(wanted) ? 100 : label.startsWith(wanted) ? 80 : label.contains(wanted) ? 60
-                    : wanted.contains(label) && label.length() > 2 ? 50 : pkg.contains(wanted) ? 40 : 0;
+            int score = AppMatcher.score(name, String.valueOf(r.loadLabel(pm)), r.activityInfo.packageName);
             if (score > bestScore) { bestScore = score; best = r; }
         }
-        if (best == null) return fail("no installed app matches '" + name + "'. Installed: " + String.join(", ", appLabels()));
+        if (best == null || bestScore < 45) return fail("no installed app matches '" + name + "'. Installed: " + String.join(", ", appLabels()));
         Intent i = pm.getLaunchIntentForPackage(best.activityInfo.packageName);
         if (i == null) return fail("the app cannot be launched");
-        return start(i, "opened " + best.loadLabel(pm));
+        return start(i, "opened " + best.loadLabel(pm)).put("package", best.activityInfo.packageName);
     }
 
     private List<ResolveInfo> launchers() {
@@ -165,10 +162,6 @@ final class DeviceController implements LocalTools {
         for (ResolveInfo r : launchers()) names.add(String.valueOf(r.loadLabel(pm)));
         java.util.Collections.sort(names);
         return names.size() > 200 ? names.subList(0, 200) : names;
-    }
-
-    private static String norm(String s) {
-        return s == null ? "" : s.toLowerCase(Locale.ROOT).replaceAll("[\\s\\-_.]", "");
     }
 
     private static String settingsAction(String page) {
@@ -250,14 +243,24 @@ final class DeviceController implements LocalTools {
         }
         switch (name) {
             case "press": return s.press(a.optString("button")) ? ok("pressed " + a.optString("button")) : fail("not supported: " + a.optString("button"));
-            case "read_screen": return ok(s.readScreen());
-            case "tap": return s.tap(a.optString("text")) ? ok("tapped '" + a.optString("text") + "'") : fail("nothing on screen shows '" + a.optString("text") + "'");
-            case "type_text": return s.type(a.optString("text")) ? ok("typed") : fail("no text field is focused");
-            default: return s.scroll(!"up".equalsIgnoreCase(a.optString("direction"))) ? ok("scrolled") : fail("nothing to scroll");
+            case "read_screen": return ok(s.snapshot().render());
+            case "tap": {
+                String want = ArabicText.norm(a.optString("text"));
+                ScreenState st = s.snapshot();
+                ScreenState.Element hit = null;
+                for (ScreenState.Element e : st.elements) {
+                    String l = ArabicText.norm(e.label);
+                    if (l.equals(want)) { hit = e; break; }
+                    if (hit == null && !want.isEmpty() && l.contains(want)) hit = e;
+                }
+                return hit != null && s.tap(hit.id) ? ok("tapped '" + hit.label + "'") : fail("nothing on screen shows '" + a.optString("text") + "'");
+            }
+            case "type_text": return s.typeFocused(a.optString("text")) ? ok("typed") : fail("no text field on screen");
+            default: return s.scroll(a.optString("direction", "down")) ? ok("scrolled") : fail("nothing to scroll");
         }
     }
 
-    private JSONObject start(Intent i, String done) throws JSONException {
+    JSONObject start(Intent i, String done) throws JSONException {
         try {
             i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
             context.startActivity(i);

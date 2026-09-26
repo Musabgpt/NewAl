@@ -26,12 +26,24 @@
                 android:layout_width="0dp"
                 android:layout_height="wrap_content"
                 android:layout_weight="1"
-                android:text="محادثة GGUF محلية"
+                android:text="NewAl"
                 android:textColor="#FFFFFF"
                 android:textStyle="bold"
                 android:maxLines="1"
                 android:ellipsize="end"
                 android:textSize="17sp"/>
+
+            <com.google.android.material.button.MaterialButton
+                android:id="@+id/assistantButton"
+                android:layout_width="wrap_content"
+                android:layout_height="wrap_content"
+                android:layout_marginEnd="6dp"
+                android:text="📱"
+                android:minWidth="0dp"
+                android:textAllCaps="false"
+                android:textColor="#FFFFFF"
+                app:strokeColor="#FFFFFF"
+                app:cornerRadius="12dp"/>
 
             <com.google.android.material.button.MaterialButton
                 android:id="@+id/agentButton"
@@ -142,6 +154,15 @@
             android:padding="10dp"
             android:scrollbars="vertical"
             android:overScrollMode="ifContentScrolls"/>
+
+        <com.google.android.material.button.MaterialButton
+            android:id="@+id/micButton"
+            android:layout_width="wrap_content"
+            android:layout_height="wrap_content"
+            android:layout_marginEnd="4dp"
+            android:minWidth="0dp"
+            android:text="🎙"
+            app:cornerRadius="12dp"/>
 
         <com.google.android.material.button.MaterialButton
             android:id="@+id/sendButton"
