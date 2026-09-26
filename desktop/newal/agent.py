@@ -10,7 +10,6 @@ from . import catalog, config, connectors, files, memory, router, tools, trainin
 from .engine import Cancelled, pool
 
 MAX_TOOL_ROUNDS = 6
-MAX_FIXES = 2
 
 PERSONA = ("You are NewAl, a capable offline assistant running on the user's Windows computer. "
            "Answer in the user's language (Arabic dialects included) unless asked otherwise. Be accurate and direct; "
@@ -18,7 +17,8 @@ PERSONA = ("You are NewAl, a capable offline assistant running on the user's Win
 
 CODER = ("You are an expert software engineer on Windows 11 (PowerShell, Python, Git, VS Code, Docker/WSL available). "
          "Write complete, working code in fenced blocks with the language tag (```python, ```powershell, ```javascript...). "
-         "When a script should be tested, make it runnable on its own without user input and print a clear result. "
+         "Your code is run automatically to test it: give one complete program in a single code block that runs on its "
+         "own without user input, and end it with a small self-test (asserts or example calls) that prints the results. "
          "Explain briefly in the user's language.")
 
 JUDGE = ("You are an analyst and reviewer. Think carefully, find root causes, compare options honestly, and turn vague "
@@ -161,47 +161,84 @@ class Turn:
     # -------------------------------------------------------------- code: write, run, judge, fix
 
     def _code(self, messages, role):
-        r = pool.chat(role, messages, on_delta=self._delta, cancel=self.cancel, max_tokens=3072)
+        """Writes the program, then in the background: run it, let the judge check the result, turn the error
+        into a fix instruction, rewrite, run again... until it works (or the attempts run out).
+        The user sees one final answer; the attempts are listed in a collapsed box."""
+        request = messages[-1]["content"]
+        verify = config.get("verify_code")
+        kind = "draft" if verify else "content"
+        r = pool.chat(role, messages, on_delta=lambda k, t: self._delta(kind if k == "content" else k, t),
+                      cancel=self.cancel, max_tokens=3072)
         answer = r["content"].strip()
-        info = {"tps": r["tps"]}
-        if not config.get("verify_code"):
+        info = {"tps": r["tps"], "attempts": 1}
+        if not verify:
             return answer, info
-        for attempt in range(MAX_FIXES + 1):
+        limit = max(1, int(config.get("max_fix_attempts") or 5))
+        history = []                  # (attempt, short error) so the same mistake is not repeated
+        last_block = None
+        for attempt in range(1, limit + 1):
             block = runnable_block(answer)
             if not block:
-                return answer, info
+                break                 # nothing runnable (HTML, SQL, a snippet): answer as written
             lang, code = block
+            if block == last_block:
+                break                 # the model returned the same code again: stop looping
+            last_block = block
             if re.search(r"\binput\s*\(|Read-Host|readline\(", code):
-                return answer, info                   # interactive: nothing to check automatically
-            if not self.approve("تجربة الكود (%s) في مجلد العمل" % lang):
-                return answer, info
-            ok, output = run_code(lang, code)
+                info["note"] = "interactive"
+                break                 # needs a person typing: cannot be checked automatically
+            if RISKY.search(code) and not self.approve(
+                    "الكود يحذف ملفات أو يشغّل أوامر أو يرسل للنت. تجربته في مجلد العمل؟\n\n" + code[:1500]):
+                info["note"] = "not_run"
+                break
+            self.emit({"type": "status", "text": "▶ تجربة %d…" % attempt})
+            ok, output, timed_out = run_code(lang, code)
+            missing = re.search(r"No module named '([\w.]+)'", output) if lang == "python" else None
+            if missing and install_package(missing.group(1)):
+                self.emit({"type": "run", "lang": lang, "ok": False, "attempt": attempt,
+                           "output": output[-1500:] + "\n\n📦 تم تثبيت " + missing.group(1)})
+                ok, output, timed_out = run_code(lang, code)
             info["run_output"] = output[-2000:]
-            self.emit({"type": "run", "lang": lang, "ok": ok, "output": output[-3000:]})
+            info["attempts"] = attempt
+            if timed_out:
+                self.emit({"type": "run", "lang": lang, "ok": True, "attempt": attempt,
+                           "output": output[-2000:] + "\n\n⏱ ما زال يعمل بعد دقيقة (خادم أو حلقة دائمة) فلم يُحكم عليه."})
+                info["note"] = "long_running"
+                break
             if ok:
-                verdict = self._verdict(messages[-1]["content"], code, output)
-                info["verified"] = verdict.get("ok")
-                info["judge"] = verdict.get("reason", "")
-                self.emit({"type": "verdict", "ok": verdict.get("ok"), "reason": verdict.get("reason", "")})
-                if verdict.get("ok") or attempt == MAX_FIXES:
-                    return answer, info
-                problem = "The program ran but the result is wrong: %s\nOutput:\n%s" % (verdict.get("reason", ""), output[-1500:])
+                verdict = self._verdict(request, code, output)
+                self.emit({"type": "run", "lang": lang, "ok": bool(verdict.get("ok")), "attempt": attempt,
+                           "output": output[-2000:] + "\n\n🧠 " + verdict.get("reason", "")})
+                if verdict.get("ok"):
+                    info["verified"] = True
+                    info["judge"] = verdict.get("reason", "")
+                    break
+                problem = "The program ran but the result is wrong: %s\nOutput:\n%s" % (
+                    verdict.get("reason", ""), output[-1500:])
             else:
-                info["verified"] = False
-                if attempt == MAX_FIXES:
-                    return answer, info
+                self.emit({"type": "run", "lang": lang, "ok": False, "attempt": attempt, "output": output[-2000:]})
                 problem = "Running it failed:\n" + output[-2000:]
-            fix = self._fix_prompt(messages[-1]["content"], code, problem)
-            self.emit({"type": "fix", "attempt": attempt + 1, "prompt": fix})
-            self._delta("content", "\n\n---\n**🔧 إصلاح %d**\n\n" % (attempt + 1))
-            messages = messages + [{"role": "assistant", "content": answer}, {"role": "user", "content": fix}]
-            r = pool.chat(role, messages, on_delta=self._delta, cancel=self.cancel, max_tokens=3072)
-            answer = answer + "\n\n---\n**🔧 إصلاح %d**\n\n" % (attempt + 1) + r["content"].strip()
+            info["verified"] = False
+            if attempt == limit:
+                break
+            history.append("attempt %d: %s" % (attempt, _last_line(problem)))
+            fix = self._fix_prompt(request, code, problem, history)
+            self.emit({"type": "fix", "attempt": attempt, "prompt": fix})
+            self.emit({"type": "draft_reset"})
+            # Only the original request and the latest attempt go back to the coder: short and focused.
+            retry = messages + [{"role": "assistant", "content": answer}, {"role": "user", "content": fix}]
+            r = pool.chat(role, retry, on_delta=lambda k, t: self._delta("draft" if k == "content" else k, t),
+                          cancel=self.cancel, max_tokens=3072)
+            answer = r["content"].strip() or answer
+        if info.get("verified") is False:
+            answer += ("\n\n> ⚠️ جرّبت الكود %d مرات وما زال فيه مشكلة. آخر خطأ:\n> `%s`"
+                       % (info["attempts"], _last_line(info.get("run_output", ""))[:300]))
         return answer, info
 
-    def _fix_prompt(self, request, code, problem):
+    def _fix_prompt(self, request, code, problem, history=()):
         judge = catalog.pick("judge")
-        default = "Fix the code. %s\nReturn the full corrected program." % problem
+        tried = ("\nEarlier failed attempts (do not repeat them):\n" + "\n".join(history[:-1])) if len(history) > 1 else ""
+        default = "Fix the code. %s%s\nReturn the full corrected program." % (problem, tried)
         if not judge or judge == "coder":
             return default
         self.emit({"type": "status", "text": "🧠 تحليل الخطأ…"})
@@ -211,7 +248,7 @@ class Turn:
                                               "the root cause and exactly what to change. English, at most 6 lines."},
                 {"role": "user", "content": "Request:\n%s\n\nCode:\n%s\n\n%s" % (request[:2000], code[:6000], problem)}],
                 cancel=self.cancel, max_tokens=400, extra={"chat_template_kwargs": {"enable_thinking": False}})
-            return r["content"].strip() + "\nReturn the full corrected program."
+            return r["content"].strip() + tried + "\nReturn the full corrected program in one code block."
         except Cancelled:
             raise
         except Exception:  # noqa: BLE001
@@ -226,8 +263,10 @@ class Turn:
                   "required": ["ok", "reason"]}
         try:
             return pool.complete_json(judge, [
-                {"role": "system", "content": "You check whether a program's output shows that the user's request was "
-                                              "fulfilled. Be strict but fair. Reply with JSON; reason in one short sentence."},
+                {"role": "system", "content": "You check whether a program fulfils the user's request. List every thing "
+                                              "the request asks for, then check each one in the code AND in the output. "
+                                              "ok is true only if all of them are done and the printed results are correct. "
+                                              "Reply with JSON; reason: one short sentence naming what is missing or wrong."},
                 {"role": "user", "content": "Request:\n%s\n\nCode:\n%s\n\nOutput:\n%s" % (request[:2000], code[:5000], output[-2000:])}],
                 schema, max_tokens=150)
         except Exception:  # noqa: BLE001
@@ -264,6 +303,35 @@ def run_code(runner, code, timeout=60):
         exe = shutil.which("pwsh") or shutil.which("powershell.exe") or shutil.which("powershell")
         args = [exe, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", path] if exe else None
     if not args:
-        return False, "%s غير مثبت على الجهاز" % runner
+        return False, "%s غير مثبت على الجهاز" % runner, False
     code_, out = connectors.run(args, cwd=folder, timeout=timeout)
-    return code_ == 0, "$ %s\n%s\n(exit code %d)" % (os.path.basename(path), connectors.clip(out, 4000), code_)
+    timed_out = code_ == -1 and "انتهت المهلة" in out
+    return code_ == 0, "$ %s\n%s\n(exit code %d)" % (os.path.basename(path), connectors.clip(out, 4000), code_), timed_out
+
+
+# Generated code that deletes, runs other programs or sends data: asks first even in the background loop.
+RISKY = re.compile(r"os\.remove|os\.unlink|shutil\.rmtree|os\.rmdir|rmtree|Remove-Item|\brm\s+-|\bdel\s+/|"
+                   r"subprocess|os\.system|os\.popen|Start-Process|Invoke-Expression|\biex\b|Stop-Computer|"
+                   r"Restart-Computer|Format-Volume|reg\s+delete|Set-ExecutionPolicy|requests\.(post|put|delete)|"
+                   r"smtplib|winreg|ctypes", re.I)
+
+# import name -> pip package, where they differ
+PIP_NAMES = {"cv2": "opencv-python", "PIL": "pillow", "sklearn": "scikit-learn", "yaml": "pyyaml",
+             "bs4": "beautifulsoup4", "dotenv": "python-dotenv", "docx": "python-docx", "fitz": "pymupdf",
+             "Crypto": "pycryptodome", "dateutil": "python-dateutil", "serial": "pyserial", "win32api": "pywin32"}
+
+
+def install_package(module):
+    """pip install for a missing import (the package from PyPI only, into the user's Python)."""
+    import shutil
+    exe = shutil.which("python") or shutil.which("py") or shutil.which("python3")
+    name = PIP_NAMES.get(module.split(".")[0], module.split(".")[0])
+    if not exe or not re.fullmatch(r"[A-Za-z0-9_.-]+", name):
+        return False
+    code_, _ = connectors.run([exe, "-m", "pip", "install", "--disable-pip-version-check", "-q", name], timeout=300)
+    return code_ == 0
+
+
+def _last_line(text):
+    lines = [l for l in text.strip().splitlines() if l.strip() and not l.startswith("(exit code")]
+    return lines[-1].strip() if lines else ""

@@ -99,12 +99,21 @@ class AgentTest(unittest.TestCase):
         self.assertIsNone(agent.runnable_block("```html\n<p>x</p>\n```"))
 
     def test_run_code(self):
-        ok, out = agent.run_code("python", "print('ok', 6*7)")
+        ok, out, slow = agent.run_code("python", "print('ok', 6*7)")
         self.assertTrue(ok, out)
         self.assertIn("ok 42", out)
-        ok, out = agent.run_code("python", "raise ValueError('boom')")
+        self.assertFalse(slow)
+        ok, out, slow = agent.run_code("python", "raise ValueError('boom')")
         self.assertFalse(ok)
         self.assertIn("boom", out)
+        self.assertEqual(agent._last_line(out), "ValueError: boom")
+        ok, out, slow = agent.run_code("python", "import time\ntime.sleep(10)", timeout=2)
+        self.assertTrue(slow)
+
+    def test_risky_code_is_spotted(self):
+        self.assertTrue(agent.RISKY.search("import shutil\nshutil.rmtree('x')"))
+        self.assertTrue(agent.RISKY.search("Remove-Item -Recurse C:\\x"))
+        self.assertFalse(agent.RISKY.search("def is_prime(n):\n    return n > 1\nprint(is_prime(7))"))
 
 
 class MemoryTest(unittest.TestCase):

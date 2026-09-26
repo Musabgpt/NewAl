@@ -127,6 +127,7 @@ function addBot() {
   $("#messages").appendChild(d);
   const route = d.querySelector(".route"), extras = d.querySelector(".extras"), content = d.querySelector(".content");
   let text = "", thinking = null, thinkText = "", status = null, pending = false;
+  let draft = null, draftText = "", attempts = 0;
   const tools = {};
 
   function setStatus(t) {
@@ -145,6 +146,14 @@ function addBot() {
     route(e) { route.innerHTML = ""; status = null; const s = document.createElement("span");
       s.textContent = `${ROUTE_LABEL[e.route] || e.route} · ${e.model}`; route.appendChild(s); setStatus("يفكر…"); },
     delta(kind, t) {
+      if (kind === "draft") {
+        // The code being written or fixed in the background: shown in a collapsed box, not as the answer.
+        if (!draft) { draft = box("draft", "⚙ يكتب الكود ويجرّبه بالخلفية…", ""); extras.appendChild(draft); }
+        draftText += t;
+        draft.querySelector(".inner").textContent = draftText;
+        setStatus(attempts ? `يصلّح (محاولة ${attempts + 1})…` : "يكتب الكود…");
+        return;
+      }
       if (kind === "reasoning") {
         if (!thinking) { thinking = box("think", "💭 التفكير", ""); extras.appendChild(thinking); }
         thinkText += t;
@@ -174,9 +183,12 @@ function addBot() {
       scrollDown();
     },
     run(e) {
-      extras.appendChild(box(e.ok ? "ok" : "fail", (e.ok ? "▶ تجربة ناجحة" : "▶ فشلت التجربة") + ` (${e.lang})`, e.output, !e.ok));
+      attempts = e.attempt || attempts + 1;
+      extras.appendChild(box(e.ok ? "ok" : "fail", `▶ محاولة ${attempts}: ` + (e.ok ? "نجحت" : "فيها خطأ") + ` (${e.lang})`, e.output));
+      setStatus(e.ok ? "يتحقق من النتيجة…" : "يحلل الخطأ…");
       scrollDown();
     },
+    draftReset() { draftText = ""; if (draft) draft.querySelector("summary").textContent = `⚙ إصلاح ${attempts}…`; },
     verdict(e) {
       const v = document.createElement("div");
       v.className = "verdict " + (e.ok ? "ok" : "bad");
@@ -200,8 +212,11 @@ function addBot() {
       paint();
       meta = meta || {};
       if (!route.textContent && meta.route) route.textContent = `${ROUTE_LABEL[meta.route] || meta.route} · ${meta.model || ""}`;
-      if (meta.verified !== undefined && meta.verified !== null && !extras.querySelector(".verdict")) {
-        this.verdict({ok: meta.verified, reason: meta.judge || ""});
+      if (draft) draft.querySelector("summary").textContent = "⚙ مسودات الكود";
+      if (meta.verified === true) {
+        this.verdict({ok: true, reason: (meta.attempts > 1 ? `اشتغل بعد ${meta.attempts} محاولات. ` : "اشتغل من أول محاولة. ") + (meta.judge || "")});
+      } else if (meta.verified === false && !extras.querySelector(".verdict")) {
+        this.verdict({ok: false, reason: `ما زال فيه خطأ بعد ${meta.attempts} محاولات`});
       }
       // Files the assistant created: links to open them.
       const out = d.querySelector(".files-out");
@@ -318,6 +333,7 @@ async function send(text, files, editId) {
       case "run": bot.run(e); break;
       case "verdict": bot.verdict(e); break;
       case "fix": bot.fix(e); break;
+      case "draft_reset": bot.draftReset(); break;
       case "memory": bot.memory(e); break;
       case "approve": askApproval(e); break;
       case "done": bot.finish(e.content, e.meta, e.message_id); bot.el.dataset.id = e.message_id; end(); break;
@@ -537,7 +553,8 @@ const panels = {
     body.innerHTML = `<h2>⚙ الإعدادات</h2>
       <div class="field"><label><input type="checkbox" id="auto_run" ${s.auto_run ? "checked" : ""}> تشغيل الأوامر وإنشاء الملفات بدون سؤال</label>
         <span class="hint">بدونه يطلب NewAl موافقتك قبل أي أمر في الطرفية أو ملف أو رفع.</span></div>
-      <div class="field"><label><input type="checkbox" id="verify_code" ${s.verify_code ? "checked" : ""}> تجربة الكود تلقائياً والحكم عليه وإصلاحه</label></div>
+      <div class="field"><label><input type="checkbox" id="verify_code" ${s.verify_code ? "checked" : ""}> تجربة الكود بالخلفية وإصلاحه حتى يشتغل، ثم إعطائي النسخة الصحيحة فقط</label></div>
+      <div class="field"><label>أقصى عدد محاولات إصلاح</label><input type="number" id="max_fix_attempts" min="1" max="15" value="${s.max_fix_attempts}"></div>
       <div class="field"><label>عدد الأنوية (0 = تلقائي)</label><input type="number" id="threads" min="0" max="64" value="${s.threads}"></div>
       <div class="field"><label>ميزانية الذاكرة للنماذج (GB)</label><input type="number" id="ram_budget_gb" min="2" max="256" value="${s.ram_budget_gb}"></div>
       <div class="field"><label>طول السياق (tokens)</label><select id="context">${[4096, 8192, 16384, 32768].map(n => `<option ${n == s.context ? "selected" : ""}>${n}</option>`).join("")}</select>
@@ -549,6 +566,7 @@ const panels = {
     body.querySelector("#saveSettings").onclick = async () => {
       await api("/api/settings", {
         auto_run: body.querySelector("#auto_run").checked, verify_code: body.querySelector("#verify_code").checked,
+        max_fix_attempts: +body.querySelector("#max_fix_attempts").value,
         threads: +body.querySelector("#threads").value, ram_budget_gb: +body.querySelector("#ram_budget_gb").value,
         context: +body.querySelector("#context").value,
       });

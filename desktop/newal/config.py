@@ -44,6 +44,7 @@ DEFAULTS = {
     "context": 8192,
     "auto_run": False,            # run commands and code without asking
     "verify_code": True,          # run generated code and let the judge check it
+    "max_fix_attempts": 5,        # run -> judge -> fix rounds before giving the best attempt
     "web": True,
     "language": "ar",
     "project_dirs": [],           # folders indexed for the project memory
