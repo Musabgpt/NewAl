@@ -48,7 +48,7 @@ public class MainActivity extends AppCompatActivity {
     private static final int DRAFT_TOKENS=3;
     /** Model roles: each may use its own GGUF; models are loaded one at a time (sequentially). */
     private static final String ROLE_MANAGER="manager", ROLE_CODER="coder", ROLE_LANGUAGE="language";
-    private static final int CONTEXT_TOKENS=4096, MAX_NEW_TOKENS=2048, TOP_K=40, AGENT_PORT=47811, REQ_TERMUX=41, REQ_NOTIFY=42, REQ_ASSIST=43;
+    private static final int CONTEXT_TOKENS=4096, MAX_NEW_TOKENS=2048, TOP_K=40, AGENT_PORT=47811, REQ_TERMUX=41, REQ_NOTIFY=42, REQ_ASSIST=43, REQ_ALL=44;
     private static final float TEMPERATURE=0.70f;
 
     private final ExecutorService executor=Executors.newSingleThreadExecutor();
@@ -155,6 +155,8 @@ public class MainActivity extends AppCompatActivity {
         menuButton.setOnClickListener(v->{refreshConversations();drawer.openDrawer(androidx.core.view.GravityCompat.START);});
         findViewById(R.id.drawerNewChat).setOnClickListener(v->{drawer.closeDrawers();newChat();});
         findViewById(R.id.drawerModels).setOnClickListener(v->{drawer.closeDrawers();showModelRoles();});
+        findViewById(R.id.drawerPermissions).setOnClickListener(v->{drawer.closeDrawers();showPermissions();});
+        findViewById(R.id.drawerSpeed).setOnClickListener(v->{drawer.closeDrawers();tuneSpeed(true);});
         findViewById(R.id.drawerSettings).setOnClickListener(v->{drawer.closeDrawers();showSettings();});
         findViewById(R.id.drawerClearAll).setOnClickListener(v->new AlertDialog.Builder(this).setTitle("حذف كل المحادثات؟")
                 .setMessage("تُحذف كل المحادثات وما طلبت من التطبيق تذكّره.").setPositiveButton("حذف",(d,w)->{drawer.closeDrawers();clearChat();})
@@ -184,6 +186,12 @@ public class MainActivity extends AppCompatActivity {
         updateEmptyState();
         restoreSavedModel();
         handleAssistIntent(getIntent());
+        if(!prefs.getBoolean("permissions_offered",false)){
+            prefs.edit().putBoolean("permissions_offered",true).apply();
+            ui.postDelayed(()->new AlertDialog.Builder(this).setTitle("أهلاً بك في NewAl")
+                    .setMessage("امنحه الصلاحيات مرة وحدة ليقدر يفتح التطبيقات ويرسل ويتصل ويعمل بالخلفية بدون ما يسألك كل مرة. تقدر تغيّر هذا من ☰ ← الصلاحيات.")
+                    .setPositiveButton("🔓 امنح الكل",(d,w)->startGrantAll()).setNegativeButton("لاحقاً",null).show(),800);
+        }
         // While a task runs, Back sends the app to the background instead of closing it.
         getOnBackPressedDispatcher().addCallback(this,new androidx.activity.OnBackPressedCallback(true){
             @Override public void handleOnBackPressed(){
@@ -214,15 +222,24 @@ public class MainActivity extends AppCompatActivity {
     // ------------------------------------------------------------------ model catalog / download
 
     /** Free GGUF models from Hugging Face: name, size in GB, minimum phone RAM in GB, URL. */
+    private static final String LFM_26B="https://huggingface.co/LiquidAI/LFM2.5-2.6B-GGUF/resolve/main/LFM2.5-2.6B-QAD-Q4_0.gguf",
+            QWEN35_2B="https://huggingface.co/unsloth/Qwen3.5-2B-GGUF/resolve/main/Qwen3.5-2B-Q4_K_M.gguf",
+            PACK="pack:a16";
+    /**
+     * Free GGUF models from Hugging Face: name, size in GB, minimum phone RAM in GB, URL. Chosen by
+     * our measurements: LFM2.5 2.6B (hybrid, Arabic, agent-trained, quantisation-aware Q4_0 that is
+     * fastest on ARM) answers best; Qwen3.5 drives the screen best.
+     */
     private static final Object[][] MODEL_CATALOG={
-            {"⭐ Qwen3.5 4B — الأذكى (محادثة، أدوات، تحكم بالهاتف)",2.74,8,"https://huggingface.co/unsloth/Qwen3.5-4B-GGUF/resolve/main/Qwen3.5-4B-Q4_K_M.gguf"},
-            {"⚡ Qwen3.5 2B — سريع ومتوازن",1.28,6,"https://huggingface.co/unsloth/Qwen3.5-2B-GGUF/resolve/main/Qwen3.5-2B-Q4_K_M.gguf"},
-            {"🪶 Qwen3.5 0.8B — خفيف جداً للهواتف الضعيفة",0.53,3,"https://huggingface.co/unsloth/Qwen3.5-0.8B-GGUF/resolve/main/Qwen3.5-0.8B-Q4_K_M.gguf"},
-            {"Qwen3 4B Instruct 2507 — بديل قوي",2.5,8,"https://huggingface.co/unsloth/Qwen3-4B-Instruct-2507-GGUF/resolve/main/Qwen3-4B-Instruct-2507-Q4_K_M.gguf"},
+            {"⭐ الحزمة المثالية لهاتفك: LFM2.5 2.6B للمحادثة + Qwen3.5 2B للتحكم بالهاتف",2.87,6,PACK},
+            {"⭐ LFM2.5 2.6B — ذكي بالعربي، أدوات، سياق 128K (هجين، Q4_0 مسرّع)",1.59,4,LFM_26B},
+            {"📱 Qwen3.5 2B — الأفضل للتحكم بالشاشة",1.28,6,QWEN35_2B},
+            {"🪶 LFM2.5 1.2B — للهواتف 4GB، سريع جداً",0.70,3,"https://huggingface.co/LiquidAI/LFM2.5-1.2B-Instruct-GGUF/resolve/main/LFM2.5-1.2B-Instruct-QAD-Q4_0.gguf"},
+            {"🧠 Qwen3.5 4B — الأدق بالتحكم بالهاتف (أبطأ)",2.74,8,"https://huggingface.co/unsloth/Qwen3.5-4B-GGUF/resolve/main/Qwen3.5-4B-Q4_K_M.gguf"},
             {"💻 Qwen2.5-Coder 3B — للبرمجة مع Termux",2.1,6,"https://huggingface.co/Qwen/Qwen2.5-Coder-3B-Instruct-GGUF/resolve/main/qwen2.5-coder-3b-instruct-q4_k_m.gguf"},
-            {"💻 Qwen2.5-Coder 7B — أقوى برمجة وبطيء",4.7,10,"https://huggingface.co/Qwen/Qwen2.5-Coder-7B-Instruct-GGUF/resolve/main/qwen2.5-coder-7b-instruct-q4_k_m.gguf"},
             {"💻 Qwen2.5-Coder 0.5B — مسودة تسريع للـCoder",0.68,3,"https://huggingface.co/Qwen/Qwen2.5-Coder-0.5B-Instruct-GGUF/resolve/main/qwen2.5-coder-0.5b-instruct-q8_0.gguf"},
     };
+
 
 
     private void chooseModelSource(){
@@ -231,11 +248,7 @@ public class MainActivity extends AppCompatActivity {
         if(am!=null)am.getMemoryInfo(mi);
         double ramGb=mi.totalMem/1e9;
         // Models already on the phone first: one tap switches.
-        File dir=getExternalFilesDir("models");
-        File[] local=dir==null?new File[0]:dir.listFiles((d,n)->n.endsWith(".gguf"));
-        if(local==null)local=new File[0];
-        java.util.Arrays.sort(local,(a,b)->a.getName().compareToIgnoreCase(b.getName()));
-        final File[] files=local;
+        final File[] files=modelFiles().toArray(new File[0]);
         List<String> items=new java.util.ArrayList<>();
         for(File f:files)items.add((f.getAbsolutePath().equals(loadedPath)?"✅ ":"📦 ")+modelTitle(f.getName()).replace(" ▾","")+String.format(java.util.Locale.US,"  • %.1f GB",f.length()/1e9));
         items.add("📂 اختيار ملف GGUF من الهاتف");
@@ -247,17 +260,48 @@ public class MainActivity extends AppCompatActivity {
             if(which<files.length){loadModelFromLocalFile(files[which],files[which].getName());return;}
             which-=files.length;
             if(which==0)pickModelLauncher.launch(new String[]{"*/*"});
+            else if(PACK.equals(MODEL_CATALOG[which-1][3])){
+                // Screen control model first (assigned to the assistant role), then the chat model, which is loaded.
+                prefs.edit().putString("pending_role_"+fileOf(QWEN35_2B),ROLE_MANAGER).apply();
+                downloadModel("Qwen3.5 2B",QWEN35_2B,false);
+                downloadModel("LFM2.5 2.6B",LFM_26B,true);
+            }
             else downloadModel((String)MODEL_CATALOG[which-1][0],(String)MODEL_CATALOG[which-1][3]);
         }).show();
     }
 
     /** Downloads with Android's DownloadManager (resumes, survives app restarts), then loads it. */
-    private void downloadModel(String title,String url){
-        File dir=getExternalFilesDir("models");
-        if(dir==null){setWorking(false,"تخزين التطبيق غير متاح");return;}
+    /** Downloaded models live in the phone's Downloads/NewAl folder: visible in Files, kept if the app is removed. */
+    static File publicModelsDir(){
+        return new File(android.os.Environment.getExternalStoragePublicDirectory(android.os.Environment.DIRECTORY_DOWNLOADS),"NewAl");
+    }
+
+    /** GGUF files in the app's folder, in Downloads/NewAl and directly in Downloads (the last needs all-files access). */
+    private List<File> modelFiles(){
+        List<File> out=new java.util.ArrayList<>();
+        java.util.Set<String> names=new java.util.HashSet<>();
+        File[] dirs={publicModelsDir(),getExternalFilesDir("models"),android.os.Environment.getExternalStoragePublicDirectory(android.os.Environment.DIRECTORY_DOWNLOADS)};
+        for(File d:dirs){
+            File[] fs=d==null?null:d.listFiles((x,n)->n.toLowerCase(java.util.Locale.ROOT).endsWith(".gguf"));
+            if(fs==null)continue;
+            for(File f:fs)if(f.canRead()&&names.add(f.getName()))out.add(f);
+        }
+        java.util.Collections.sort(out,(a,b)->a.getName().compareToIgnoreCase(b.getName()));
+        return out;
+    }
+
+    private static String fileOf(String url){return url.substring(url.lastIndexOf('/')+1);}
+
+    private void downloadModel(String title,String url){downloadModel(title,url,true);}
+
+    /** {@code load}: open the model when the download finishes (false for a role model of a pack). */
+    private void downloadModel(String title,String url,boolean load){
+        File dir=publicModelsDir();
         String fileName=url.substring(url.lastIndexOf('/')+1);
         File target=new File(dir,fileName);
-        if(isValidGgufFile(target)){loadModelFromLocalFile(target,fileName);return;}
+        if(isValidGgufFile(target)){downloaded(target,load);return;}
+        File old=getExternalFilesDir("models")==null?null:new File(getExternalFilesDir("models"),fileName);
+        if(old!=null&&isValidGgufFile(old)){downloaded(old,load);return;}
         android.app.DownloadManager dm=(android.app.DownloadManager)getSystemService(DOWNLOAD_SERVICE);
         if(dm==null)return;
         target.delete();
@@ -265,20 +309,36 @@ public class MainActivity extends AppCompatActivity {
                 .setTitle(title).setDescription("NewAl model")
                 .setNotificationVisibility(android.app.DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED)
                 .setAllowedOverMetered(true).setAllowedOverRoaming(false)
-                .setDestinationInExternalFilesDir(this,"models",fileName);
+                .setDestinationInExternalPublicDir(android.os.Environment.DIRECTORY_DOWNLOADS,"NewAl/"+fileName);
         long id=dm.enqueue(r);
         loadModelButton.setEnabled(false);
-        pollDownload(dm,id,target,fileName);
+        pollDownload(dm,id,target,fileName,load);
     }
 
-    private void pollDownload(android.app.DownloadManager dm,long id,File target,String name){
+    /** A model file is ready: take a pending role assignment, then load it if asked. */
+    private void downloaded(File f,boolean load){
+        String role=prefs.getString("pending_role_"+f.getName(),"");
+        if(!role.isEmpty()){
+            prefs.edit().putString(PREF_ROLE+role,f.getAbsolutePath()).remove("pending_role_"+f.getName()).apply();
+            setWorking(false,"✅ "+f.getName()+" ← "+roleTitle(role));
+        }
+        if(load)loadModelFromLocalFile(f,f.getName());
+    }
+
+    private void pollDownload(android.app.DownloadManager dm,long id,File target,String name,boolean load){
         try(android.database.Cursor c=dm.query(new android.app.DownloadManager.Query().setFilterById(id))){
             if(c==null||!c.moveToFirst()){loadModelButton.setEnabled(true);setWorking(false,"أُلغي التنزيل");return;}
             int status=c.getInt(c.getColumnIndexOrThrow(android.app.DownloadManager.COLUMN_STATUS));
             long done=c.getLong(c.getColumnIndexOrThrow(android.app.DownloadManager.COLUMN_BYTES_DOWNLOADED_SO_FAR));
             long total=c.getLong(c.getColumnIndexOrThrow(android.app.DownloadManager.COLUMN_TOTAL_SIZE_BYTES));
             if(status==android.app.DownloadManager.STATUS_SUCCESSFUL){
-                if(isValidGgufFile(target))loadModelFromLocalFile(target,name);
+                if(isValidGgufFile(target)){loadModelButton.setEnabled(true);downloaded(target,load);}
+                else if(target.exists()&&!target.canRead()){
+                    // Some Android versions hide downloads from the app that asked for them until it has all-files access.
+                    loadModelButton.setEnabled(true);
+                    setWorking(false,"✅ تنزّل إلى Download/NewAl — اسمح بالوصول للملفات ثم اختره من قائمة النماذج");
+                    openAllFilesAccess();
+                }
                 else{loadModelButton.setEnabled(true);setWorking(false,"الملف المنزّل ليس GGUF صالحاً");}
                 return;
             }
@@ -290,7 +350,7 @@ public class MainActivity extends AppCompatActivity {
             setWorking(true,total>0?String.format(java.util.Locale.US,"📥 تنزيل %s… %d%% (%.0f / %.0f MB)",name,done*100/total,done/1e6,total/1e6)
                     :"📥 تنزيل "+name+"…");
         }
-        ui.postDelayed(()->pollDownload(dm,id,target,name),1000);
+        ui.postDelayed(()->pollDownload(dm,id,target,name,load),1000);
     }
 
     private void restoreSavedModel(){
@@ -380,7 +440,10 @@ public class MainActivity extends AppCompatActivity {
             engine=loaded;
             loadedPath=file.getAbsolutePath();
             prefs.edit().putString(PREF_MODEL_LOCAL_PATH,file.getAbsolutePath()).putString(PREF_MODEL_NAME,displayName).putString(PREF_MODEL_URI,sourceUri).putLong(PREF_MODEL_SIZE,file.length()>0?file.length():expectedSize).apply();
-            runOnUiThread(()->{loadModelButton.setEnabled(true);loadModelButton.setText(modelTitle(displayName));setWorking(false,"جاهز — "+displayName);updateEmptyState();resumeInterruptedAgentTask();});
+            runOnUiThread(()->{
+                loadModelButton.setEnabled(true);loadModelButton.setText(modelTitle(displayName));setWorking(false,"جاهز — "+displayName);updateEmptyState();resumeInterruptedAgentTask();
+                if(!prefs.contains("gen_threads"))ui.postDelayed(()->tuneSpeed(false),600);
+            });
         }catch(Exception ex){
             runOnUiThread(()->{loadModelButton.setEnabled(true);setWorking(false,"تعذر تحميل النموذج: "+safeMessage(ex));});
         }
@@ -436,10 +499,34 @@ public class MainActivity extends AppCompatActivity {
     private void handleAssistIntent(Intent intent){
         if(intent==null)return;
         String a=intent.getAction();
+        if(Intent.ACTION_PROCESS_TEXT.equals(a)||(Intent.ACTION_SEND.equals(a)&&intent.getType()!=null&&intent.getType().startsWith("text/"))){
+            CharSequence picked=Intent.ACTION_PROCESS_TEXT.equals(a)?intent.getCharSequenceExtra(Intent.EXTRA_PROCESS_TEXT):intent.getCharSequenceExtra(Intent.EXTRA_TEXT);
+            setIntent(new Intent(this,MainActivity.class));   // handled once, not again on rotation
+            if(picked!=null&&picked.toString().trim().length()>0)askAboutText(picked.toString().trim());
+            return;
+        }
         if(Intent.ACTION_ASSIST.equals(a)||Intent.ACTION_VOICE_COMMAND.equals(a)){
             if(!assistantMode)setAssistantMode(true);
             ui.postDelayed(this::listen,300);
         }
+    }
+
+    /** Text selected or shared from another app: summarise, translate, fix, explain, or ask about it. */
+    private void askAboutText(String text){
+        String[] labels={"💬 اسأل عنه","📝 لخّص","🌐 ترجم للعربية","🌍 ترجم للإنجليزية","✍️ صحّح وحسّن الصياغة","📖 اشرح ببساطة"};
+        String[] prompts={"","لخّص النص التالي بنقاط قصيرة:","ترجم النص التالي إلى العربية بدقة:","Translate the following text into natural English:",
+                "صحّح الأخطاء وحسّن صياغة النص التالي مع الحفاظ على معناه، وأعطني النسخة المحسّنة فقط:","اشرح النص التالي ببساطة:"};
+        new AlertDialog.Builder(this).setTitle(text.length()>80?text.substring(0,80)+"…":text).setItems(labels,(d,w)->{
+            if(agentMode||assistantMode){agentMode=false;assistantMode=false;prefs.edit().putBoolean(PREF_AGENT_MODE,false).putBoolean(PREF_ASSISTANT,false).apply();renderAgentButton();}
+            String quoted="«"+text+"»";
+            if(w==0||engine==null){
+                // Ask yourself (or wait for the model): the text is ready in the box.
+                inputBox.setText(w==0?quoted+"\n":prompts[w]+"\n\n"+text);
+                inputBox.setSelection(inputBox.getText().length());
+                inputBox.requestFocus();
+                if(engine==null)setWorking(false,"النموذج قيد التحميل… اضغط إرسال بعد قليل");
+            }else startChat(prompts[w]+"\n\n"+text,false);
+        }).show();
     }
 
     /** Speech to text with the phone's own recogniser (works offline when the language pack is installed). */
@@ -723,10 +810,7 @@ public class MainActivity extends AppCompatActivity {
 
     /** Assign a GGUF to each role (manager / coder / language) and turn team mode on or off. */
     private void showModelRoles(){
-        File dir=getExternalFilesDir("models");
-        File[] ggufs=dir==null?new File[0]:dir.listFiles((d,n)->n.endsWith(".gguf"));
-        if(ggufs==null)ggufs=new File[0];
-        final File[] files=ggufs;
+        final File[] files=modelFiles().toArray(new File[0]);
         String[] roles={ROLE_MANAGER,ROLE_CODER,ROLE_LANGUAGE};
         String[] labels=new String[roles.length+4];
         for(int i=0;i<roles.length;i++){
@@ -1002,7 +1086,9 @@ public class MainActivity extends AppCompatActivity {
         if(history.size()>24)history=history.subList(history.size()-24,history.size());
         ChatSession.Options o=new ChatSession.Options();
         o.web=prefs.getBoolean(PREF_WEB,false);
-        o.xmlToolCalls=model.xmlToolCalls();
+        String style=model.toolStyle();
+        o.xmlToolCalls=style.equals("xml");
+        o.lfmTools=style.equals("lfm");
         o.date=new java.text.SimpleDateFormat("EEEE yyyy-MM-dd",java.util.Locale.ENGLISH).format(new java.util.Date());
         o.extraSystem=memoryManager.memoryText();
         chatTools.online=prefs.getBoolean(PREF_ONLINE,true);
@@ -1188,6 +1274,7 @@ public class MainActivity extends AppCompatActivity {
 
     @Override public void onRequestPermissionsResult(int requestCode,String[] permissions,int[] grantResults){
         super.onRequestPermissionsResult(requestCode,permissions,grantResults);
+        if(requestCode==REQ_ALL){nextGrant();return;}
         if(requestCode==REQ_ASSIST){
             permissionGranted=grantResults.length>0&&grantResults[0]==android.content.pm.PackageManager.PERMISSION_GRANTED;
             CountDownLatch l=permissionLatch;if(l!=null)l.countDown();
@@ -1456,6 +1543,15 @@ public class MainActivity extends AppCompatActivity {
      */
     private LlamaEngine engineForRole(String role){
         String path=prefs.getString(PREF_ROLE+role,"");
+        if((path.isEmpty()||!new File(path).isFile())&&ROLE_MANAGER.equals(role)){
+            // Screen control works best with Qwen3.5 (measured); use one if it is on the phone.
+            path="";
+            for(File f:modelFiles()){
+                String n=f.getName().toLowerCase(java.util.Locale.ROOT);
+                // 2B: fast enough on mid-range phones; a 4B only when there is no 2B.
+                if(n.startsWith("qwen3.5")&&!n.contains("0.8b")&&(path.isEmpty()||n.contains("-2b")))path=f.getAbsolutePath();
+            }
+        }
         if(path.isEmpty()||!new File(path).isFile())path=prefs.getString(PREF_MODEL_LOCAL_PATH,null);
         if(path==null)return engine;
         String draftPath=ROLE_LANGUAGE.equals(role)?null:draftFor(path);
@@ -1482,8 +1578,63 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private LlamaEngine newEngine(String path){
-        int threads=Math.max(2,Math.min(6,Runtime.getRuntime().availableProcessors()));
-        return new LlamaEngine(getApplicationContext(),path,prefs.getInt(PREF_CONTEXT,CONTEXT_TOKENS),threads);
+        int cores=Runtime.getRuntime().availableProcessors();
+        int threads=Math.max(2,Math.min(6,cores));
+        LlamaEngine e=new LlamaEngine(getApplicationContext(),path,prefs.getInt(PREF_CONTEXT,CONTEXT_TOKENS),threads);
+        // The measured best thread count for generation on this phone; prompts use every core.
+        e.setThreads(prefs.getInt("gen_threads",threads),cores);
+        return e;
+    }
+
+    /**
+     * Measures generation speed with 2, 3, 4, 6 and all cores and keeps the fastest. Phones mix
+     * fast and slow cores (the Galaxy A16: 2 fast + 6 slow), and the slow ones can hold the fast
+     * ones back, so the best count differs per phone. Done once automatically, or from the menu.
+     */
+    private void tuneSpeed(boolean manual){
+        LlamaEngine e=engine;
+        if(e==null){if(manual)setWorking(false,"حمّل نموذجاً أولاً");return;}
+        if(generating)return;
+        setGenerating(true);
+        setWorking(true,"⚡ أقيس أسرع إعداد لهاتفك…");
+        executor.execute(()->{
+            int cores=Runtime.getRuntime().availableProcessors();
+            java.util.TreeSet<Integer> candidates=new java.util.TreeSet<>();
+            for(int t:new int[]{2,3,4,6,cores})if(t>=1&&t<=cores)candidates.add(t);
+            List<ChatMessage> turns=new java.util.ArrayList<>();
+            turns.add(new ChatMessage(0,ChatMessage.ROLE_USER,"Count from 1 to 80, separated by commas.",0));
+            int best=prefs.getInt("gen_threads",Math.max(2,Math.min(6,cores)));
+            double bestSpeed=0,before=0;
+            StringBuilder log=new StringBuilder();
+            try{
+                e.setThreads(best,cores);
+                e.resetContext();
+                before=e.generate(turns,24,0f,1,LlamaEngine.FLAG_RAW,null,null).tokensPerSecond;   // also warms up
+                for(int t:candidates){
+                    e.setThreads(t,cores);
+                    e.resetContext();
+                    GenerationResult r=e.generate(turns,32,0f,1,LlamaEngine.FLAG_RAW,null,null);
+                    if(r.stopReason==GenerationResult.STOP_CANCELLED)throw new IllegalStateException("أُوقف القياس");
+                    double speed=r.tokensPerSecond;
+                    log.append(String.format(java.util.Locale.US,"%d:%.1f ",t,speed));
+                    if(speed>bestSpeed){bestSpeed=speed;best=t;}
+                }
+            }catch(Exception ex){
+                final String err=safeMessage(ex);
+                runOnUiThread(()->{setGenerating(false);setWorking(false,"تعذّر القياس: "+err);});
+                return;
+            }
+            prefs.edit().putInt("gen_threads",best).apply();
+            for(LlamaEngine x:pool.engines())x.setThreads(best,cores);
+            e.resetContext();
+            final String msg=String.format(java.util.Locale.US,"⚡ أفضل إعداد: %d أنوية • %.1f tok/s (كان %.1f)",best,bestSpeed,before);
+            final String detail=log.toString().trim();
+            runOnUiThread(()->{
+                setGenerating(false);
+                setWorking(false,msg);
+                if(manual)new AlertDialog.Builder(this).setTitle("⚡ ضبط السرعة").setMessage(msg+"\n\nالقياسات (أنوية:tok/s): "+detail).setPositiveButton("تمام",null).show();
+            });
+        });
     }
 
     private long availableRam(){
@@ -1500,10 +1651,10 @@ public class MainActivity extends AppCompatActivity {
     private String draftFor(String targetPath){
         if(!prefs.getBoolean(PREF_SPECULATIVE,true))return null;
         String d=prefs.getString(PREF_DRAFT,"");
+        // Measured gains only for Qwen2.5 3B+ with a 0.5B draft; hybrid models (LFM2.5, Qwen3.5) got slower.
+        if(!new File(targetPath).getName().toLowerCase(java.util.Locale.ROOT).contains("qwen2.5"))return null;
         if(d.isEmpty()){
-            File dir=getExternalFilesDir("models");
-            File[] small=dir==null?null:dir.listFiles((x,n)->n.toLowerCase(java.util.Locale.ROOT).contains("0.5b")&&n.endsWith(".gguf"));
-            if(small!=null)for(File f:small)if(d.isEmpty()||f.length()<new File(d).length())d=f.getAbsolutePath();
+            for(File f:modelFiles())if(f.getName().toLowerCase(java.util.Locale.ROOT).contains("0.5b")&&(d.isEmpty()||f.length()<new File(d).length()))d=f.getAbsolutePath();
         }
         if(d.isEmpty()||d.equals(targetPath)||!new File(d).isFile())return null;
         return new File(targetPath).length()>=3*new File(d).length()?d:null;
@@ -1666,7 +1817,124 @@ public class MainActivity extends AppCompatActivity {
 
     private static String safeMessage(Exception ex){String m=ex.getMessage();return TextUtils.isEmpty(m)?ex.getClass().getSimpleName():m;}
 
-    @Override protected void onResume(){super.onResume();resumed=true;if(assistantMode)buildAssistantChips();}
+    @Override protected void onResume(){
+        super.onResume();resumed=true;
+        if(assistantMode)buildAssistantChips();
+        // Coming back from a settings page during "grant everything": go on with the next one.
+        if(grantFlow)ui.postDelayed(this::nextGrant,500);
+    }
+
+    // ------------------------------------------------------------------ full permissions
+
+    private boolean grantFlow;
+    private final java.util.Set<String> grantTried=new java.util.HashSet<>();
+
+    private String[] runtimePermissions(){
+        List<String> p=new java.util.ArrayList<>(java.util.Arrays.asList(android.Manifest.permission.READ_CONTACTS,
+                android.Manifest.permission.CALL_PHONE,android.Manifest.permission.SEND_SMS));
+        if(Build.VERSION.SDK_INT>=33)p.add(android.Manifest.permission.POST_NOTIFICATIONS);
+        if(Build.VERSION.SDK_INT<30)p.add(android.Manifest.permission.WRITE_EXTERNAL_STORAGE);
+        if(TermuxLauncher.isInstalled(this))p.add(TermuxLauncher.PERMISSION);
+        return p.toArray(new String[0]);
+    }
+
+    private List<String> missingRuntime(){
+        List<String> out=new java.util.ArrayList<>();
+        for(String p:runtimePermissions())if(checkSelfPermission(p)!=android.content.pm.PackageManager.PERMISSION_GRANTED)out.add(p);
+        return out;
+    }
+
+    private boolean allFilesGranted(){return Build.VERSION.SDK_INT<30||android.os.Environment.isExternalStorageManager();}
+    private boolean batteryUnrestricted(){
+        android.os.PowerManager pm=(android.os.PowerManager)getSystemService(POWER_SERVICE);
+        return pm!=null&&pm.isIgnoringBatteryOptimizations(getPackageName());
+    }
+    private boolean isAssistantApp(){
+        if(Build.VERSION.SDK_INT<29)return false;
+        android.app.role.RoleManager rm=getSystemService(android.app.role.RoleManager.class);
+        return rm!=null&&rm.isRoleAvailable(android.app.role.RoleManager.ROLE_ASSISTANT)&&rm.isRoleHeld(android.app.role.RoleManager.ROLE_ASSISTANT);
+    }
+
+    private void openAllFilesAccess(){
+        if(Build.VERSION.SDK_INT<30)return;
+        try{startActivity(new Intent(android.provider.Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION,Uri.parse("package:"+getPackageName())));}
+        catch(Exception e){startActivity(new Intent(android.provider.Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION));}
+    }
+
+    private void openAccessibility(){
+        Intent i=new Intent(android.provider.Settings.ACTION_ACCESSIBILITY_SETTINGS);
+        // Highlights this app's entry on phones that support it.
+        String component=new android.content.ComponentName(this,ScreenControlService.class).flattenToString();
+        i.putExtra(":settings:fragment_args_key",component);
+        Bundle b=new Bundle();b.putString(":settings:fragment_args_key",component);i.putExtra(":settings:show_fragment_args",b);
+        startActivity(i);
+    }
+
+    @android.annotation.SuppressLint("BatteryLife")
+    private void openBattery(){
+        try{startActivity(new Intent(android.provider.Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS,Uri.parse("package:"+getPackageName())));}
+        catch(Exception e){startActivity(new Intent(android.provider.Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS));}
+    }
+
+    private void openAssistantSetting(){
+        try{startActivity(new Intent(android.provider.Settings.ACTION_VOICE_INPUT_SETTINGS));}
+        catch(Exception e){startActivity(new Intent(android.provider.Settings.ACTION_MANAGE_DEFAULT_APPS_SETTINGS));}
+    }
+
+    /** What NewAl may do, with one button that walks through every permission once. */
+    private void showPermissions(){
+        boolean runtime=missingRuntime().isEmpty(),screen=ScreenControlService.instance!=null,files=allFilesGranted(),
+                battery=batteryUnrestricted(),assist=isAssistantApp(),autonomous=!prefs.getBoolean(PREF_CONFIRM_SENDS,true);
+        String[] items={
+                (runtime?"✅":"⬜")+" جهات الاتصال، المكالمات، الرسائل، الإشعارات",
+                (screen?"✅":"⬜")+" التحكم بالشاشة (فتح التطبيقات والضغط والكتابة)",
+                (files?"✅":"⬜")+" الوصول لكل الملفات (النماذج في التنزيلات)",
+                (battery?"✅":"⬜")+" العمل بالخلفية بلا قيود البطارية",
+                (assist?"✅":"⬜")+" مساعد الهاتف الافتراضي (ضغطة مطوّلة على الرئيسية)",
+                (autonomous?"✅":"⬜")+" التنفيذ بدون سؤال (إرسال واتصال بلا تأكيد)"};
+        new AlertDialog.Builder(this).setTitle("🔓 الصلاحيات الكاملة")
+                .setItems(items,(d,w)->{
+                    switch(w){
+                        case 0:if(!runtime)requestPermissions(missingRuntime().toArray(new String[0]),REQ_ASSIST);break;
+                        case 1:openAccessibility();break;
+                        case 2:openAllFilesAccess();break;
+                        case 3:openBattery();break;
+                        case 4:openAssistantSetting();break;
+                        default:
+                            prefs.edit().putBoolean(PREF_CONFIRM_SENDS,autonomous).apply();
+                            assistant.confirmSends=autonomous;
+                            setWorking(false,autonomous?"سيسأل قبل الإرسال والاتصال":"⚡ ينفّذ بدون سؤال");
+                            showPermissions();
+                    }
+                })
+                .setPositiveButton("🔓 امنح الكل",(d,w)->startGrantAll())
+                .setNegativeButton("إغلاق",null).show();
+    }
+
+    /** Android shows each permission once; after that NewAl never asks again. */
+    private void startGrantAll(){
+        grantFlow=true;
+        grantTried.clear();
+        prefs.edit().putBoolean(PREF_CONFIRM_SENDS,false).apply();
+        assistant.confirmSends=false;
+        List<String> missing=missingRuntime();
+        if(!missing.isEmpty())requestPermissions(missing.toArray(new String[0]),REQ_ALL);
+        else nextGrant();
+    }
+
+    private void nextGrant(){
+        if(!grantFlow||!resumed)return;
+        if(ScreenControlService.instance==null&&grantTried.add("screen")){
+            setWorking(false,"فعّل «NewAl screen control» ثم ارجع");
+            openAccessibility();return;
+        }
+        if(!allFilesGranted()&&grantTried.add("files")){setWorking(false,"فعّل «السماح بإدارة كل الملفات» ثم ارجع");openAllFilesAccess();return;}
+        if(!batteryUnrestricted()&&grantTried.add("battery")){openBattery();return;}
+        if(!isAssistantApp()&&grantTried.add("assist")){setWorking(false,"اختر NewAl كتطبيق المساعد ثم ارجع");openAssistantSetting();return;}
+        grantFlow=false;
+        setWorking(false,"🔓 تم — NewAl لن يطلب منك أذونات بعد الآن");
+        showPermissions();
+    }
     @Override protected void onPause(){resumed=false;super.onPause();}
 
     @Override protected void onNewIntent(Intent intent){

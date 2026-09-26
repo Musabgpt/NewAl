@@ -251,6 +251,8 @@
             android:layout_weight="1"
             android:divider="@null"/>
 
+        <Button android:id="@+id/drawerPermissions" style="@style/DrawerItem" android:text="🔓  الصلاحيات الكاملة"/>
+        <Button android:id="@+id/drawerSpeed" style="@style/DrawerItem" android:text="⚡  ضبط السرعة لهاتفك"/>
         <Button android:id="@+id/drawerModels" style="@style/DrawerItem" android:text="🧠  النماذج والأدوار"/>
         <Button android:id="@+id/drawerSettings" style="@style/DrawerItem" android:text="⚙  الإعدادات"/>
         <Button android:id="@+id/drawerClearAll" style="@style/DrawerItem" android:text="🗑  حذف كل المحادثات"/>

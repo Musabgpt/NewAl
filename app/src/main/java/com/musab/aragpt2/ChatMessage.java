@@ -4,6 +4,8 @@ public final class ChatMessage {
     public static final int ROLE_USER=0, ROLE_ASSISTANT=1, ROLE_SYSTEM=2;
     /** Agent-mode bubbles: generated code, program/terminal output, and the task result card. */
     public static final int ROLE_CODE=3, ROLE_TERMINAL=4, ROLE_RESULT=5;
+    /** A tool result sent back to the model (LFM-style templates have a "tool" role). */
+    public static final int ROLE_TOOL=6;
     /** Roles that are conversation turns for the model (the others are display only). */
     public static boolean isConversation(int role){return role<=ROLE_SYSTEM;}
     public final long id;

@@ -43,6 +43,28 @@ public class ChatToolsTest {
         assertTrue(ChatTools.parseCalls("<tool_call>{broken</tool_call>").isEmpty());
     }
 
+    @Test public void parsesLfmPythonicCalls() {
+        List<ChatTools.Call> c = ChatTools.parseCalls("Let me check.[currency(amount=250, from='USD', to='TRY')]");
+        assertEquals(1, c.size());
+        assertEquals("currency", c.get(0).name);
+        assertEquals(250.0, c.get(0).args.optDouble("amount"), 0);
+        assertEquals("TRY", c.get(0).args.optString("to"));
+        c = ChatTools.parseCalls("<|tool_call_start|>[weather(city=\"Damascus\"), calculator(expression='(3-1)*2 + 2')]<|tool_call_end|>");
+        assertEquals("[weather{\"city\":\"Damascus\"}, calculator{\"expression\":\"(3-1)*2 + 2\"}]", c.toString());
+        assertTrue(ChatTools.parseCalls("an array [1, 2] and f(x) are not calls").isEmpty());
+        assertArrayEquals(new String[]{"", "Let me check."}, ChatSession.split("Let me check.[currency(amount=250, from='USD', to='TRY')]"));
+        assertArrayEquals(new String[]{"", "Wait "}, ChatSession.split("Wait [weather(city='Dam"));
+    }
+
+    @Test public void routesCurrencyQuestions() {
+        assertArrayEquals(new String[]{"250", "USD", "TRY"}, ChatSession.currencyQuery("حول 250 دولار لليرة التركية"));
+        assertArrayEquals(new String[]{"1", "USD", "SYP"}, ChatSession.currencyQuery("كم سعر الدولار بالسوري؟"));
+        assertArrayEquals(new String[]{"100", "EUR", "USD"}, ChatSession.currencyQuery("how much is 100 euros in dollars"));
+        assertArrayEquals(new String[]{"50", "SAR", "EGP"}, ChatSession.currencyQuery("قديش 50 ريال سعودي بالجنيه المصري"));
+        assertNull(ChatSession.currencyQuery("كم سعر الذهب اليوم بالدولار؟"));
+        assertNull(ChatSession.currencyQuery("اشرح لي الاقتصاد"));
+    }
+
     @Test public void streamSplitKeepsThinkingApartAndHidesPartialTags() {
         assertArrayEquals(new String[]{"let me see", "The answer"}, ChatSession.split("<think>\nlet me see\n</think>\n\nThe answer"));
         assertArrayEquals(new String[]{"still thinking", ""}, ChatSession.split("<think>still thinking"));
@@ -102,7 +124,7 @@ public class ChatToolsTest {
             return new GenerationResult(out, 10, 5, 1, 10, 5, GenerationResult.STOP_EOG, 0);
         }, tools);
         List<ChatMessage> h = new ArrayList<>();
-        h.add(new ChatMessage(1, ChatMessage.ROLE_USER, "كم سعر الذهب اليوم؟ وحول 10 دولار لليرة التركية", 0));
+        h.add(new ChatMessage(1, ChatMessage.ROLE_USER, "كم سعر الذهب اليوم؟ وبدي كمان تحويل مبلغ صغير", 0));
         List<String> events = new ArrayList<>();
         ChatSession.Reply r = s.run(h, new ChatSession.Options(), new ChatSession.Listener() {
             @Override public void onUpdate(String thinking, String answer) {}

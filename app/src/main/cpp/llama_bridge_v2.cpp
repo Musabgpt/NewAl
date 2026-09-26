@@ -730,6 +730,13 @@ JNIEXPORT jstring JNICALL Java_com_musab_aragpt2_LlamaEngine_nativeGenerate(
                               + RESULT_SEP + std::to_string(drafted) + RESULT_SEP + std::to_string(accepted)).c_str());
 }
 
+// Threads for generating tokens (one at a time: fewer, faster cores win on big.LITTLE phones)
+// and for reading the prompt (large batches: all cores help).
+JNIEXPORT void JNICALL Java_com_musab_aragpt2_LlamaEngine_nativeSetThreads(JNIEnv *, jobject, jlong hp, jint gen, jint batch) {
+    auto * h = reinterpret_cast<EngineHandle *>(hp);
+    if (h && h->ctx) llama_set_n_threads(h->ctx, std::max(1, static_cast<int>(gen)), std::max(1, static_cast<int>(batch)));
+}
+
 JNIEXPORT jstring JNICALL Java_com_musab_aragpt2_LlamaEngine_nativeChatTemplate(JNIEnv * env, jobject, jlong hp) {
     auto * h = reinterpret_cast<EngineHandle *>(hp);
     const char * t = h && h->model ? llama_model_chat_template(h->model, nullptr) : nullptr;

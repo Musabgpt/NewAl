@@ -66,6 +66,17 @@ final class ChatTools {
                         .put("required", new JSONArray().put(param))));
     }
 
+    /** The tool list as LFM2 / LFM2.5 templates write it: "List of tools: [{name, description, parameters}, ...]". */
+    String lfmBlock() {
+        JSONArray defs = definitions();
+        StringBuilder b = new StringBuilder("List of tools: [");
+        for (int i = 0; i < defs.length(); i++) {
+            JSONObject f = defs.optJSONObject(i).optJSONObject("function");
+            b.append(i == 0 ? "" : ", ").append(f.toString());
+        }
+        return b.append("]").toString();
+    }
+
     /** The system-prompt block that describes the tools, worded exactly as the model's template does. */
     String systemBlock(boolean xmlCalls) {
         StringBuilder b = new StringBuilder("# Tools\n\n");
@@ -92,9 +103,34 @@ final class ChatTools {
     private static final Pattern XML_FN = Pattern.compile("<function=([^>\\s]+)>(.*?)(?:</function>|$)", Pattern.DOTALL);
     private static final Pattern XML_PARAM = Pattern.compile("<parameter=([^>\\s]+)>\\s*(.*?)\\s*(?:</parameter>|(?=<parameter=)|$)", Pattern.DOTALL);
 
-    /** Tool calls in a reply, in either format. */
+    static final String TOOL_NAMES = "web_search|read_page|wikipedia|weather|currency|calculator|current_time";
+    /** LFM2's Pythonic calls: [weather(city='Damascus'), calculator(expression='2+2')] */
+    static final Pattern PY_CALLS = Pattern.compile("(?:<\\|tool_call_start\\|>)?\\[\\s*((?:" + TOOL_NAMES + ")\\(.*?\\))\\s*]\\s*(?:<\\|tool_call_end\\|>)?", Pattern.DOTALL);
+    private static final Pattern PY_ONE = Pattern.compile("(" + TOOL_NAMES + ")\\((.*?)\\)(?=\\s*(?:,\\s*(?:" + TOOL_NAMES + ")\\(|$))", Pattern.DOTALL);
+    private static final Pattern PY_ARG = Pattern.compile("(\\w+)\\s*=\\s*('(?:[^'\\\\]|\\\\.)*'|\"(?:[^\"\\\\]|\\\\.)*\"|[^,)]+)");
+
+    /** Tool calls in a reply, in any of the three formats. */
     static List<Call> parseCalls(String text) {
         List<Call> out = new ArrayList<>();
+        Matcher py = PY_CALLS.matcher(text);
+        while (py.find()) {
+            Matcher one = PY_ONE.matcher(py.group(1));
+            while (one.find()) {
+                JSONObject args = new JSONObject();
+                Matcher a = PY_ARG.matcher(one.group(2));
+                try {
+                    while (a.find()) {
+                        String v = a.group(2).trim();
+                        if ((v.startsWith("'") && v.endsWith("'")) || (v.startsWith("\"") && v.endsWith("\""))) {
+                            args.put(a.group(1), v.substring(1, v.length() - 1).replace("\\'", "'").replace("\\\"", "\""));
+                        } else if (v.matches("-?\\d+(\\.\\d+)?")) args.put(a.group(1), Double.parseDouble(v));
+                        else args.put(a.group(1), v);
+                    }
+                } catch (org.json.JSONException ignored) {}
+                out.add(new Call(one.group(1), args));
+            }
+        }
+        if (!out.isEmpty()) return out;
         Matcher m = CALL.matcher(text);
         while (m.find()) {
             String body = m.group(1).trim();

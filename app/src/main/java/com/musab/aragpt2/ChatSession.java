@@ -2,6 +2,7 @@ package com.musab.aragpt2;
 
 import java.util.ArrayList;
 import java.util.List;
+import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 /**
@@ -27,6 +28,8 @@ final class ChatSession {
         boolean web;
         /** Qwen3.5 / Qwen3-Coder style XML tool calls instead of JSON. */
         boolean xmlToolCalls;
+        /** LFM2 / LFM2.5: tools listed their way, Pythonic calls, results in a "tool" turn. */
+        boolean lfmTools;
         String date = "";
         /** Extra instructions (memory, the user's name ...). */
         String extraSystem = "";
@@ -39,7 +42,8 @@ final class ChatSession {
         GenerationResult last;
     }
 
-    static final int MAX_TOOL_ROUNDS = 4;
+    /** Tool rounds per answer; agent-trained models (LFM2.5) otherwise keep searching for minutes. */
+    static final int MAX_TOOL_ROUNDS = 2;
 
     static final String PERSONA =
             "You are NewAl, a capable assistant that runs privately on the user's phone. "
@@ -83,6 +87,39 @@ final class ChatSession {
         return q.replaceAll("\\s+", " ").trim();
     }
 
+    private static final String[][] CURRENCIES = {
+            {"USD", "دولار|دولارات|الدولار|\\$|usd|dollars?"}, {"EUR", "يورو|اليورو|€|eur|euros?"},
+            {"TRY", "ليره تركيه|الليره التركيه|تركي|تركيه|try|turkish lira"}, {"SYP", "ليره سوريه|الليره السوريه|سوري|syp|syrian pound"},
+            {"LBP", "ليره لبنانيه|لبناني|lbp"}, {"SAR", "ريال سعودي|سعودي|ريال|sar|riyal"}, {"AED", "درهم|درهم اماراتي|اماراتي|aed|dirham"},
+            {"JOD", "دينار اردني|اردني|jod"}, {"IQD", "دينار عراقي|عراقي|iqd"}, {"KWD", "دينار كويتي|كويتي|kwd"},
+            {"QAR", "ريال قطري|قطري|qar"}, {"EGP", "جنيه مصري|مصري|جنيه|egp"}, {"GBP", "استرليني|باوند|جنيه استرليني|gbp|pounds?"},
+            {"JPY", "ين|yen|jpy"}, {"CNY", "يوان|yuan|cny"}, {"RUB", "روبل|ruble|rub"}, {"CAD", "دولار كندي|كندي|cad"},
+            {"SEK", "كرون سويدي|سويدي|sek"}, {"CHF", "فرنك سويسري|فرنك|chf"}};
+    private static final Pattern CONVERT = Pattern.compile("حول|حولي|كم|يساوي|سعر|بكم|صرف|قديش|convert|exchange|how much|in|to|=",
+            Pattern.CASE_INSENSITIVE | Pattern.UNICODE_CASE);
+
+    /** "حول 250 دولار لليرة التركية" → {"250", "USD", "TRY"}; null when it is not a conversion question. */
+    static String[] currencyQuery(String question) {
+        String q = " " + ArabicText.norm(question).replaceAll("[?!.,؟]", " ") + " ";
+        if (!CONVERT.matcher(q).find()) return null;
+        java.util.TreeMap<Integer, String> found = new java.util.TreeMap<>();
+        for (String[] c : CURRENCIES) {
+            // Longer names first inside each alternation, so "ليره تركيه" wins over a bare "ليره".
+            Matcher m = Pattern.compile("(?<![\\p{L}])(?:ب|بال|لل|ل|ال|و)?(?:" + c[1] + ")(?![\\p{L}])", Pattern.CASE_INSENSITIVE | Pattern.UNICODE_CASE).matcher(q);
+            if (m.find() && !found.containsValue(c[0])) found.put(m.start(), c[0]);
+        }
+        if (!found.containsValue("TRY") && !found.containsValue("SYP") && !found.containsValue("LBP")
+                && Pattern.compile("(?<![\\p{L}])(?:ب|بال|لل|ل|ال)?ليره(?![\\p{L}])").matcher(q).find()) {
+            Matcher m = Pattern.compile("ليره").matcher(q);
+            if (m.find()) found.put(m.start(), "SYP");
+        }
+        if (found.size() < 2) return null;
+        java.util.Iterator<String> it = found.values().iterator();
+        String from = it.next(), to = it.next();
+        Matcher n = Pattern.compile("(\\d+(?:\\.\\d+)?)").matcher(q);
+        return new String[]{n.find() ? n.group(1) : "1", from, to};
+    }
+
     static boolean timeSensitive(String question) {
         return TIME_SENSITIVE.matcher(ArabicText.norm(question)).find();
     }
@@ -98,11 +135,12 @@ final class ChatSession {
     /** {@code history} are the conversation turns, the last one being the user's new message. */
     Reply run(List<ChatMessage> history, Options o, Listener listener) throws Exception {
         Reply reply = new Reply();
+        boolean grounded = false;
         List<ChatMessage> turns = new ArrayList<>();
         StringBuilder system = new StringBuilder(PERSONA);
         if (!o.date.isEmpty()) system.append(" Today is ").append(o.date).append('.');
         if (!o.extraSystem.isEmpty()) system.append("\n\n").append(o.extraSystem);
-        if (o.tools) system.append("\n\n").append(tools.systemBlock(o.xmlToolCalls));
+        if (o.tools) system.append("\n\n").append(o.lfmTools ? tools.lfmBlock() : tools.systemBlock(o.xmlToolCalls));
         turns.add(new ChatMessage(0, ChatMessage.ROLE_SYSTEM, system.toString(), 0));
         for (ChatMessage m : history) if (m.role == ChatMessage.ROLE_USER || m.role == ChatMessage.ROLE_ASSISTANT) turns.add(m);
 
@@ -114,6 +152,18 @@ final class ChatSession {
             for (String solved : Calculator.findAndSolve(last.text)) {
                 facts.append("calculator: ").append(solved).append('\n');
                 reply.toolsUsed.add("calculator");
+            }
+            String[] money = tools.online ? currencyQuery(last.text) : null;
+            if (money != null) {
+                ChatTools.Call c = new ChatTools.Call("currency", new org.json.JSONObject()
+                        .put("amount", Double.parseDouble(money[0])).put("from", money[1]).put("to", money[2]));
+                listener.onTool("currency", c.args.toString(), null);
+                String conv = tools.run(c, reply.sources);
+                listener.onTool("currency", c.args.toString(), conv);
+                if (!conv.startsWith("error") && !conv.startsWith("unknown")) {
+                    facts.append("currency tool: ").append(conv).append('\n');
+                    reply.toolsUsed.add("currency");
+                }
             }
             String city = tools.online ? weatherCity(last.text) : null;
             if (city != null) {
@@ -127,7 +177,7 @@ final class ChatSession {
                     reply.toolsUsed.add("weather");
                 } else city = null;
             }
-            if (city == null && tools.online && (o.web || timeSensitive(last.text))) {
+            if (city == null && money == null && tools.online && (o.web || timeSensitive(last.text))) {
                 String query = searchQuery(last.text);
                 listener.onTool("web_search", query, null);
                 String found;
@@ -142,11 +192,19 @@ final class ChatSession {
                     facts.append("<web_results>\n").append(found).append("\n</web_results>\n");
                 }
             }
-            if (facts.length() > 0) {
+            grounded = facts.length() > 0;
+            String language = WebTools.arabic(last.text) ? " Reply in Arabic." : "";
+            if (grounded) {
                 turns.set(turns.size() - 1, new ChatMessage(last.id, ChatMessage.ROLE_USER, last.text + "\n\n" + facts
-                        + "Answer the question above using this information (cite web results as [n]).", last.timeMs));
+                        + "Answer the question above now using this information (cite web results as [n])." + language, last.timeMs));
+            } else if (!language.isEmpty()) {
+                turns.set(turns.size() - 1, new ChatMessage(last.id, ChatMessage.ROLE_USER, last.text + "\n\n(" + language.trim() + ")", last.timeMs));
             }
         }
+        // With the facts already in the question one tool round is plenty.
+        int maxRounds = grounded ? 1 : MAX_TOOL_ROUNDS;
+        java.util.Set<String> seen = new java.util.HashSet<>();
+        boolean finalRound = false;
 
         for (int round = 0; ; round++) {
             if (cancelled) break;
@@ -160,25 +218,37 @@ final class ChatSession {
             String text = r.text;
             String[] parts = split(text);
             if (!parts[0].isEmpty()) reply.thinking = parts[0];
-            List<ChatTools.Call> calls = o.tools && round < MAX_TOOL_ROUNDS ? ChatTools.parseCalls(text) : new ArrayList<>();
+            List<ChatTools.Call> calls = o.tools && !finalRound ? ChatTools.parseCalls(text) : new ArrayList<>();
+            // A call already made (same tool, same arguments) is not run again: the model has that result.
+            List<ChatTools.Call> fresh = new ArrayList<>();
+            for (ChatTools.Call c : calls) if (seen.add(c.toString())) fresh.add(c);
             if (calls.isEmpty() || cancelled) {
                 reply.answer = parts[1].trim();
                 listener.onUpdate(reply.thinking, reply.answer);
                 break;
             }
+            if (fresh.isEmpty() || round >= maxRounds) {
+                // Enough tools: one last pass that must answer from what it has.
+                turns.add(new ChatMessage(0, ChatMessage.ROLE_ASSISTANT, stripThinking(text).trim(), 0));
+                turns.add(new ChatMessage(0, ChatMessage.ROLE_USER, "Answer my question now with the information you already have. Do not call any tool."
+                        + (WebTools.arabic(last.text) ? " Reply in Arabic." : ""), 0));
+                finalRound = true;
+                continue;
+            }
             StringBuilder responses = new StringBuilder();
-            for (ChatTools.Call c : calls) {
+            for (ChatTools.Call c : fresh) {
                 listener.onTool(c.name, c.args.toString(), null);
                 String result = tools.run(c, reply.sources);
                 if (result.length() > 6000) result = result.substring(0, 6000) + "…";
                 reply.toolsUsed.add(c.name);
                 listener.onTool(c.name, c.args.toString(), result);
-                responses.append(responses.length() == 0 ? "" : "\n").append("<tool_response>\n").append(result).append("\n</tool_response>");
+                if (o.lfmTools) responses.append(responses.length() == 0 ? "" : "\n").append(result);
+                else responses.append(responses.length() == 0 ? "" : "\n").append("<tool_response>\n").append(result).append("\n</tool_response>");
             }
             // The call stays in the conversation as the assistant's turn; results come back as a user turn,
             // which is how Qwen's templates render tool messages.
             turns.add(new ChatMessage(0, ChatMessage.ROLE_ASSISTANT, stripThinking(text).trim(), 0));
-            turns.add(new ChatMessage(0, ChatMessage.ROLE_USER, responses.toString(), 0));
+            turns.add(new ChatMessage(0, o.lfmTools ? ChatMessage.ROLE_TOOL : ChatMessage.ROLE_USER, responses.toString(), 0));
         }
         return reply;
     }
@@ -200,6 +270,8 @@ final class ChatSession {
             rest = "";
         }
         rest = rest.replaceAll("(?s)<tool_call>.*?(?:</tool_call>|$)", "");
+        rest = ChatTools.PY_CALLS.matcher(rest).replaceAll("");
+        rest = rest.replaceAll("(?s)\\[(?:" + ChatTools.TOOL_NAMES + ")\\([^\\]]*$", "");
         for (String tag : HELD) {
             for (int n = tag.length() - 1; n > 0; n--) {
                 if (rest.endsWith(tag.substring(0, n))) { rest = rest.substring(0, rest.length() - n); break; }

@@ -44,7 +44,7 @@ public final class LlamaEngine implements AutoCloseable {
         StringBuilder encoded = new StringBuilder();
         for (ChatMessage m : turns) {
             final String role = m.role == ChatMessage.ROLE_USER ? "user"
-                    : m.role == ChatMessage.ROLE_SYSTEM ? "system" : "assistant";
+                    : m.role == ChatMessage.ROLE_SYSTEM ? "system" : m.role == ChatMessage.ROLE_TOOL ? "tool" : "assistant";
             encoded.append(role).append(FIELD_SEP).append(m.text).append(RECORD_SEP);
         }
         StreamCollector collector = new StreamCollector(listener);
@@ -126,6 +126,15 @@ public final class LlamaEngine implements AutoCloseable {
     /** Qwen3.5 / Qwen3-Coder templates call tools in XML; Qwen2.5 / Qwen3 in JSON. */
     public boolean xmlToolCalls() { return chatTemplate().contains("<function="); }
 
+    /** How this model calls tools, read from its template: "xml" (Qwen3.5), "lfm" (LFM2 / LFM2.5) or "json". */
+    public String toolStyle() {
+        String t = chatTemplate();
+        return t.contains("<function=") ? "xml" : t.contains("<|tool_call_start|>") ? "lfm" : "json";
+    }
+
+    /** CPU threads for generation and for prompt reading (see {@code MainActivity.tuneSpeed}). */
+    public void setThreads(int generation, int prompt) { long h = handle; if (h != 0) nativeSetThreads(h, generation, prompt); }
+
     public void resetContext() { long h = handle; if (h != 0) nativeReset(h); }
     public void cancel() { long h = handle; if (h != 0) nativeCancel(h); }
 
@@ -142,6 +151,7 @@ public final class LlamaEngine implements AutoCloseable {
                                          StreamCollector sink);
     private native int nativeContextSize(long handle);
     private native String nativeChatTemplate(long handle);
+    private native void nativeSetThreads(long handle, int generation, int prompt);
     private native void nativeCancel(long handle);
     private native void nativeReset(long handle);
     private native void nativeFree(long handle);
