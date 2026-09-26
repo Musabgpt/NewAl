@@ -65,7 +65,19 @@ jobs:
           $exe = Get-ChildItem gcmx -Recurse -Filter git-credential-manager.exe | Select-Object -First 1
           if ($exe) { New-Item -ItemType Directory -Force bin/gcm | Out-Null; Copy-Item "$($exe.DirectoryName)/*" bin/gcm -Recurse -Force }
           if (-not (Test-Path bin/gcm/git-credential-manager.exe)) { Get-ChildItem gcmx -Recurse | Select-Object -First 30 FullName; throw "git-credential-manager.exe missing" }
+          # Visual C++ runtime next to llama-server (app-local deployment): many PCs do not have the
+          # VC++ Redistributable installed, and without it the engine cannot start.
+          foreach ($dll in "vcruntime140.dll", "vcruntime140_1.dll", "msvcp140.dll", "msvcp140_1.dll", "msvcp140_2.dll",
+                           "msvcp140_atomic_wait.dll", "msvcp140_codecvt_ids.dll", "concrt140.dll", "vcomp140.dll") {
+            $src = Join-Path $env:SystemRoot "System32\$dll"
+            if (Test-Path $src) { Copy-Item $src bin -Force }
+          }
           Get-ChildItem bin | Format-Table Name, Length
+
+      - name: Check every DLL the engine needs is shipped or part of Windows
+        run: |
+          python -m pip install -q pefile
+          python tools/check_dlls.py bin
 
       - name: Check the engine runs a model
         run: |

@@ -47,10 +47,17 @@ def reset_dll_search():
             ctypes.windll.kernel32.SetDllDirectoryW(None)
         except Exception:  # noqa: BLE001
             pass
+    if config.IS_WINDOWS:
+        try:
+            import ctypes
+            # No Windows "System Error" popups from engine processes: a failure is reported in the chat instead.
+            ctypes.windll.kernel32.SetErrorMode(0x0001 | 0x8000)   # SEM_FAILCRITICALERRORS | SEM_NOOPENFILEERRORBOX
+        except Exception:  # noqa: BLE001
+            pass
 
 
 EXIT_CODES = {
-    0xC0000135: "ملف DLL ناقص (غالباً Microsoft Visual C++ Redistributable)",
+    0xC0000135: "ملف DLL ناقص (Microsoft Visual C++ Redistributable): أعد تثبيت NewAl بآخر نسخة",
     0xC0000139: "نسخة DLL غير متوافقة",
     0xC000001D: "المعالج لا يدعم تعليمات في هذه النسخة",
     0xC0000005: "خطأ ذاكرة داخل المحرك",
