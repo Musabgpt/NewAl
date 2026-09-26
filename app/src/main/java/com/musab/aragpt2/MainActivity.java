@@ -40,7 +40,10 @@ public class MainActivity extends AppCompatActivity {
     private static final String PREFS="h33_prefs", PREF_MODEL_URI="model_uri", PREF_MODEL_NAME="model_name", PREF_MODEL_LOCAL_PATH="model_local_path", PREF_MODEL_SIZE="model_local_size";
     private static final String PREF_AGENT_MODE="agent_mode", PREF_AGENT_TOKEN="agent_token", PREF_AGENT_PROFILE="agent_profile",
             PREF_MAX_ATTEMPTS="max_attempts", PREF_TIMEOUT_S="exec_timeout_s", PREF_GRAMMAR="grammar", PREF_AUTO_TEST="auto_test",
-            PREF_ROLE="role_path_", PREF_ORCHESTRATE="orchestrate", PREF_LANG_SUMMARY="lang_summary";
+            PREF_ROLE="role_path_", PREF_ORCHESTRATE="orchestrate", PREF_LANG_SUMMARY="lang_summary",
+            PREF_SPECULATIVE="speculative", PREF_DRAFT="draft_path";
+    /** Draft tokens per step; measured best on CPU for a 3B model with a 0.5B draft. */
+    private static final int DRAFT_TOKENS=3;
     /** Model roles: each may use its own GGUF; models are loaded one at a time (sequentially). */
     private static final String ROLE_MANAGER="manager", ROLE_CODER="coder", ROLE_LANGUAGE="language";
     private static final int CONTEXT_TOKENS=4096, MAX_NEW_TOKENS=256, TOP_K=40, AGENT_PORT=47811, REQ_TERMUX=41, REQ_NOTIFY=42;
@@ -54,6 +57,8 @@ public class MainActivity extends AppCompatActivity {
     private ProjectWorkspace workspace;
     private boolean agentMode;
     private volatile String loadedPath;
+    /** Several models stay loaded together while RAM allows (manager, coder, language, draft). */
+    private ModelPool<LlamaEngine> pool;
     private DeviceController device;
     private ExperienceStore experience;
     private AgentProfile selectedAgent=AgentProfile.AUTO;
@@ -81,6 +86,11 @@ public class MainActivity extends AppCompatActivity {
         prefs=getSharedPreferences(PREFS,MODE_PRIVATE);
         historyStore=new ChatHistoryStore(this);
         device=new DeviceController(this);
+        pool=new ModelPool<>(this::newEngine,this::availableRam);
+        pool.setEvictListener((path,evicted)->{
+            for(LlamaEngine e:pool.engines())if(e.draft()==evicted)e.setDraft(null,DRAFT_TOKENS);
+            if(engine==evicted)engine=null;
+        });
         experience=new ExperienceStore(new File(getFilesDir(),"learning"));
         memoryManager=new MemoryManager(historyStore);
         rootView=findViewById(R.id.rootView);
@@ -301,9 +311,7 @@ public class MainActivity extends AppCompatActivity {
     private void loadModelFromLocalFileInternal(File file,String displayName,String sourceUri,long expectedSize){
         try{
             if(!isValidGgufFile(file))throw new IllegalStateException("ملف GGUF غير صالح أو تالف");
-            if(engine!=null){try{engine.close();}catch(Exception ignored){}engine=null;}
-            int threads=Math.max(2,Math.min(6,Runtime.getRuntime().availableProcessors()));
-            LlamaEngine loaded=new LlamaEngine(getApplicationContext(),file.getAbsolutePath(),CONTEXT_TOKENS,threads);
+            LlamaEngine loaded=pool.get(file.getAbsolutePath(),java.util.Collections.emptyList());
             engine=loaded;
             loadedPath=file.getAbsolutePath();
             prefs.edit().putString(PREF_MODEL_LOCAL_PATH,file.getAbsolutePath()).putString(PREF_MODEL_NAME,displayName).putString(PREF_MODEL_URI,sourceUri).putLong(PREF_MODEL_SIZE,file.length()>0?file.length():expectedSize).apply();
@@ -333,7 +341,7 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private void onSendOrStopClicked(){
-        if(generating){AgentLoop loop=agentLoop;if(loop!=null)loop.cancel();else if(engine!=null)engine.cancel();return;}
+        if(generating){AgentLoop loop=agentLoop;if(loop!=null)loop.cancel();for(LlamaEngine e:pool.engines())e.cancel();return;}
         String question=inputBox.getText().toString().trim();
         if(question.isEmpty()||engine==null)return;
         inputBox.setText("");
@@ -467,7 +475,7 @@ public class MainActivity extends AppCompatActivity {
         if(ggufs==null)ggufs=new File[0];
         final File[] files=ggufs;
         String[] roles={ROLE_MANAGER,ROLE_CODER,ROLE_LANGUAGE};
-        String[] labels=new String[roles.length+2];
+        String[] labels=new String[roles.length+4];
         for(int i=0;i<roles.length;i++){
             String p=prefs.getString(PREF_ROLE+roles[i],"");
             labels[i]=(ROLE_MANAGER.equals(roles[i])?"🧭 ":ROLE_CODER.equals(roles[i])?"💻 ":"🗣 ")+roleTitle(roles[i])+": "+(p.isEmpty()?"النموذج الأساسي":new File(p).getName());
@@ -475,9 +483,28 @@ public class MainActivity extends AppCompatActivity {
         boolean on=prefs.getBoolean(PREF_ORCHESTRATE,false);
         labels[3]=(on?"✅":"⬜")+" وضع الفريق: المدير يوجّه، والمختص ينفّذ، ونموذج اللغة يجيب";
         labels[4]=(prefs.getBoolean(PREF_LANG_SUMMARY,true)?"✅":"⬜")+" ملخص بلغتك من نموذج اللغة بعد كل برنامج";
-        new AlertDialog.Builder(this).setTitle("🧠 نماذج الفريق (تعمل بالتتابع)").setItems(labels,(d,which)->{
+        String draft=prefs.getString(PREF_DRAFT,"");
+        labels[5]=(prefs.getBoolean(PREF_SPECULATIVE,true)?"✅":"⬜")+" ⚡ تسريع تخميني بنموذج مساعد صغير: "
+                +(draft.isEmpty()?"تلقائي (ملف 0.5B)":new File(draft).getName())+" — يعمل مع نموذج 3B أو أكبر";
+        StringBuilder live=new StringBuilder("🗂 محمّل الآن معاً: ");
+        for(String p:pool.loadedPaths())live.append(new File(p).getName()).append("  ");
+        labels[6]=pool.loadedPaths().isEmpty()?"🗂 لا يوجد نموذج محمّل":live.toString();
+        new AlertDialog.Builder(this).setTitle("🧠 نماذج الفريق (تبقى محمّلة معاً حسب الذاكرة)").setItems(labels,(d,which)->{
             if(which==3){prefs.edit().putBoolean(PREF_ORCHESTRATE,!on).apply();buildAgentChips();showModelRoles();return;}
             if(which==4){prefs.edit().putBoolean(PREF_LANG_SUMMARY,!prefs.getBoolean(PREF_LANG_SUMMARY,true)).apply();showModelRoles();return;}
+            if(which==6){showModelRoles();return;}
+            if(which==5){
+                String[] opts=new String[files.length+2];
+                opts[0]=prefs.getBoolean(PREF_SPECULATIVE,true)?"إيقاف التسريع":"تشغيل التسريع (تلقائي)";
+                opts[1]="اختيار تلقائي للنموذج المساعد";
+                for(int i=0;i<files.length;i++)opts[i+2]=files[i].getName();
+                new AlertDialog.Builder(this).setTitle("⚡ النموذج المساعد (نفس عائلة النموذج الرئيسي)").setItems(opts,(d3,o)->{
+                    if(o==0)prefs.edit().putBoolean(PREF_SPECULATIVE,!prefs.getBoolean(PREF_SPECULATIVE,true)).apply();
+                    else prefs.edit().putBoolean(PREF_SPECULATIVE,true).putString(PREF_DRAFT,o==1?"":files[o-2].getAbsolutePath()).apply();
+                    showModelRoles();
+                }).show();
+                return;
+            }
             String role=roles[which];
             String[] choices=new String[files.length+2];
             choices[0]="النموذج الأساسي";
@@ -808,7 +835,7 @@ public class MainActivity extends AppCompatActivity {
         GenerationResult r=engineForRole(ROLE_LANGUAGE).generate(turns,MAX_NEW_TOKENS*2,TEMPERATURE,TOP_K,0,live::append);
         live.end();
         String answer=cleanAssistantText(r.text);
-        return new AgentLoop.Outcome(AgentLoop.State.SUCCESS,answer.isEmpty()?"…":answer,null);
+        return new AgentLoop.Outcome(AgentLoop.State.SUCCESS,answer.isEmpty()?"…":answer,null,true);
     }
 
     private String languageSummary(String request,String outcome){
@@ -830,6 +857,7 @@ public class MainActivity extends AppCompatActivity {
         if(Build.VERSION.SDK_INT>=33&&checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS)!=android.content.pm.PackageManager.PERMISSION_GRANTED)
             requestPermissions(new String[]{android.Manifest.permission.POST_NOTIFICATIONS},REQ_NOTIFY);
         AgentService.start(this,userText==null?"متابعة المهمة":AgentLoop.tail(userText,200));
+        boolean[] shownInline={false};
         executor.execute(()->{
             if(userText!=null){
                 long userId=historyStore.append(ChatMessage.ROLE_USER,userText);long t=System.currentTimeMillis();
@@ -845,6 +873,7 @@ public class MainActivity extends AppCompatActivity {
                 live.persist=true;
                 AgentLoop.Outcome o=action.apply(loop);
                 live.end();
+                shownInline[0]=o.shownInline;
                 text=describe(o,loop,ws);
                 if(o.state==AgentLoop.State.SUCCESS&&o.interactiveCommand==null&&prefs.getBoolean(PREF_AUTO_TEST,false)
                         &&(loop.agent()==AgentProfile.CODER||loop.agent()==AgentProfile.ARCHITECT)&&!hasTests(ws)){
@@ -862,6 +891,11 @@ public class MainActivity extends AppCompatActivity {
                 text="❌ "+safeMessage(e);
             }finally{agentLoop=null;live.persist=false;}
             final String summary=text;
+            if(shownInline[0]){
+                AgentService.finish(getApplicationContext(),"✅ تم",AgentLoop.tail(summary,300));
+                runOnUiThread(()->{scrollToEnd();setGenerating(false);setWorking(false,"جاهز");});
+                return;
+            }
             AgentService.finish(getApplicationContext(),summary.startsWith("✅")?"✅ اكتملت المهمة":summary.startsWith("⚠️")?"⚠️ المهمة تحتاج تدخلك":"❌ فشلت المهمة",summary);
             long id=historyStore.append(ChatMessage.ROLE_RESULT,summary);long t=System.currentTimeMillis();
             runOnUiThread(()->{adapter.add(new ChatMessage(id,ChatMessage.ROLE_RESULT,summary,t));scrollToEnd();setGenerating(false);});
@@ -905,8 +939,8 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private void loadUserSkills(TermuxBridge b){
+        if(!b.isConnected())return; // never wait for Termux just to read skills
         try{
-            b.ensureConnected(8000);
             org.json.JSONArray a=b.userSkills();
             List<Skills.Skill> list=new java.util.ArrayList<>();
             for(int i=0;i<a.length();i++){org.json.JSONObject o=a.getJSONObject(i);list.add(Skills.fromMarkdown(o.getString("id"),o.getString("markdown")));}
@@ -922,20 +956,56 @@ public class MainActivity extends AppCompatActivity {
     private LlamaEngine engineForRole(String role){
         String path=prefs.getString(PREF_ROLE+role,"");
         if(path.isEmpty()||!new File(path).isFile())path=prefs.getString(PREF_MODEL_LOCAL_PATH,null);
-        LlamaEngine current=engine;
-        if(path==null||(current!=null&&path.equals(loadedPath)))return current;
-        String name=new File(path).getName();
-        runOnUiThread(()->setWorking(true,"🔄 تبديل النموذج ("+roleTitle(role)+"): "+name));
-        long t=System.nanoTime();
-        engine=null;
-        if(current!=null)current.close();
+        if(path==null)return engine;
+        String draftPath=ROLE_LANGUAGE.equals(role)?null:draftFor(path);
+        java.util.List<String> keep=draftPath==null?java.util.Collections.singletonList(path):java.util.Arrays.asList(path,draftPath);
+        try{
+            boolean cold=!pool.isLoaded(path);
+            String name=new File(path).getName();
+            long t=System.nanoTime();
+            if(cold)runOnUiThread(()->setWorking(true,"🔄 تحميل ("+roleTitle(role)+"): "+name));
+            LlamaEngine target=pool.get(path,keep);
+            // Speculative decoding: a small same-family model drafts, the big one verifies.
+            LlamaEngine d=draftPath==null?null:pool.get(draftPath,keep);
+            target.setDraft(d,DRAFT_TOKENS);
+            engine=target;
+            loadedPath=path;
+            if(cold){
+                long ms=(System.nanoTime()-t)/1_000_000;
+                runOnUiThread(()->setWorking(true,"🧠 "+roleTitle(role)+": "+name+(d==null?"":" + ⚡ مساعد")+" • "+ms+"ms • محمّل: "+pool.loadedPaths().size()));
+            }
+            return target;
+        }catch(Exception e){
+            throw new IllegalStateException("تعذر تحميل النموذج: "+safeMessage(e),e);
+        }
+    }
+
+    private LlamaEngine newEngine(String path){
         int threads=Math.max(2,Math.min(6,Runtime.getRuntime().availableProcessors()));
-        LlamaEngine next=new LlamaEngine(getApplicationContext(),path,CONTEXT_TOKENS,threads);
-        engine=next;
-        loadedPath=path;
-        long ms=(System.nanoTime()-t)/1_000_000;
-        runOnUiThread(()->setWorking(true,"🧠 "+roleTitle(role)+": "+name+" • تحميل "+ms+"ms"));
-        return next;
+        return new LlamaEngine(getApplicationContext(),path,CONTEXT_TOKENS,threads);
+    }
+
+    private long availableRam(){
+        android.app.ActivityManager am=(android.app.ActivityManager)getSystemService(ACTIVITY_SERVICE);
+        android.app.ActivityManager.MemoryInfo mi=new android.app.ActivityManager.MemoryInfo();
+        if(am!=null)am.getMemoryInfo(mi);
+        return mi.availMem;
+    }
+
+    /**
+     * Draft model for speculative decoding, or null. Only worth it when the main model is at
+     * least 3x the draft's size (measured: ~1.2x faster for 3B with a 0.5B draft, slower for 1.5B).
+     */
+    private String draftFor(String targetPath){
+        if(!prefs.getBoolean(PREF_SPECULATIVE,true))return null;
+        String d=prefs.getString(PREF_DRAFT,"");
+        if(d.isEmpty()){
+            File dir=getExternalFilesDir("models");
+            File[] small=dir==null?null:dir.listFiles((x,n)->n.toLowerCase(java.util.Locale.ROOT).contains("0.5b")&&n.endsWith(".gguf"));
+            if(small!=null)for(File f:small)if(d.isEmpty()||f.length()<new File(d).length())d=f.getAbsolutePath();
+        }
+        if(d.isEmpty()||d.equals(targetPath)||!new File(d).isFile())return null;
+        return new File(targetPath).length()>=3*new File(d).length()?d:null;
     }
 
     private static String roleTitle(String role){
@@ -954,7 +1024,7 @@ public class MainActivity extends AppCompatActivity {
                 String grammar=codeGrammar&&prefs.getBoolean(PREF_GRAMMAR,true)?AgentLoop.OUTPUT_GRAMMAR:null;
                 return engineForRole(role.get()).generate(turns,0,0f,1,LlamaEngine.FLAG_RAW,grammar,l);
             }
-            @Override public void cancel(){LlamaEngine e=engine;if(e!=null)e.cancel();}
+            @Override public void cancel(){for(LlamaEngine e:pool.engines())e.cancel();}
             @Override public int contextTokens(){LlamaEngine e=engine;return e==null?CONTEXT_TOKENS:e.contextTokens();}
         };
     }
@@ -974,8 +1044,9 @@ public class MainActivity extends AppCompatActivity {
         @Override public void onMetrics(String line){
             try{
                 org.json.JSONObject m=new org.json.JSONObject(line);
-                String s=String.format(java.util.Locale.US,"#%d • أول token %sms • أول كتابة %sms • تشغيل %sms • محاولة كاملة %sms",
-                        m.optInt("attempt"),m.opt("time_to_first_token_ms"),m.opt("time_to_first_file_write_ms"),m.opt("exec_execution_ms"),m.opt("iteration_ms"));
+                String s=String.format(java.util.Locale.US,"#%d • أول token %sms • %s tok/s • أول كتابة %sms • تشغيل %sms • محاولة كاملة %sms",
+                        m.optInt("attempt"),m.opt("time_to_first_token_ms"),m.opt("tokens_per_s"),m.opt("time_to_first_file_write_ms"),m.opt("exec_execution_ms"),m.opt("iteration_ms"))
+                        +(m.optInt("draft_tokens")>0?String.format(java.util.Locale.US," • ⚡ قبول %d%%",100*m.optInt("draft_accepted")/m.optInt("draft_tokens")):"");
                 runOnUiThread(()->status.setText(s));
             }catch(org.json.JSONException ignored){}
         }
@@ -1064,10 +1135,10 @@ public class MainActivity extends AppCompatActivity {
 
     private void clearChat(){
         AgentLoop loop=agentLoop;if(loop!=null)loop.cancel();
-        if(generating&&engine!=null)engine.cancel();
+        if(generating)for(LlamaEngine e:pool.engines())e.cancel();
         setGenerating(true);
         executor.execute(()->{
-            historyStore.clear();if(engine!=null)engine.resetContext();
+            historyStore.clear();for(LlamaEngine e:pool.engines())e.resetContext();
             // In agent mode a cleared chat also starts a fresh project; old projects stay on disk.
             if(agentMode){try{workspace=ProjectWorkspace.create(new File(getFilesDir(),"projects"));}catch(Exception ignored){}}
             runOnUiThread(()->{adapter.setAll(java.util.Collections.emptyList());setGenerating(false);setWorking(false,agentMode?"مشروع جديد — المحادثة والذاكرة مُسحت":"تم مسح المحادثة والذاكرة");});
@@ -1096,8 +1167,9 @@ public class MainActivity extends AppCompatActivity {
     @Override protected void onDestroy(){
         AgentLoop loop=agentLoop;if(loop!=null)loop.cancel();
         TermuxBridge b=bridge;if(b!=null)b.close();
-        LlamaEngine toClose=engine;engine=null;if(toClose!=null)toClose.cancel();
-        if(toClose!=null)executor.execute(()->{try{toClose.close();}catch(Exception ignored){}});
+        engine=null;
+        for(LlamaEngine e:pool.engines())e.cancel();
+        executor.execute(pool::closeAll);
         executor.shutdown();super.onDestroy();
     }
 }

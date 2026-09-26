@@ -46,9 +46,13 @@ public final class AgentLoop {
         public final String message;
         /** Set when the program works but needs a person at the keyboard: run it in a Termux session. */
         public final String interactiveCommand;
+        /** The answer was already streamed into the chat, so no separate result card is needed. */
+        public final boolean shownInline;
         Outcome(State state, String message) { this(state, message, null); }
-        Outcome(State state, String message, String interactiveCommand) {
+        Outcome(State state, String message, String interactiveCommand) { this(state, message, interactiveCommand, false); }
+        Outcome(State state, String message, String interactiveCommand, boolean shownInline) {
             this.state = state; this.message = message; this.interactiveCommand = interactiveCommand;
+            this.shownInline = shownInline;
         }
     }
 
@@ -114,6 +118,8 @@ public final class AgentLoop {
     public Model planner;
     private String category = "general";
     private String pendingFixSignature, pendingFixText;
+    /** Only new tasks teach the experience store; reruns and resumes would count twice. */
+    private boolean learning;
     private Skills.Skill skill;
     private String plan = "";
     private volatile boolean cancelled;
@@ -155,6 +161,7 @@ public final class AgentLoop {
         }
         ws.agentId = agent.id;
         ws.skillId = skill == null ? "" : skill.id;
+        learning = true;
         ws.request = request;
         ws.stdinInput = null;
         ws.attempt = 0;
@@ -456,6 +463,10 @@ public final class AgentLoop {
             put(metrics, "generated_tokens", r.generatedTokens);
             put(metrics, "tokens_per_s", Math.round(r.tokensPerSecond * 10) / 10.0);
             put(metrics, "stop_reason", r.stopReason);
+            if (r.draftedTokens > 0) {
+                put(metrics, "draft_tokens", r.draftedTokens);
+                put(metrics, "draft_accepted", r.acceptedTokens);
+            }
         }
         if (g.firstWriteNanos > 0) put(metrics, "time_to_first_file_write_ms", (g.firstWriteNanos - g.startNanos) / 1_000_000);
         put(metrics, "file_write_ms", g.writeNanos / 1_000_000.0);
@@ -923,7 +934,7 @@ public final class AgentLoop {
 
     /** Turns the outcome into experience: reward for the strategy, remembered fix, solved example. */
     private void learn(State state) {
-        if (experience == null || ws.request.isEmpty() || cancelled) return;
+        if (experience == null || !learning || ws.request.isEmpty() || cancelled) return;
         boolean success = state == State.SUCCESS;
         experience.reward(category, agent.id, ExperienceStore.reward(success, Math.max(1, ws.attempt)));
         if (success && pendingFixSignature != null && pendingFixText != null) {

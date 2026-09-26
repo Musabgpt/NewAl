@@ -14,6 +14,8 @@ public final class GenerationResult {
     public final long totalMs;
     public final int stopReason;
     public final int reusedPromptTokens;
+    /** Speculative decoding: tokens the draft model proposed / the main model accepted. */
+    public final int draftedTokens, acceptedTokens;
 
     public GenerationResult(String text, int promptTokens, int generatedTokens,
                             long firstTokenMs, double tokensPerSecond, long totalMs) {
@@ -22,6 +24,11 @@ public final class GenerationResult {
 
     public GenerationResult(String text, int promptTokens, int generatedTokens, long firstTokenMs,
                             double tokensPerSecond, long totalMs, int stopReason, int reusedPromptTokens) {
+        this(text, promptTokens, generatedTokens, firstTokenMs, tokensPerSecond, totalMs, stopReason, reusedPromptTokens, 0, 0);
+    }
+
+    public GenerationResult(String text, int promptTokens, int generatedTokens, long firstTokenMs, double tokensPerSecond,
+                            long totalMs, int stopReason, int reusedPromptTokens, int draftedTokens, int acceptedTokens) {
         this.text = text == null ? "" : text;
         this.promptTokens = promptTokens;
         this.generatedTokens = generatedTokens;
@@ -30,6 +37,8 @@ public final class GenerationResult {
         this.totalMs = totalMs;
         this.stopReason = stopReason;
         this.reusedPromptTokens = reusedPromptTokens;
+        this.draftedTokens = draftedTokens;
+        this.acceptedTokens = acceptedTokens;
     }
 
     /** True when the model finished its answer rather than being cut off. */

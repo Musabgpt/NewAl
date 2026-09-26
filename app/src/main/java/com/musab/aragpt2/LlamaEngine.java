@@ -12,6 +12,9 @@ public final class LlamaEngine implements AutoCloseable {
 
     static { System.loadLibrary("llama_bridge"); }
     private volatile long handle;
+    /** Small model with the same tokenizer that drafts tokens for this one (speculative decoding). */
+    private volatile LlamaEngine draft;
+    private volatile int draftTokens = 6;
 
     public LlamaEngine(Context context, String modelPath, int contextTokens, int threads) {
         String nativeLibDir = context.getApplicationInfo().nativeLibraryDir;
@@ -45,7 +48,10 @@ public final class LlamaEngine implements AutoCloseable {
             encoded.append(role).append(FIELD_SEP).append(m.text).append(RECORD_SEP);
         }
         StreamCollector collector = new StreamCollector(listener);
-        String packed = nativeGenerate(handle, encoded.toString(), maxNewTokens, temperature, topK, flags, grammar, collector);
+        LlamaEngine d = draft;
+        long draftHandle = d == null ? 0 : d.handle;
+        String packed = nativeGenerate(handle, encoded.toString(), maxNewTokens, temperature, topK, flags, grammar,
+                draftHandle, draftTokens, collector);
         collector.finish();
         if (collector.error != null) throw new IllegalStateException(collector.error.getMessage(), collector.error);
         return parseResult(collector.text.toString(), packed);
@@ -91,11 +97,25 @@ public final class LlamaEngine implements AutoCloseable {
                     text, Integer.parseInt(p[1]), Integer.parseInt(p[2]),
                     Long.parseLong(p[3]), Double.parseDouble(p[4]), Long.parseLong(p[5]),
                     p.length > 6 ? Integer.parseInt(p[6]) : GenerationResult.STOP_UNKNOWN,
-                    p.length > 7 ? Integer.parseInt(p[7]) : 0);
+                    p.length > 7 ? Integer.parseInt(p[7]) : 0,
+                    p.length > 8 ? Integer.parseInt(p[8]) : 0,
+                    p.length > 9 ? Integer.parseInt(p[9]) : 0);
         } catch (NumberFormatException e) {
             return new GenerationResult(text, 0, 0, -1, 0.0, 0);
         }
     }
+
+    /**
+     * Uses {@code d} (a small model with the same tokenizer, kept loaded at the same time) to
+     * draft {@code tokens} tokens per step for greedy generation. Output is unchanged; only faster
+     * when the draft guesses well. Pass null to turn it off.
+     */
+    public void setDraft(LlamaEngine d, int tokens) {
+        draft = d == this ? null : d;
+        draftTokens = Math.max(1, Math.min(16, tokens));
+    }
+
+    public LlamaEngine draft() { return draft; }
 
     /** Actual context window (the native side may fall back to a smaller one on low RAM). */
     public int contextTokens() { long h = handle; return h != 0 ? nativeContextSize(h) : 0; }
@@ -112,7 +132,8 @@ public final class LlamaEngine implements AutoCloseable {
 
     private native long nativeLoadModel(String modelPath, String nativeLibDir, int contextTokens, int threads);
     private native String nativeGenerate(long handle, String encodedTurns, int maxNewTokens, float temperature,
-                                         int topK, int flags, String grammar, StreamCollector sink);
+                                         int topK, int flags, String grammar, long draftHandle, int draftTokens,
+                                         StreamCollector sink);
     private native int nativeContextSize(long handle);
     private native void nativeCancel(long handle);
     private native void nativeReset(long handle);

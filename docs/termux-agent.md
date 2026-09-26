@@ -127,8 +127,26 @@ App info → ⋮ → Allow restricted settings.
 
 ## Model team (🧠)
 
-Each role (🧭 manager, 💻 coder, 🗣 language) can use its own GGUF. Only one model is in memory at a time: the
-app frees the current model before loading the next, so the team runs sequentially. In team mode:
+Each role (🧭 manager, 💻 coder, 🗣 language) can use its own GGUF. The models stay loaded together as long as the
+phone's free RAM allows (`ModelPool`). When memory is short, the least recently used model is unloaded, but never
+the one in use. Switching roles then costs no reload. The models run one after another, not in parallel.
+
+**Speculative decoding (⚡):** a small draft model (for example Qwen2.5-Coder 0.5B) proposes a few tokens, and the
+main model checks them all in one pass. The output is identical to the main model alone, because greedy
+verification keeps only tokens the main model would have picked. It is used only when:
+- sampling is greedy,
+- both models share the same vocabulary, and
+- the main model is at least 3× larger than the draft.
+
+Measured on CPU:
+| Main model | Draft | Speed |
+|---|---|---|
+| 3B | 0.5B, k=3 | about +22% |
+| 1.5B | 0.5B | no gain, so it is switched off automatically |
+
+The status line shows the acceptance rate.
+
+In team mode:
 1. The manager routes the request (`ROUTE: code|phone|explain|chat` plus up to 8 `PLAN:` lines).
 2. The specialist does the work.
 3. The language model answers or summarises in your language.

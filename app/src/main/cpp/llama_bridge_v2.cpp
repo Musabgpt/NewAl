@@ -276,9 +276,89 @@ bool emit(JNIEnv * env, jobject sink, jmethodID on_bytes, const char * data, siz
     env->DeleteLocalRef(arr);
     return !env->ExceptionCheck();
 }
+// ---------------------------------------------------------------- speculative decoding helpers
+
+llama_token argmax_token(const float * logits, int n_vocab) {
+    llama_token best = 0;
+    float best_logit = logits[0];
+    for (llama_token i = 1; i < n_vocab; ++i) {
+        if (logits[i] > best_logit) { best_logit = logits[i]; best = i; }
+    }
+    return best;
 }
 
+// True when the grammar allows this token next (the grammar state is not changed).
+bool grammar_allows(llama_sampler * grammar, llama_token token) {
+    llama_token_data single = {token, 1.0f, 0.0f};
+    llama_token_data_array one = {&single, 1, -1, false};
+    llama_sampler_apply(grammar, &one);
+    return !(std::isinf(single.logit) && single.logit < 0);
+}
+
+// Best token the grammar allows, or LLAMA_TOKEN_NULL when it allows nothing.
+llama_token grammar_best(llama_sampler * grammar, const float * logits, int n_vocab, std::vector<llama_token_data> & cand) {
+    cand.resize(static_cast<size_t>(n_vocab));
+    for (llama_token id = 0; id < n_vocab; ++id) cand[static_cast<size_t>(id)] = {id, logits[id], 0.0f};
+    llama_token_data_array all = {cand.data(), cand.size(), -1, false};
+    llama_sampler_apply(grammar, &all);
+    llama_token best = LLAMA_TOKEN_NULL;
+    float best_logit = -INFINITY;
+    for (size_t i = 0; i < all.size; ++i) {
+        if (all.data[i].logit > best_logit) { best_logit = all.data[i].logit; best = all.data[i].id; }
+    }
+    return best;
+}
+
+// Draft and target must use the same tokenizer for their tokens to be compared.
+bool same_vocab(const EngineHandle * a, const EngineHandle * b) {
+    const int n = llama_vocab_n_tokens(a->vocab);
+    if (n != llama_vocab_n_tokens(b->vocab)) return false;
+    const llama_token probes[] = {0, 1, 100, 1000, 5000, n / 2, n - 1000, n - 1};
+    for (llama_token t : probes) {
+        if (t < 0 || t >= n) continue;
+        const char * x = llama_vocab_get_text(a->vocab, t);
+        const char * y = llama_vocab_get_text(b->vocab, t);
+        if (!x || !y || std::strcmp(x, y) != 0) return false;
+    }
+    return true;
+}
+
+// Makes the draft's KV cache hold exactly `tokens` (reusing the common prefix).
+bool sync_kv(EngineHandle * d, const std::vector<llama_token> & tokens) {
+    size_t common = 0;
+    while (common < d->kv.size() && common < tokens.size() && d->kv[common] == tokens[common]) ++common;
+    auto * mem = llama_get_memory(d->ctx);
+    if (common < d->kv.size()) {
+        if (!llama_memory_seq_rm(mem, 0, static_cast<llama_pos>(common), -1)) {
+            llama_memory_clear(mem, true);
+            common = 0;
+        }
+        d->kv.resize(common);
+    }
+    for (size_t i = common; i < tokens.size(); i += static_cast<size_t>(d->n_batch)) {
+        const int n = static_cast<int>(std::min(tokens.size() - i, static_cast<size_t>(d->n_batch)));
+        auto batch = llama_batch_get_one(const_cast<llama_token *>(tokens.data() + i), n);
+        if (llama_decode(d->ctx, batch) != 0) {
+            llama_memory_clear(mem, true);
+            d->kv.clear();
+            return false;
+        }
+        d->kv.insert(d->kv.end(), tokens.begin() + static_cast<long>(i), tokens.begin() + static_cast<long>(i) + n);
+    }
+    return true;
+}
+
+bool decode_one(EngineHandle * h, llama_token t) {
+    llama_token one[1] = {t};
+    if (llama_decode(h->ctx, llama_batch_get_one(one, 1)) != 0) return false;
+    h->kv.push_back(t);
+    return true;
+}
+
+}  // namespace
+
 extern "C" {
+
 
 JNIEXPORT jlong JNICALL Java_com_musab_aragpt2_LlamaEngine_nativeLoadModel(
         JNIEnv * env, jobject, jstring jp, jstring, jint nc, jint nt) {
@@ -340,9 +420,14 @@ JNIEXPORT jlong JNICALL Java_com_musab_aragpt2_LlamaEngine_nativeLoadModel(
 // Generates a reply. Text streams to sink.onBytes(byte[]) as raw UTF-8 (a multi-byte
 // character may be split across calls; Java decodes incrementally). Returns only metrics.
 // max_tokens <= 0 means: until end of turn or the context is full.
+// Generates a reply. Text streams to sink.onBytes(byte[]) as raw UTF-8 (a multi-byte
+// character may be split across calls; Java decodes incrementally). Returns only metrics.
+// max_tokens <= 0 means: until end of turn or the context is full.
+// With a draft model (greedy decoding only), the draft proposes up to n_draft tokens and the
+// target verifies them in one batch: the output is exactly what the target alone would produce.
 JNIEXPORT jstring JNICALL Java_com_musab_aragpt2_LlamaEngine_nativeGenerate(
         JNIEnv * env, jobject, jlong hp, jstring jt, jint max_tokens, jfloat temp,
-        jint topk, jint flags, jstring jgrammar, jobject sink) {
+        jint topk, jint flags, jstring jgrammar, jlong draft_hp, jint n_draft, jobject sink) {
     auto * h = reinterpret_cast<EngineHandle *>(hp);
     if (!h || !h->ctx) { fail(env, "المحرك غير محمل"); return nullptr; }
 
@@ -361,6 +446,7 @@ JNIEXPORT jstring JNICALL Java_com_musab_aragpt2_LlamaEngine_nativeGenerate(
     const bool code_mode = (flags & FLAG_CODE_MODE) != 0;
     const bool raw = (flags & FLAG_RAW) != 0;
     const bool until_full = max_tokens <= 0;
+    const bool greedy = temp <= 0.01f;
     // Room kept for the answer when fitting the prompt.
     const int answer_room = until_full ? std::max(256, h->n_ctx / 4)
                                        : std::min(static_cast<int>(max_tokens), std::max(1, h->n_ctx - 32));
@@ -376,14 +462,21 @@ JNIEXPORT jstring JNICALL Java_com_musab_aragpt2_LlamaEngine_nativeGenerate(
     h->cancel = false;
     int reused = 0;
     if (!decode_prompt(h, prompt_tokens, reused)) { fail(env, "فشل llama_decode للـprompt"); return nullptr; }
-    LOGI("prompt tokens=%d reused=%d budget=%d", static_cast<int>(prompt_tokens.size()), reused, max_prompt_tokens);
+
+    auto * draft = reinterpret_cast<EngineHandle *>(draft_hp);
+    if (draft && (!greedy || !draft->ctx || draft == h || !same_vocab(h, draft) || draft->n_ctx < h->n_ctx)) {
+        LOGI("speculative decoding off for this call (greedy=%d)", greedy ? 1 : 0);
+        draft = nullptr;
+    }
+    const int k_draft = std::max(1, std::min(16, static_cast<int>(n_draft)));
+    LOGI("prompt tokens=%d reused=%d budget=%d draft=%s", static_cast<int>(prompt_tokens.size()), reused,
+         max_prompt_tokens, draft ? "on" : "off");
 
     auto sp = llama_sampler_chain_default_params();
     sp.no_perf = true;
     llama_sampler * sampler = llama_sampler_chain_init(sp);
     if (!sampler) { fail(env, "تعذر إنشاء sampler"); return nullptr; }
-
-    if (temp <= 0.01f) {
+    if (greedy) {
         llama_sampler_chain_add(sampler, llama_sampler_init_greedy());
     } else {
         llama_sampler_chain_add(sampler, llama_sampler_init_top_k(std::max(1, static_cast<int>(topk))));
@@ -393,7 +486,7 @@ JNIEXPORT jstring JNICALL Java_com_musab_aragpt2_LlamaEngine_nativeGenerate(
         llama_sampler_chain_add(sampler, llama_sampler_init_dist(LLAMA_DEFAULT_SEED));
     }
 
-    // Optional GBNF grammar that constrains the output format. Each sampled token is first
+    // Optional GBNF grammar that constrains the output format. Each chosen token is first
     // checked alone (cheap); only a rejected token triggers filtering of the whole vocabulary.
     llama_sampler * grammar = nullptr;
     if (jgrammar) {
@@ -413,69 +506,126 @@ JNIEXPORT jstring JNICALL Java_com_musab_aragpt2_LlamaEngine_nativeGenerate(
 
     std::string output;
     size_t emitted = 0;
-    int generated = 0;
+    int generated = 0, drafted = 0, accepted = 0;
     long long first_ms = -1;
     int stop_reason = STOP_MAX_TOKENS;
     const auto generation_start = std::chrono::steady_clock::now();
 
-    while (true) {
-        if (!until_full && generated >= max_tokens) { stop_reason = STOP_MAX_TOKENS; break; }
-        if (h->cancel.load()) { stop_reason = STOP_CANCELLED; break; }
-        if (static_cast<int>(h->kv.size()) >= h->n_ctx) { stop_reason = STOP_CONTEXT_FULL; break; }
+    // Greedy choice at batch index idx, respecting the grammar.
+    auto choose = [&](int idx) -> llama_token {
+        const float * logits = llama_get_logits_ith(h->ctx, idx);
+        llama_token t = argmax_token(logits, n_vocab);
+        if (grammar && !grammar_allows(grammar, t)) t = grammar_best(grammar, logits, n_vocab, candidates);
+        return t;
+    };
 
-        // llama_sampler_sample() already records the token in the chain (e.g. for penalties).
-        llama_token token = llama_sampler_sample(sampler, h->ctx, -1);
-        if (grammar) {
-            llama_token_data single = {token, 1.0f, 0.0f};
-            llama_token_data_array one = {&single, 1, -1, false};
-            llama_sampler_apply(grammar, &one);
-            if (std::isinf(single.logit) && single.logit < 0) {
-                const float * logits = llama_get_logits_ith(h->ctx, -1);
-                candidates.resize(static_cast<size_t>(n_vocab));
-                for (llama_token id = 0; id < n_vocab; ++id) candidates[static_cast<size_t>(id)] = {id, logits[id], 0.0f};
-                llama_token_data_array all = {candidates.data(), candidates.size(), -1, false};
-                llama_sampler_apply(grammar, &all);
-                llama_token best = LLAMA_TOKEN_NULL;
-                float best_logit = -INFINITY;
-                for (size_t i = 0; i < all.size; ++i) {
-                    if (all.data[i].logit > best_logit) { best_logit = all.data[i].logit; best = all.data[i].id; }
-                }
-                if (best == LLAMA_TOKEN_NULL) { stop_reason = STOP_EOG; break; }  // grammar allows nothing more
-                token = best;
-            }
-            llama_sampler_accept(grammar, token);
-        }
-        if (llama_vocab_is_eog(h->vocab, token)) { stop_reason = STOP_EOG; break; }
-
+    // Appends one chosen token to the answer. False (with stop_reason set) ends generation.
+    auto commit = [&](llama_token token) -> bool {
+        if (token == LLAMA_TOKEN_NULL) { stop_reason = STOP_EOG; return false; }  // grammar allows nothing more
+        if (grammar) llama_sampler_accept(grammar, token);
+        if (llama_vocab_is_eog(h->vocab, token)) { stop_reason = STOP_EOG; return false; }
         const size_t before = output.size();
         append_piece(h->vocab, token, output);
         ++generated;
         if (first_ms < 0) {
             first_ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - total_start).count();
         }
-
         size_t stop_len = 0;
         size_t stop_at = find_stop(output, before, stops, stop_len);
-        if (stop_at != std::string::npos) {
-            output.resize(stop_at);
-            stop_reason = STOP_STRING;
-            break;
-        }
+        if (stop_at != std::string::npos) { output.resize(stop_at); stop_reason = STOP_STRING; return false; }
         const size_t safe = output.size() - holdback(output, stops);
         if (safe > emitted) {
-            if (!emit(env, sink, on_bytes, output.data() + emitted, safe - emitted)) { stop_reason = STOP_CALLBACK; break; }
+            if (!emit(env, sink, on_bytes, output.data() + emitted, safe - emitted)) { stop_reason = STOP_CALLBACK; return false; }
             emitted = safe;
         }
+        return true;
+    };
 
-        llama_token one[1] = {token};
-        auto next = llama_batch_get_one(one, 1);
-        if (llama_decode(h->ctx, next) != 0) {
-            llama_memory_clear(llama_get_memory(h->ctx), true);
-            h->kv.clear();
-            stop_reason = STOP_DECODE_ERROR;
-            break;
+    auto limits_hit = [&]() -> bool {
+        if (!until_full && generated >= max_tokens) { stop_reason = STOP_MAX_TOKENS; return true; }
+        if (h->cancel.load()) { stop_reason = STOP_CANCELLED; return true; }
+        if (static_cast<int>(h->kv.size()) >= h->n_ctx) { stop_reason = STOP_CONTEXT_FULL; return true; }
+        return false;
+    };
+
+    auto decode_failed = [&]() {
+        llama_memory_clear(llama_get_memory(h->ctx), true);
+        h->kv.clear();
+        stop_reason = STOP_DECODE_ERROR;
+    };
+
+    if (!draft) {
+        while (!limits_hit()) {
+            llama_token token;
+            if (greedy) {
+                token = choose(-1);
+            } else {
+                // sample() already records the token in the chain (e.g. for penalties).
+                token = llama_sampler_sample(sampler, h->ctx, -1);
+                if (grammar && !grammar_allows(grammar, token)) {
+                    token = grammar_best(grammar, llama_get_logits_ith(h->ctx, -1), n_vocab, candidates);
+                }
+            }
+            if (!commit(token)) break;
+            if (!decode_one(h, token)) { decode_failed(); break; }
         }
-        h->kv.push_back(token);
+    } else {
+        std::vector<llama_token> drafts;
+        llama_batch batch = llama_batch_init(k_draft + 1, 0, 1);
+        llama_token cur = choose(-1);
+        while (!limits_hit()) {
+            if (!commit(cur)) break;
+            // 1. Draft proposes up to k tokens following `cur`.
+            int k = std::min(k_draft, h->n_ctx - static_cast<int>(h->kv.size()) - 1);
+            if (!until_full) k = std::min(k, static_cast<int>(max_tokens) - generated);
+            drafts.clear();
+            if (k > 0 && sync_kv(draft, h->kv) && decode_one(draft, cur)) {
+                for (int j = 0; j < k; ++j) {
+                    llama_token d = argmax_token(llama_get_logits_ith(draft->ctx, -1), n_vocab);
+                    drafts.push_back(d);
+                    if (llama_vocab_is_eog(h->vocab, d) || j + 1 == k || !decode_one(draft, d)) break;
+                }
+            }
+            drafted += static_cast<int>(drafts.size());
+            // 2. Target checks `cur` + all drafts in one batch (logits for every position).
+            const int base = static_cast<int>(h->kv.size());
+            batch.n_tokens = 0;
+            for (int i = 0; i <= static_cast<int>(drafts.size()); ++i) {
+                const int n = batch.n_tokens++;
+                batch.token[n] = i == 0 ? cur : drafts[static_cast<size_t>(i - 1)];
+                batch.pos[n] = base + i;
+                batch.n_seq_id[n] = 1;
+                batch.seq_id[n][0] = 0;
+                batch.logits[n] = true;
+            }
+            if (llama_decode(h->ctx, batch) != 0) { decode_failed(); break; }
+            h->kv.push_back(cur);
+            h->kv.insert(h->kv.end(), drafts.begin(), drafts.end());
+            // 3. Keep drafts while they equal what the target itself would choose.
+            size_t ok = 0;
+            llama_token next = LLAMA_TOKEN_NULL;
+            bool stopped = false;
+            for (size_t i = 0; i <= drafts.size(); ++i) {
+                const llama_token t = choose(static_cast<int>(i));
+                if (i < drafts.size() && t == drafts[i]) {
+                    if (limits_hit() || !commit(t)) { stopped = true; ok = i + 1; break; }
+                    ++ok;
+                    continue;
+                }
+                next = t;
+                break;
+            }
+            accepted += static_cast<int>(std::min(ok, drafts.size()));
+            // 4. Drop the rejected drafts from the target's KV cache.
+            const size_t valid = static_cast<size_t>(base) + 1 + std::min(ok, drafts.size());
+            if (valid < h->kv.size()) {
+                llama_memory_seq_rm(llama_get_memory(h->ctx), 0, static_cast<llama_pos>(valid), -1);
+                h->kv.resize(valid);
+            }
+            if (stopped) break;
+            cur = next;
+        }
+        llama_batch_free(batch);
     }
     llama_sampler_free(sampler);
     if (grammar) llama_sampler_free(grammar);
@@ -491,11 +641,13 @@ JNIEXPORT jstring JNICALL Java_com_musab_aragpt2_LlamaEngine_nativeGenerate(
     const double tok_per_sec = generated > 0 && generation_seconds > 0.0 ? generated / generation_seconds : 0.0;
     const long long total_ms = std::chrono::duration_cast<std::chrono::milliseconds>(total_end - total_start).count();
 
-    LOGI("prompt=%d reused=%d generated=%d first_ms=%lld tok_s=%.2f total_ms=%lld stop=%d",
-         static_cast<int>(prompt_tokens.size()), reused, generated, first_ms, tok_per_sec, total_ms, stop_reason);
+    LOGI("prompt=%d reused=%d generated=%d first_ms=%lld tok_s=%.2f total_ms=%lld stop=%d drafted=%d accepted=%d",
+         static_cast<int>(prompt_tokens.size()), reused, generated, first_ms, tok_per_sec, total_ms, stop_reason,
+         drafted, accepted);
 
-    return env->NewStringUTF(result_pack(static_cast<int>(prompt_tokens.size()), generated, first_ms,
-                                         tok_per_sec, total_ms, stop_reason, reused).c_str());
+    return env->NewStringUTF((result_pack(static_cast<int>(prompt_tokens.size()), generated, first_ms,
+                                          tok_per_sec, total_ms, stop_reason, reused)
+                              + RESULT_SEP + std::to_string(drafted) + RESULT_SEP + std::to_string(accepted)).c_str());
 }
 
 JNIEXPORT jint JNICALL Java_com_musab_aragpt2_LlamaEngine_nativeContextSize(JNIEnv *, jobject, jlong hp) {
