@@ -16,6 +16,37 @@ class Cancelled(Exception):
     pass
 
 
+class ThinkStripper:
+    """Drops a <think>...</think> block at the very start of a streamed answer.
+
+    With thinking switched off LFM2.5 still writes an empty <think></think> into the answer."""
+
+    def __init__(self):
+        self.head = ""
+        self.done = False
+        self.trim = False            # after a block: drop the blank lines that follow it
+
+    def feed(self, piece):
+        if self.done:
+            if self.trim:
+                piece = piece.lstrip()
+                self.trim = not piece
+            return piece
+        self.head += piece
+        text = self.head.lstrip()
+        if "<think>".startswith(text):
+            return ""                                  # could still become "<think>"
+        if not text.startswith("<think>"):
+            self.done = True
+            return self.head
+        if "</think>" not in text:
+            return ""                                  # inside the block
+        self.done = True
+        rest = text.split("</think>", 1)[1].lstrip()
+        self.trim = not rest
+        return rest
+
+
 def _free_port():
     s = socket.socket()
     s.bind(("127.0.0.1", 0))
@@ -102,7 +133,11 @@ class Server:
         args = [exe, "-m", catalog.path(self.role), "--host", "127.0.0.1", "--port", str(self.port),
                 "-t", str(config.threads()), "--no-webui"]
         if kind == "chat":
-            args += ["-c", str(config.get("context")), "--jinja"]
+            args += ["-c", str(config.get("context")), "--jinja", "-tb", str(os.cpu_count() or config.threads())]
+            if self.model["file"].startswith("LFM"):
+                # LFM2.5 thinks before every answer and every tool call (5-10 s each on a laptop CPU).
+                # The router already decides when tools are needed, so the thinking is switched off.
+                args += ["--reasoning-budget", "0"]
         elif kind == "embed":
             args += ["--embedding", "--pooling", "last", "-c", "8192", "-b", "8192", "-ub", "8192"]
         elif kind == "rerank":
@@ -228,6 +263,7 @@ class Pool:
         req = urllib.request.Request(s.url + "/v1/chat/completions", json.dumps(body).encode("utf-8"),
                                      {"Content-Type": "application/json"})
         content, reasoning, calls, tps = [], [], {}, 0.0
+        strip = ThinkStripper()
         try:
             resp = urllib.request.urlopen(req, timeout=1800)
         except urllib.error.HTTPError as e:
@@ -255,9 +291,12 @@ class Pool:
                         if on_delta:
                             on_delta("reasoning", d["reasoning_content"])
                     if d.get("content"):
-                        content.append(d["content"])
+                        piece = strip.feed(d["content"])
+                        if not piece:
+                            continue
+                        content.append(piece)
                         if on_delta:
-                            on_delta("content", d["content"])
+                            on_delta("content", piece)
                     for tc in d.get("tool_calls") or []:
                         c = calls.setdefault(tc.get("index", 0), {"id": "", "name": "", "arguments": ""})
                         c["id"] = tc.get("id") or c["id"]
@@ -285,6 +324,28 @@ class Pool:
             out = self._post(s, "/v1/chat/completions", body)
             text = out["choices"][0]["message"].get("content") or ""
         return json.loads(text)
+
+    def special_token_ids(self, role, texts):
+        """IDs of texts that are one special token in this model (llama-server's logit_bias only bans a special
+        token by its ID; the text form is tokenized as ordinary characters)."""
+        s = self.get(role)
+        cache = s.__dict__.setdefault("token_ids", {})
+        out = []
+        for t in texts:
+            if t not in cache:
+                try:
+                    ids = self._post(s, "/tokenize", {"content": t, "parse_special": True}).get("tokens", [])
+                    cache[t] = ids[0] if len(ids) == 1 else None
+                except Exception:  # noqa: BLE001
+                    cache[t] = None
+            if cache[t] is not None:
+                out.append(cache[t])
+        return out
+
+    def no_tool_calls(self, role):
+        """Request options that stop a model from starting a tool call (an answer is wanted)."""
+        ids = self.special_token_ids(role, ["<|tool_call_start|>", "<tool_call>"])
+        return {"logit_bias": [[i, False] for i in ids]} if ids else None
 
     def embed(self, texts):
         s = self.get("embed")

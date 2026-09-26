@@ -242,7 +242,8 @@ def search(query, k=5, kinds=("memory", "chunk")):
         qw = _words(query)
         scores = [len(qw & _words(r[1])) / (1 + len(qw)) for r in rows]
     best = sorted(range(len(rows)), key=lambda i: -scores[i])[:20]
-    best = [i for i in best if scores[i] > (0.3 if have_vecs else 0.0)]
+    # Measured with Qwen3-Embedding: related notes score ~0.75, unrelated ones up to ~0.45.
+    best = [i for i in best if scores[i] > (0.55 if have_vecs else 0.0)]
     if len(best) > k and catalog.available("rerank"):
         try:
             rr = pool.rerank(query, [rows[i][1][:2000] for i in best])

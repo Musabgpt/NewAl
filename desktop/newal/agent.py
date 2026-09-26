@@ -6,7 +6,7 @@ import platform
 import re
 import time
 
-from . import catalog, config, connectors, files, memory, router, tools, training
+from . import catalog, config, connectors, files, memory, router, tools, training, web
 from .engine import Cancelled, pool
 
 MAX_TOOL_ROUNDS = 6
@@ -14,6 +14,10 @@ MAX_TOOL_ROUNDS = 6
 PERSONA = ("You are NewAl, a capable offline assistant running on the user's Windows computer. "
            "Answer in the user's language (Arabic dialects included) unless asked otherwise. Be accurate and direct; "
            "use Markdown. Never invent facts: when you are not sure or the answer depends on recent events, use the tools.")
+
+WEB_PERSONA = ("You are NewAl, a capable assistant. The web search for this question was already done and its results "
+               "are in the user's message: answer from them directly, in the user's language (Arabic dialects included), "
+               "with Markdown and [n] citations. You cannot search again.")
 
 CODER = ("You are an expert software engineer on Windows 11 (PowerShell, Python, Git, VS Code, Docker/WSL available). "
          "Write complete, working code in fenced blocks with the language tag (```python, ```powershell, ```javascript...). "
@@ -61,7 +65,7 @@ class Turn:
         if route == "code":
             answer, info = self._code(messages, role)
         elif role in ("agent", "router") or route in ("tools", "chat"):
-            answer, info = self._agent(messages, role)
+            answer, info = self._agent(messages, role, route)
         else:
             answer, info = self._plain(messages, role)
         meta.update(info)
@@ -118,8 +122,28 @@ class Turn:
 
     # -------------------------------------------------------------- agent with tools
 
-    def _agent(self, messages, role):
+    def _agent(self, messages, role, route="tools"):
         context = " ".join(m["content"] for m in messages[-4:] if m["role"] == "user")
+        if route == "chat":
+            # Plain conversation: no tool list (saves ~1500 prompt tokens) and no needless searches.
+            r = pool.chat(role, messages, on_delta=self._delta, cancel=self.cancel, extra=pool.no_tool_calls(role))
+            if not TOOL_MARKUP.search(r["content"]):
+                return r["content"].strip(), {"tps": r["tps"]}
+            # The model wanted a tool after all: go through the tools path.
+            self.emit({"type": "draft_reset"})
+        if config.get("web") and needs_web(self.text):
+            # Search and read the best pages in parallel, then answer once: one model call instead of
+            # a round (with the whole prompt re-read on CPU) for every search and every page.
+            found = self._web_context(self.text)
+            if found:
+                messages[-1] = dict(messages[-1], content=messages[-1]["content"] + "\n\n" + found)
+                # The usual persona says "when unsure, use the tools", which makes LFM2.5 ask for yet another
+                # search; here the searching is done, so the system prompt says to answer from the results.
+                messages[0] = dict(messages[0], content=messages[0]["content"].replace(PERSONA, WEB_PERSONA))
+                # LFM2.5 without thinking asks for yet another search instead of answering, even with no
+                # tools offered and when told not to: its tool-call token is banned for this answer.
+                r = pool.chat(role, messages, on_delta=self._delta, cancel=self.cancel, extra=pool.no_tool_calls(role))
+                return r["content"].strip(), {"tps": r["tps"]}
         defs = tools.definitions(tools.select(context))
         seen = set()
         r = None
@@ -144,6 +168,36 @@ class Turn:
         messages.append({"role": "user", "content": "Answer my question now using the tool results above."})
         r = pool.chat(role, messages, on_delta=self._delta, cancel=self.cancel)
         return r["content"].strip(), {"tps": r["tps"]}
+
+    def _web_context(self, question):
+        from concurrent.futures import ThreadPoolExecutor
+        self.emit({"type": "tool", "name": "web_search", "args": question, "state": "start"})
+        results, seen = [], set()
+        for q in search_queries(question):
+            for x in web.search(q, n=5):
+                if x["url"] not in seen:
+                    seen.add(x["url"])
+                    results.append(x)
+        results = results[:6]
+        if not results:
+            self.emit({"type": "tool", "name": "web_search", "state": "done", "result": "لا نتائج"})
+            return ""
+        top = results[:3]
+        with ThreadPoolExecutor(3) as ex:
+            pages = list(ex.map(lambda x: _safe_read(x["url"], question), top))
+        parts = []
+        for i, x in enumerate(results):
+            body = pages[i] if i < len(pages) and pages[i] else x["snippet"]
+            parts.append("[%d] %s\n%s\n%s" % (i + 1, x["title"], x["url"], body))
+        text = "\n\n".join(parts)
+        self.tools_used.append({"name": "web_search", "args": question, "result": text[:500]})
+        self.emit({"type": "tool", "name": "web_search", "state": "done",
+                   "result": "\n".join("[%d] %s — %s" % (i + 1, x["title"], x["url"]) for i, x in enumerate(results))})
+        lang = "Arabic" if web.is_arabic(question) else "the language of my question"
+        return ("Search results fetched just now (%s):\n\n%s\n\nAnswer my question from these results in %s, "
+                "cite sources as [n], and say so if they do not answer it. Be concise.%s"
+                % (datetime.date.today().isoformat(), text, lang,
+                   "\nأجب بالعربية." if lang == "Arabic" else ""))
 
     def _tool(self, name, arguments):
         self.emit({"type": "tool", "name": name, "args": arguments, "state": "start"})
@@ -271,6 +325,55 @@ class Turn:
                 schema, max_tokens=150)
         except Exception:  # noqa: BLE001
             return {"ok": True, "reason": "ran without errors"}
+
+
+# Questions answered from the internet (news, prices, "latest", who/when...), unless they are about
+# files, commands or connected services, which go through the tools.
+_WEB = re.compile(r"أخبار|اخبار|خبر|سعر|أسعار|اسعار|طقس|آخر|اخر |أحدث|احدث|جديد|اليوم|هالأسبوع|هالاسبوع|هالشهر|"
+                  r"ابحث|بحث|دور على|مين |من هو|من هي|متى|وين |كم |نتيجة|مباراة|latest|news|price|today|this week|"
+                  r"search|who is|when |current|recent|score", re.I)
+_LOCAL = re.compile(r"ملف|مجلد|file|folder|اعمل|انشئ|أنشئ|شغل|شغّل|نفذ|نفّذ|command|powershell|terminal|الطرفية|"
+                    r"تذكر|remember|github|gitlab|جيت|درايف|drive|kaggle|كاغل|vs ?code|ذاكرة|memory", re.I)
+
+
+TOOL_MARKUP = re.compile(r"<\|tool_call_start\|>|<tool_call>|<function=")
+
+QUERY_SYSTEM = ("You write web search queries. Keep names, teams, places, products and dates. "
+                "Reply with JSON: [query in the question's language, query in English].")
+QUERY_SHOTS = [("شو آخر أخبار الذكاء الاصطناعي هالأسبوع؟", ["أخبار الذكاء الاصطناعي", "AI news this week"]),
+               ("مين ربح مباراة برشلونة امبارح", ["نتيجة مباراة برشلونة", "Barcelona match result"]),
+               ("كم سعر الدولار بتركيا", ["سعر الدولار في تركيا", "USD to TRY exchange rate"])]
+
+
+def search_queries(question):
+    """Short keyword queries (question language + English): search engines return nothing for long
+    dialect questions like «شو آخر أخبار ... هالأسبوع؟». Written by the always-loaded router (~2 s)."""
+    import json
+    fallback = [re.sub(r"[؟?!.]|\b(شو|ايش|إيش|قديش|كيف|مين)\b", " ", question).strip()]
+    if not catalog.pick("router"):
+        return fallback
+    msgs = [{"role": "system", "content": QUERY_SYSTEM}]
+    for a, b in QUERY_SHOTS:
+        msgs += [{"role": "user", "content": a}, {"role": "assistant", "content": json.dumps(b, ensure_ascii=False)}]
+    msgs.append({"role": "user", "content": question[:500]})
+    try:
+        qs = pool.complete_json("router", msgs, {"type": "array", "items": {"type": "string"}, "minItems": 1,
+                                                 "maxItems": 2}, max_tokens=60)
+        qs = [q.strip() for q in qs if isinstance(q, str) and q.strip()]
+        return qs or fallback
+    except Exception:  # noqa: BLE001
+        return fallback
+
+
+def needs_web(text):
+    return bool(_WEB.search(text)) and not _LOCAL.search(text)
+
+
+def _safe_read(url, question):
+    try:
+        return web.read(url, question, max_chars=1500)
+    except Exception:  # noqa: BLE001 - a page that fails is just skipped
+        return ""
 
 
 def runnable_block(text):

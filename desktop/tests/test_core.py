@@ -166,6 +166,32 @@ class RouterTest(unittest.TestCase):
         self.assertEqual(router.route("مرحبا"), "chat")        # no models: safe default
 
 
+class ThinkStripTest(unittest.TestCase):
+    def run_pieces(self, pieces):
+        from newal.engine import ThinkStripper
+        st = ThinkStripper()
+        return "".join(st.feed(p) for p in pieces)
+
+    def test_strips_leading_block(self):
+        self.assertEqual(self.run_pieces(["<th", "ink></think>", "\n\nمرحبا", " كيفك"]), "مرحبا كيفك")
+        self.assertEqual(self.run_pieces(["<think>plan</think>Hi"]), "Hi")
+
+    def test_keeps_normal_text(self):
+        self.assertEqual(self.run_pieces(["مر", "حبا <think> ليست بالبداية"]), "مرحبا <think> ليست بالبداية")
+        self.assertEqual(self.run_pieces(["<", "b>bold"]), "<b>bold")
+
+
+class WebQuestionTest(unittest.TestCase):
+    def test_needs_web(self):
+        self.assertTrue(agent.needs_web("شو آخر أخبار الذكاء الاصطناعي هالأسبوع؟"))
+        self.assertTrue(agent.needs_web("كم سعر الدولار اليوم"))
+        self.assertFalse(agent.needs_web("مرحبا كيفك"))
+        self.assertFalse(agent.needs_web("اعمل ملف todo.md"))
+
+    def test_query_fallback_without_models(self):
+        self.assertEqual(agent.search_queries("شو آخر أخبار الذكاء؟"), ["آخر أخبار الذكاء"])
+
+
 class SignInTest(unittest.TestCase):
     def test_git_credential_reads_the_helper(self):
         from newal import connectors

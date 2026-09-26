@@ -77,7 +77,7 @@ def now():
 TOOLS = {
     "web_search": (web_search, "Search the internet for fresh information. Returns titles, links and snippets.",
                    _p(query=S("search words")), False),
-    "read_url": (lambda url, focus="": web.read(url, focus), "Read the text of a web page.",
+    "read_url": (lambda url, focus="": web.read(url, focus, max_chars=2500), "Read the text of a web page.",
                  _p(url=S("page URL"), focus=S("what to look for", True)), False),
     "weather": (web.weather, "Current weather and 3-day forecast of a city.", _p(city=S("city name")), False),
     "currency": (web.currency, "Convert money between currencies (ISO codes like USD, EUR, SYP, SAR).",
