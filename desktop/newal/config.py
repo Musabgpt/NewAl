@@ -32,10 +32,27 @@ def find_tool(name):
         return env
     for base in (os.path.join(APP_DIR, "bin"), os.path.join(BUNDLE, "bin"), os.environ.get("NEWAL_BIN", "")):
         if base:
-            for p in (os.path.join(base, name + EXE), os.path.join(base, "gcm", name + EXE)):
+            for p in (os.path.join(base, name + EXE), os.path.join(base, "gcm", name + EXE),
+                      os.path.join(base, name, name + EXE)):
                 if os.path.exists(p):
                     return p
     return shutil.which(name)
+
+
+def find_python():
+    """A real Python: the user's own, else the one shipped with NewAl (bin/python).
+
+    On Windows without Python, "python" on PATH is a Microsoft Store stub that only prints
+    "Python was not found" (exit code 9009): it is skipped."""
+    for name in ("python", "py", "python3"):
+        p = shutil.which(name)
+        if p and "windowsapps" not in p.lower():
+            return p
+    for base in (os.path.join(APP_DIR, "bin"), os.path.join(BUNDLE, "bin"), os.environ.get("NEWAL_BIN", "")):
+        p = os.path.join(base, "python", "python" + EXE) if base else ""
+        if p and os.path.exists(p):
+            return p
+    return None
 
 
 DEFAULTS = {

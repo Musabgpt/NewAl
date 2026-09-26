@@ -29,7 +29,8 @@ EXAMPLES = {
               "اعمل ملف notes.txt وحط فيه مهامي", "افتح مجلد المشروع", "شغل الأمر ipconfig", "ارفع الملف على درايف",
               "شو في بمستودعاتي على github", "نزل dataset من kaggle", "افتح المشروع بـ VS Code",
               "list the files in my workspace", "تذكر إني بحب القهوة", "كم الساعة هلق", "حول 100 دولار لليرة",
-              "اقرألي هالرابط", "clone my repo from gitlab", "اعمل issue على github", "كم مساحة الهارد الفاضية"],
+              "اقرألي هالرابط", "clone my repo from gitlab", "اعمل issue على github", "كم مساحة الهارد الفاضية",
+              "شغّل ipconfig", "كم رام عندي", "شو البرامج الشغالة هلق", "شو في بمجلد التنزيلات"],
     "analyze": ["صغلي فكرتي كطلب واضح: تطبيق مذاكرة", "حوّل هالخطأ لبرومت واضح للمبرمج", "قارن بين React و Vue لمشروعي",
                 "راجع هالجواب وقلي إذا صح", "حلل ليش فشل هالحل", "make this a better prompt: a logo for my shop",
                 "اعطيني خطة لمشروع متجر الكتروني", "what are the pros and cons of microservices", "قيم هالفكرة بصراحة",
@@ -111,9 +112,17 @@ def by_model(text):
     return r.get("route") if r.get("route") in ROUTES else "chat"
 
 
+# Requests to act on or inspect this computer: always the tools (the terminal), never web or analysis.
+_COMPUTER = re.compile(r"(شغ[ّ]?ل|نف[ّ]?ذ|افتح|سك[ّ]?ر|اعرض|ورجيني|وريني|run|open|execute|show me|kill|close)\b.{0,40}|"
+                       r"\b(ipconfig|ping|tasklist|systeminfo|winget|choco|pip install|npm|git status)\b|"
+                       r"(رام|هارد|مساحة|القرص|المعالج|البطارية|عمليات|جهازي|كمبيوتري|لابتوبي|ويندوز)", re.I)
+
+
 def route(text):
     if _CODE.search(text):
         return "code"
+    if _COMPUTER.search(text) and not re.search(r"اكتب|برمج|write|code|script|سكربت|دالة|function", text, re.I):
+        return "tools"
     if catalog.available("embed"):
         try:
             # Measured: where the examples are unsure, LFM2.5 1.2B was wrong too, so they have the last word.

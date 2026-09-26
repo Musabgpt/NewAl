@@ -5,7 +5,7 @@ const api = (path, body) => fetch(path, body === undefined ? {} : {method: "POST
   .then(r => r.json());
 
 let conv = null, job = null, attachments = [], state = null;
-const ROUTE_LABEL = {code: "💻 برمجة", tools: "🛠 أدوات", analyze: "🧠 تحليل", chat: "💬 محادثة"};
+const ROUTE_LABEL = {code: "💻 برمجة", tools: "🛠 أدوات", analyze: "🧠 تحليل", chat: "💬 محادثة", goal: "🎯 هدف"};
 const TOOL_LABEL = {
   web_search: "🔎 بحث بالنت", read_url: "🌐 قراءة صفحة", weather: "⛅ الطقس", currency: "💱 عملات",
   current_time: "🕒 الوقت", run_command: "⌨ الطرفية", write_file: "📝 إنشاء ملف", read_file: "📄 قراءة ملف",
@@ -14,7 +14,7 @@ const TOOL_LABEL = {
   git_clone: "git clone", git_push: "git push", gitlab_projects: "GitLab", gitlab_read: "GitLab",
   gitlab_issues: "GitLab", gitlab_create_issue: "GitLab", drive_list: "Google Drive", drive_download: "Google Drive",
   drive_upload: "Google Drive", kaggle_search: "Kaggle", kaggle_download: "Kaggle", kaggle_notebooks: "Kaggle",
-  vscode_open: "VS Code",
+  vscode_open: "VS Code", code_task: "💻 كتابة وتجربة برنامج",
 };
 
 // ------------------------------------------------------------------ conversations
@@ -171,11 +171,11 @@ function addBot() {
         let args = e.args;
         try { args = JSON.stringify(JSON.parse(e.args), null, 1); } catch (_) {}
         const b = box("", "⏳ " + label, args);
-        tools[e.name] = b;
+        (tools[e.name] = tools[e.name] || []).push(b);
         extras.appendChild(b);
         setStatus(label + "…");
       } else {
-        const b = tools[e.name] || extras.appendChild(box("", label, ""));
+        const b = (tools[e.name] && tools[e.name].shift()) || extras.appendChild(box("", label, ""));
         b.querySelector("summary").textContent = (e.state === "denied" ? "⛔ " : "✅ ") + label;
         b.querySelector(".inner").textContent += "\n\n→ " + (e.result || "");
         b.classList.add(e.state === "denied" ? "fail" : "ok");
@@ -334,6 +334,7 @@ async function send(text, files, editId) {
       case "verdict": bot.verdict(e); break;
       case "fix": bot.fix(e); break;
       case "draft_reset": bot.draftReset(); break;
+      case "goal_check": bot.verdict({ok: e.done, reason: (e.done ? "🎯 تحقق الهدف. " : "🎯 لم يكتمل بعد، يكمل: ") + (e.missing || "")}); break;
       case "memory": bot.memory(e); break;
       case "approve": askApproval(e); break;
       case "done": bot.finish(e.content, e.meta, e.message_id); bot.el.dataset.id = e.message_id; end(); break;

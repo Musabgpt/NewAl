@@ -10,6 +10,7 @@ from . import catalog, config, connectors, files, memory, router, tools, trainin
 from .engine import Cancelled, pool
 
 MAX_TOOL_ROUNDS = 6
+HISTORY_CHARS = 6000       # earlier turns sent with each request (~2k tokens: a CPU reads ~60-100 tokens/s)
 
 PERSONA = ("You are NewAl, a capable offline assistant running on the user's Windows computer. "
            "Answer in the user's language (Arabic dialects included) unless asked otherwise. Be accurate and direct; "
@@ -18,6 +19,15 @@ PERSONA = ("You are NewAl, a capable offline assistant running on the user's Win
 WEB_PERSONA = ("You are NewAl, a capable assistant. The web search for this question was already done and its results "
                "are in the user's message: answer from them directly, in the user's language (Arabic dialects included), "
                "with Markdown and [n] citations. You cannot search again.")
+
+GOAL = ("You are NewAl working autonomously toward the user's goal on their Windows computer. Work in steps: "
+        "decide the next action, do it with a tool, look at the result, and correct course when something fails. "
+        "Use every tool that helps: run_command (PowerShell) to inspect and change the computer, code_task to write "
+        "and test a program until it works, write_file/read_file for files, web_search/read_url for information. "
+        "Do not ask the user questions you can answer with a tool, and do not stop until the goal is reached and "
+        "checked. Unless the user names another place, create files and folders in the NewAl workspace (use relative "
+        "paths; commands start there). Finish with a short report in the user's language: what you did, the result, "
+        "and where files are.")
 
 CODER = ("You are an expert software engineer on Windows 11 (PowerShell, Python, Git, VS Code, Docker/WSL available). "
          "Write complete, working code in fenced blocks with the language tag (```python, ```powershell, ```javascript...). "
@@ -34,8 +44,12 @@ RUNNABLE = {"python": "python", "py": "python", "powershell": "powershell", "ps1
 
 def _system(route):
     now = datetime.datetime.now().strftime("%A %Y-%m-%d %H:%M")
-    base = {"code": CODER, "analyze": JUDGE}.get(route, PERSONA)
-    return "%s\nToday: %s. OS: %s. Workspace folder: %s" % (base, now, platform.platform(terse=True), config.WORKSPACE)
+    base = {"code": CODER, "analyze": JUDGE, "goal": GOAL}.get(route, PERSONA)
+    home = os.path.expanduser("~")
+    folders = ", ".join("%s: %s" % (n, os.path.join(home, n)) for n in ("Downloads", "Desktop", "Documents", "Pictures"))
+    return ("%s\nToday: %s. OS: %s. User folders: %s. NewAl workspace: %s. Anything about this computer "
+            "(files, disk, memory, network, processes, programs, settings) is found by running PowerShell with "
+            "run_command, never guessed." % (base, now, platform.platform(terse=True), folders, config.WORKSPACE))
 
 
 class Turn:
@@ -54,15 +68,17 @@ class Turn:
 
     def run(self):
         started = time.time()
-        route = self.mode if self.mode in router.ROUTES else router.route(self.text)
-        role = catalog.pick(router.ROLE_OF[route])
+        route = self.mode if self.mode in router.ROUTES + ("goal",) else router.route(self.text)
+        role = catalog.pick(router.ROLE_OF.get(route, "agent"))
         if not role:
             raise RuntimeError("لا يوجد نموذج منزّل. افتح «النماذج» ونزّل الموجّه ونموذج الأدوات على الأقل.")
         self.emit({"type": "route", "route": route, "role": role, "model": catalog.MODELS[role]["title"]})
 
         messages = self._context(route, role)
         meta = {"route": route, "role": role, "model": catalog.MODELS[role]["title"]}
-        if route == "code":
+        if route == "goal":
+            answer, info = self._goal(messages, role)
+        elif route == "code":
             answer, info = self._code(messages, role)
         elif role in ("agent", "router") or route in ("tools", "chat"):
             answer, info = self._agent(messages, role, route)
@@ -79,21 +95,24 @@ class Turn:
     # -------------------------------------------------------------- context
 
     def _context(self, route, role):
+        # The system prompt stays the same between turns so llama-server can reuse its cache; per-question
+        # context (memory notes, files) goes into the user message instead.
         system = _system(route)
         try:
             notes = memory.search(self.text, k=4)
         except Exception:  # noqa: BLE001 - memory is a bonus, never a blocker
             notes = []
+        notes_text = ""
         if notes:
             self.emit({"type": "memory", "items": [{"source": n["source"], "text": n["text"][:200]} for n in notes]})
-            system += "\n\nRelevant notes from the long-term memory and project files:\n" + "\n---\n".join(
-                "[%s]\n%s" % (os.path.basename(n["source"]) if n["kind"] == "chunk" else "memory", n["text"][:1500])
-                for n in notes)
+            notes_text = "Notes from my long-term memory and project files that may help:\n" + "\n---\n".join(
+                "[%s]\n%s" % (os.path.basename(n["source"]) if n["kind"] == "chunk" else "memory", n["text"][:1200])
+                for n in notes) + "\n\n"
         msgs = [{"role": "system", "content": system}]
         for ask, ans in training.examples(role, self.text):
             msgs += [{"role": "user", "content": ask}, {"role": "assistant", "content": ans[:3000]}]
         history = [m for m in memory.messages(self.conv) if m["role"] in ("user", "assistant")]
-        budget = 12000
+        budget = HISTORY_CHARS
         kept = []
         for m in reversed(history[:-1]):             # the last one is this turn's user message
             if budget - len(m["content"]) < 0:
@@ -102,6 +121,8 @@ class Turn:
             kept.append({"role": m["role"], "content": m["content"]})
         msgs += reversed(kept)
         user = self.text
+        if notes_text:
+            user = notes_text + "My message:\n" + self.text
         for path in self.attachments:
             text = files.extract(path)
             user += "\n\n[File: %s]\n%s" % (os.path.basename(path), connectors.clip(text, 16000) or "(لا نص فيه)")
@@ -111,8 +132,11 @@ class Turn:
     def _delta(self, kind, text):
         self.emit({"type": "delta", "kind": kind, "text": text})
 
-    def _extra(self, role):
-        return {"chat_template_kwargs": {"enable_thinking": bool(self.think)}} if role == "judge" else None
+    def _extra(self, role, budget=0):
+        """Thinking for this request: off by default (speed), `budget` tokens when given, unlimited with 💭."""
+        if role == "judge":
+            return {"chat_template_kwargs": {"enable_thinking": bool(self.think or budget)}}
+        return {"thinking_budget_tokens": -1 if self.think else budget}
 
     # -------------------------------------------------------------- plain answer (judge)
 
@@ -126,7 +150,7 @@ class Turn:
         context = " ".join(m["content"] for m in messages[-4:] if m["role"] == "user")
         if route == "chat":
             # Plain conversation: no tool list (saves ~1500 prompt tokens) and no needless searches.
-            r = pool.chat(role, messages, on_delta=self._delta, cancel=self.cancel, extra=pool.no_tool_calls(role))
+            r = pool.chat(role, messages, on_delta=self._delta, cancel=self.cancel, extra=dict(pool.no_tool_calls(role) or {}, **self._extra(role)))
             if not TOOL_MARKUP.search(r["content"]):
                 return r["content"].strip(), {"tps": r["tps"]}
             # The model wanted a tool after all: go through the tools path.
@@ -142,13 +166,21 @@ class Turn:
                 messages[0] = dict(messages[0], content=messages[0]["content"].replace(PERSONA, WEB_PERSONA))
                 # LFM2.5 without thinking asks for yet another search instead of answering, even with no
                 # tools offered and when told not to: its tool-call token is banned for this answer.
-                r = pool.chat(role, messages, on_delta=self._delta, cancel=self.cancel, extra=pool.no_tool_calls(role))
+                r = pool.chat(role, messages, on_delta=self._delta, cancel=self.cancel, extra=dict(pool.no_tool_calls(role) or {}, **self._extra(role)))
                 return r["content"].strip(), {"tps": r["tps"]}
-        defs = tools.definitions(tools.select(context))
+        names = tools.select(context)
+        if is_local(self.text):
+            # About this computer: only the tools that can see it (a free choice sent LFM2.5 to the web 12 times
+            # for "what is my computer's name").
+            names = [n for n in names if n not in WEB_TOOLS]
+        defs = tools.definitions(names)
         seen = set()
         r = None
+        if web.is_arabic(self.text):
+            messages[-1] = dict(messages[-1], content=messages[-1]["content"] + "\n\n(أجب بالعربية)")
         for _ in range(MAX_TOOL_ROUNDS):
-            r = pool.chat(role, messages, tools=defs, on_delta=self._delta, cancel=self.cancel)
+            r = pool.chat(role, messages, tools=defs, on_delta=self._delta, cancel=self.cancel,
+                          extra=self._extra(role))
             if not r["tool_calls"]:
                 return r["content"].strip(), {"tps": r["tps"]}
             messages.append({"role": "assistant", "content": r["content"] or "",
@@ -168,6 +200,91 @@ class Turn:
         messages.append({"role": "user", "content": "Answer my question now using the tool results above."})
         r = pool.chat(role, messages, on_delta=self._delta, cancel=self.cancel)
         return r["content"].strip(), {"tps": r["tps"]}
+
+    # -------------------------------------------------------------- goal: act, check, correct until done
+
+    def _goal(self, messages, role):
+        """Works toward a goal with every tool: after the executor says it is done, the judge checks the goal
+        against what the tools actually returned; if something is missing the executor continues with that."""
+        defs = tools.definitions() + [CODE_TASK_TOOL]
+        steps, checks, seen = 0, 0, {}
+        answer, tps = "", 0
+        while steps < MAX_GOAL_STEPS:
+            self.emit({"type": "status", "text": "🎯 خطوة %d…" % (steps + 1)})
+            r = pool.chat(role, messages, tools=defs, on_delta=self._delta, cancel=self.cancel,
+                          extra=self._extra(role, budget=GOAL_THINKING), max_tokens=2048)
+            tps = r["tps"] or tps
+            if r["tool_calls"]:
+                messages.append({"role": "assistant", "content": r["content"] or "",
+                                 "tool_calls": [{"id": c["id"] or "call_%d_%d" % (steps, i), "type": "function",
+                                                 "function": {"name": c["name"], "arguments": c["arguments"] or "{}"}}
+                                                for i, c in enumerate(r["tool_calls"])]})
+                for i, c in enumerate(r["tool_calls"]):
+                    key = (c["name"], c["arguments"])
+                    seen[key] = seen.get(key, 0) + 1
+                    if seen[key] > 2:
+                        result = "You already ran exactly this twice with the same result. Try a different approach."
+                    elif c["name"] == "code_task":
+                        result = self._code_task(c["arguments"])
+                    else:
+                        result = self._tool(c["name"], c["arguments"])
+                    messages.append({"role": "tool", "tool_call_id": c["id"] or "call_%d_%d" % (steps, i),
+                                     "content": result})
+                    steps += 1
+                self.emit({"type": "draft_reset"})
+                continue
+            answer = r["content"].strip()
+            if checks >= MAX_GOAL_CHECKS:
+                break
+            checks += 1
+            verdict = self._goal_check(self.text, messages, answer)
+            self.emit({"type": "goal_check", "done": verdict.get("done"), "missing": verdict.get("missing", "")})
+            if verdict.get("done"):
+                return answer, {"tps": tps, "verified": True, "judge": verdict.get("missing", ""), "steps": steps}
+            messages.append({"role": "assistant", "content": answer})
+            messages.append({"role": "user", "content": "The goal is not reached yet: %s\nContinue working with the "
+                                                        "tools until it is done." % verdict.get("missing", "")})
+            self.emit({"type": "draft_reset"})
+        return answer or "توقفت بعد %d خطوة بدون إكمال الهدف." % steps, {"tps": tps, "verified": False, "steps": steps}
+
+    def _code_task(self, arguments):
+        """The code_task tool: the coder writes the program and the run/judge/fix loop makes it work."""
+        import json
+        try:
+            task = json.loads(arguments or "{}").get("task", "")
+        except ValueError:
+            task = arguments
+        self.emit({"type": "tool", "name": "code_task", "args": task, "state": "start"})
+        coder = catalog.pick("coder")
+        msgs = [{"role": "system", "content": _system("code")}, {"role": "user", "content": task}]
+        answer, info = self._code(msgs, coder)
+        block = runnable_block(answer)
+        result = "verified: %s\n%s\nLast run output:\n%s\n\nProgram:\n%s" % (
+            info.get("verified"), info.get("judge", ""), info.get("run_output", "(not run)"),
+            block[1] if block else answer[:4000])
+        if block:
+            name = "goal_%s.%s" % (time.strftime("%H%M%S"), {"python": "py", "powershell": "ps1", "node": "js"}[block[0]])
+            result += "\n\nSaved as " + tools.write_file(name, block[1]).split(": ", 1)[-1]
+        self.emit({"type": "tool", "name": "code_task", "state": "done", "result": result[:3000]})
+        self.tools_used.append({"name": "code_task", "args": task, "result": result[:500]})
+        return result
+
+    def _goal_check(self, goal, messages, answer):
+        judge = catalog.pick("judge")
+        evidence = "\n\n".join("[%s] %s" % (m["role"], (m.get("content") or "")[-1200:])
+                                 for m in messages[-12:] if m["role"] in ("tool", "assistant") and m.get("content"))
+        schema = {"type": "object", "properties": {"done": {"type": "boolean"}, "missing": {"type": "string"}},
+                  "required": ["done", "missing"]}
+        self.emit({"type": "status", "text": "🧠 هل تحقق الهدف؟"})
+        try:
+            return pool.complete_json(judge, [
+                {"role": "system", "content": "Decide whether the goal was actually reached, using only the tool results "
+                                              "as evidence (claims without evidence do not count). JSON: done, and "
+                                              "missing = what still has to be done (or a one-line confirmation)."},
+                {"role": "user", "content": "Goal:\n%s\n\nTool results and messages:\n%s\n\nFinal report:\n%s"
+                                            % (goal[:2000], evidence[-8000:], answer[:2000])}], schema, max_tokens=200)
+        except Exception:  # noqa: BLE001
+            return {"done": True, "missing": ""}
 
     def _web_context(self, question):
         from concurrent.futures import ThreadPoolExecutor
@@ -254,6 +371,12 @@ class Turn:
                 ok, output, timed_out = run_code(lang, code)
             info["run_output"] = output[-2000:]
             info["attempts"] = attempt
+            if MISSING_RUNTIME.search(output):
+                # Fixing the code cannot help when Python/Node itself is missing.
+                self.emit({"type": "run", "lang": lang, "ok": False, "attempt": attempt, "output": output[-1500:]})
+                info["note"] = "no_runtime"
+                answer += "\n\n> ⚠️ ما قدرت جرّب الكود: %s غير مثبت على الجهاز." % lang
+                break
             if timed_out:
                 self.emit({"type": "run", "lang": lang, "ok": True, "attempt": attempt,
                            "output": output[-2000:] + "\n\n⏱ ما زال يعمل بعد دقيقة (خادم أو حلقة دائمة) فلم يُحكم عليه."})
@@ -333,6 +456,9 @@ _WEB = re.compile(r"أخبار|اخبار|خبر|سعر|أسعار|اسعار|ط
                   r"ابحث|بحث|دور على|مين |من هو|من هي|متى|وين |كم |نتيجة|مباراة|latest|news|price|today|this week|"
                   r"search|who is|when |current|recent|score", re.I)
 _LOCAL = re.compile(r"ملف|مجلد|file|folder|اعمل|انشئ|أنشئ|شغل|شغّل|نفذ|نفّذ|command|powershell|terminal|الطرفية|"
+                    r"جهازي|كمبيوتري|لابتوبي|اللابتوب|هارد|قرص|مساحة|رام|ذاكرة الجهاز|معالج|بطارية|شبكة|واي فاي|wifi|"
+                    r"ip\b|ipconfig|عملية|عمليات|process|برامج|البرنامج|الويندوز|ويندوز|windows|disk|ram\b|cpu|battery|"
+                    r"التنزيلات|downloads|desktop|سطح المكتب|documents|المستندات|"
                     r"تذكر|remember|github|gitlab|جيت|درايف|drive|kaggle|كاغل|vs ?code|ذاكرة|memory", re.I)
 
 
@@ -365,8 +491,30 @@ def search_queries(question):
         return fallback
 
 
+GOAL_THINKING = 160            # tokens of thinking before each goal step (~6 s): better choices, still moving
+MAX_GOAL_STEPS = 25
+MAX_GOAL_CHECKS = 4
+CODE_TASK_TOOL = {"type": "function", "function": {
+    "name": "code_task",
+    "description": "Write a program for a task and run/test/fix it until it works. Returns the working program, "
+                   "its output and where it was saved. Use it for anything that needs code.",
+    "parameters": {"type": "object", "properties": {"task": {"type": "string", "description": "what the program must do"}},
+                   "required": ["task"]}}}
+
+
+WEB_TOOLS = {"web_search", "read_url", "weather", "currency"}
+
+
 def needs_web(text):
     return bool(_WEB.search(text)) and not _LOCAL.search(text)
+
+
+def is_local(text):
+    from .router import _COMPUTER
+    return bool(_LOCAL.search(text) or _COMPUTER.search(text)) and not _WEB_ONLY.search(text)
+
+
+_WEB_ONLY = re.compile(r"أخبار|اخبار|سعر|أسعار|طقس|news|price|weather", re.I)
 
 
 def _safe_read(url, question):
@@ -395,7 +543,7 @@ def run_code(runner, code, timeout=60):
         f.write(code)
     if runner == "python":
         import shutil
-        exe = shutil.which("python") or shutil.which("py") or shutil.which("python3")
+        exe = config.find_python()
         args = [exe, "-X", "utf8", path] if exe else None
     elif runner == "node":
         import shutil
@@ -418,6 +566,9 @@ RISKY = re.compile(r"os\.remove|os\.unlink|shutil\.rmtree|os\.rmdir|rmtree|Remov
                    r"Restart-Computer|Format-Volume|reg\s+delete|Set-ExecutionPolicy|requests\.(post|put|delete)|"
                    r"smtplib|winreg|ctypes", re.I)
 
+MISSING_RUNTIME = re.compile(r"غير مثبت على الجهاز|was not found; run without arguments|exit code 9009|"
+                             r"is not recognized as an internal or external command")
+
 # import name -> pip package, where they differ
 PIP_NAMES = {"cv2": "opencv-python", "PIL": "pillow", "sklearn": "scikit-learn", "yaml": "pyyaml",
              "bs4": "beautifulsoup4", "dotenv": "python-dotenv", "docx": "python-docx", "fitz": "pymupdf",
@@ -427,7 +578,7 @@ PIP_NAMES = {"cv2": "opencv-python", "PIL": "pillow", "sklearn": "scikit-learn",
 def install_package(module):
     """pip install for a missing import (the package from PyPI only, into the user's Python)."""
     import shutil
-    exe = shutil.which("python") or shutil.which("py") or shutil.which("python3")
+    exe = config.find_python()
     name = PIP_NAMES.get(module.split(".")[0], module.split(".")[0])
     if not exe or not re.fullmatch(r"[A-Za-z0-9_.-]+", name):
         return False

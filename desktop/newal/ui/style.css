@@ -139,3 +139,4 @@ table.stats td, table.stats th { border-bottom: 1px solid var(--line); padding: 
 #drop { position: fixed; inset: 0; background: rgba(20,60,100,.6); color: #fff; font-size: 28px; display: flex;
   align-items: center; justify-content: center; z-index: 20; pointer-events: none; }
 @media (max-width: 800px) { #side { position: fixed; z-index: 5; height: 100%; } .examples { grid-template-columns: 1fr; } }
+.chip.goal:has(input:checked) { color: var(--warn); border-color: var(--warn); }

@@ -192,6 +192,29 @@ class WebQuestionTest(unittest.TestCase):
         self.assertEqual(agent.search_queries("شو آخر أخبار الذكاء؟"), ["آخر أخبار الذكاء"])
 
 
+class ComputerRequestTest(unittest.TestCase):
+    def test_computer_requests_use_the_terminal(self):
+        for q in ["شغّل ipconfig", "كم مساحة الهارد الفاضية؟", "كم رام عندي؟", "افتح المفكرة"]:
+            self.assertEqual(router.route(q), "tools", q)
+            self.assertFalse(agent.needs_web(q), q)
+            self.assertTrue(agent.is_local(q), q)
+        self.assertEqual(router.route("اكتب سكربت بايثون يفتح ملف"), "chat")  # code wording is not a command
+        self.assertFalse(agent.is_local("شو آخر أخبار الذكاء الاصطناعي"))
+
+    def test_store_python_stub_is_skipped(self):
+        import shutil
+        real = shutil.which
+        try:
+            shutil.which = lambda n: r"C:\Users\x\AppData\Local\Microsoft\WindowsApps\python.exe"
+            self.assertNotIn("WindowsApps", config.find_python() or "")
+        finally:
+            shutil.which = real
+
+    def test_missing_runtime_stops_the_loop(self):
+        self.assertTrue(agent.MISSING_RUNTIME.search("Python was not found; run without arguments to install\n(exit code 9009)"))
+        self.assertFalse(agent.MISSING_RUNTIME.search("NameError: name 'x' is not defined"))
+
+
 class SignInTest(unittest.TestCase):
     def test_git_credential_reads_the_helper(self):
         from newal import connectors

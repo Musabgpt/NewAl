@@ -134,10 +134,7 @@ class Server:
                 "-t", str(config.threads()), "--no-webui"]
         if kind == "chat":
             args += ["-c", str(config.get("context")), "--jinja", "-tb", str(os.cpu_count() or config.threads())]
-            if self.model["file"].startswith("LFM"):
-                # LFM2.5 thinks before every answer and every tool call (5-10 s each on a laptop CPU).
-                # The router already decides when tools are needed, so the thinking is switched off.
-                args += ["--reasoning-budget", "0"]
+
         elif kind == "embed":
             args += ["--embedding", "--pooling", "last", "-c", "8192", "-b", "8192", "-ub", "8192"]
         elif kind == "rerank":
@@ -258,6 +255,10 @@ class Pool:
                 "top_p": 0.95, "min_p": 0.05, "repeat_penalty": 1.05, "timings_per_token": False}
         if tools:
             body["tools"] = tools
+        if s.model["file"].startswith("LFM"):
+            # LFM2.5 thinks before every answer and every tool call (5-15 s each on a laptop CPU). Off unless the
+            # caller asks: the router already decides when tools are needed. (Per request, llama.cpp >= b9982.)
+            body["thinking_budget_tokens"] = 0
         if extra:
             body.update(extra)
         req = urllib.request.Request(s.url + "/v1/chat/completions", json.dumps(body).encode("utf-8"),
