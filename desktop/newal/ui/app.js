@@ -416,9 +416,14 @@ const panels = {
           m.state === "downloading" ? `<span>⬇ ${pct.toFixed(1)}% ${m.speed ? "· " + (m.speed / 1e6).toFixed(1) + " MB/s" : ""}</span>` :
           `<button data-dl>⬇ تنزيل</button>${m.have ? `<span class="hint">(${pct.toFixed(0)}% محفوظ، يكمل من حيث توقف)</span>` : ""}`}
           ${m.error ? `<span class="bad">${escapeHtml(m.error)}</span>` : ""}</div>
+        ${m.ready ? "" : `<div class="hint">بديل: <a href="#" data-link>رابط مباشر بالمتصفح</a> ثم انقل <code dir="ltr">${escapeHtml(m.file)}</code> إلى <a href="#" data-folder>مجلد النماذج</a></div>`}
         ${!m.ready && m.have ? `<div class="bar-outer"><div class="bar-inner" style="width:${pct}%"></div></div>` : ""}`;
       const dl = c.querySelector("[data-dl]");
       if (dl) dl.onclick = async () => { await api("/api/models/download", {role: m.role}); panels.models(body); };
+      const link = c.querySelector("[data-link]");
+      if (link) link.onclick = e => { e.preventDefault(); api("/api/open", {path: m.url}); };
+      const folder = c.querySelector("[data-folder]");
+      if (folder) folder.onclick = e => { e.preventDefault(); api("/api/open", {path: s.home + (s.home.includes("\\") ? "\\" : "/") + "models"}); };
       const un = c.querySelector("[data-unload]");
       if (un) un.onclick = async () => { await api("/api/models/unload", {role: m.role}); panels.models(body); };
       list.appendChild(c);

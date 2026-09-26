@@ -100,7 +100,7 @@ def status():
             "role": role, "title": m["title"], "label": m["label"], "about": m["about"],
             "size": m["size"], "have": have, "ready": available(role),
             "state": p.get("state", "ready" if available(role) else "missing"),
-            "error": p.get("error", ""), "speed": p.get("speed", 0),
+            "error": p.get("error", ""), "speed": p.get("speed", 0), "url": m["url"], "file": m["file"],
         })
     return out
 
@@ -142,11 +142,19 @@ def _download(role):
                 if have >= m["size"] * 0.99:
                     break
             except OSError as e:
-                _progress[role]["error"] = "إعادة المحاولة: %s" % e
+                _progress[role]["error"] = "إعادة المحاولة: %s" % _explain(e)
                 time.sleep(min(30, 2 ** attempt))
         if os.path.getsize(part) < m["size"] * 0.99:
             raise OSError("التنزيل لم يكتمل")
         os.replace(part, dest)
         _progress[role] = {"state": "ready"}
     except Exception as e:  # noqa: BLE001 - reported to the UI
-        _progress[role] = {"state": "error", "error": str(e)}
+        _progress[role] = {"state": "error", "error": _explain(e)}
+
+
+def _explain(e):
+    text = str(e)
+    if "CERTIFICATE_VERIFY_FAILED" in text:
+        return ("تعذر التحقق من شهادة الموقع (غالباً برنامج حماية يفحص HTTPS أو شبكة بفلترة). "
+                "نزّل الملف من «رابط مباشر» بالمتصفح وضعه في مجلد النماذج. التفاصيل: " + text[:160])
+    return text[:300]

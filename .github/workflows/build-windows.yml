@@ -22,7 +22,7 @@ jobs:
           python-version: "3.12"
 
       - name: Install Python packages
-        run: python -m pip install --upgrade pip pyinstaller pywebview pypdf numpy
+        run: python -m pip install --upgrade pip pyinstaller pywebview pypdf numpy truststore certifi
 
       - name: Python checks
         run: |
@@ -76,7 +76,7 @@ jobs:
         run: |
           pyinstaller --noconfirm --windowed --name NewAl --icon assets/newal.ico `
             --add-data "newal/ui;ui" --add-data "assets;assets" `
-            --collect-submodules newal NewAl.py
+            --collect-submodules newal --collect-data certifi --hidden-import truststore NewAl.py
           Copy-Item -Recurse bin dist/NewAl/bin
 
       - name: Check the built app

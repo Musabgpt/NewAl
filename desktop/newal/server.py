@@ -292,6 +292,10 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json({"error": str(e)})
         if p == "/api/open":
             path = body.get("path") or config.WORKSPACE
+            if re.match(r"https://(huggingface\.co|github\.com|gitlab\.com|www\.kaggle\.com)/", path):
+                import webbrowser
+                webbrowser.open(path)
+                return self._json({"ok": True})
             if os.path.exists(path):
                 open_path(path)
             return self._json({"ok": os.path.exists(path)})

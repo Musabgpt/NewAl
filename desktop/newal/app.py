@@ -31,9 +31,14 @@ def smoke(out_path):
         data = json.loads(r.read().decode("utf-8"))
     with urllib.request.urlopen("http://127.0.0.1:18766/", timeout=10) as r:
         data["ui_bytes"] = len(r.read())
+    import newal
+    data["tls"] = newal.TLS
+    req = urllib.request.Request("https://huggingface.co/api/models?limit=1", headers={"User-Agent": "NewAl"})
+    with urllib.request.urlopen(req, timeout=20) as r:
+        data["https"] = r.status
     with open(out_path, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=1)
-    ok = data["connectors"]["engine"] and data["ui_bytes"] > 1000
+    ok = data["connectors"]["engine"] and data["ui_bytes"] > 1000 and data["https"] == 200
     sys.exit(0 if ok else 1)
 
 
