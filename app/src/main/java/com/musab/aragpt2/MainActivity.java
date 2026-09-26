@@ -224,6 +224,7 @@ public class MainActivity extends AppCompatActivity {
     /** Free GGUF models from Hugging Face: name, size in GB, minimum phone RAM in GB, URL. */
     private static final String LFM_26B="https://huggingface.co/LiquidAI/LFM2.5-2.6B-GGUF/resolve/main/LFM2.5-2.6B-QAD-Q4_0.gguf",
             QWEN35_2B="https://huggingface.co/unsloth/Qwen3.5-2B-GGUF/resolve/main/Qwen3.5-2B-Q4_K_M.gguf",
+            LFM_12B="https://huggingface.co/LiquidAI/LFM2.5-1.2B-Instruct-GGUF/resolve/main/LFM2.5-1.2B-Instruct-QAD-Q4_0.gguf",
             PACK="pack:a16";
     /**
      * Free GGUF models from Hugging Face: name, size in GB, minimum phone RAM in GB, URL. Chosen by
@@ -231,10 +232,10 @@ public class MainActivity extends AppCompatActivity {
      * fastest on ARM) answers best; Qwen3.5 drives the screen best.
      */
     private static final Object[][] MODEL_CATALOG={
-            {"⭐ الحزمة المثالية لهاتفك: LFM2.5 2.6B للمحادثة + Qwen3.5 2B للتحكم بالهاتف",2.87,6,PACK},
-            {"⭐ LFM2.5 2.6B — ذكي بالعربي، أدوات، سياق 128K (هجين، Q4_0 مسرّع)",1.59,4,LFM_26B},
-            {"📱 Qwen3.5 2B — الأفضل للتحكم بالشاشة",1.28,6,QWEN35_2B},
-            {"🪶 LFM2.5 1.2B — للهواتف 4GB، سريع جداً",0.70,3,"https://huggingface.co/LiquidAI/LFM2.5-1.2B-Instruct-GGUF/resolve/main/LFM2.5-1.2B-Instruct-QAD-Q4_0.gguf"},
+            {"⭐ الحزمة المثالية لهاتفك (تُختار حسب الرام)",2.0,3,PACK},
+            {"⭐ LFM2.5 2.6B — ذكي بالعربي، أدوات، سياق 128K (هجين، Q4_0 مسرّع)",1.59,6,LFM_26B},
+            {"🪶 LFM2.5 1.2B — الأفضل لهواتف 4GB، سريع جداً",0.70,3,LFM_12B},
+            {"📱 Qwen3.5 2B — الأفضل للتحكم بالشاشة (يُحمّل عند الحاجة)",1.28,4,QWEN35_2B},
             {"🧠 Qwen3.5 4B — الأدق بالتحكم بالهاتف (أبطأ)",2.74,8,"https://huggingface.co/unsloth/Qwen3.5-4B-GGUF/resolve/main/Qwen3.5-4B-Q4_K_M.gguf"},
             {"💻 Qwen2.5-Coder 3B — للبرمجة مع Termux",2.1,6,"https://huggingface.co/Qwen/Qwen2.5-Coder-3B-Instruct-GGUF/resolve/main/qwen2.5-coder-3b-instruct-q4_k_m.gguf"},
             {"💻 Qwen2.5-Coder 0.5B — مسودة تسريع للـCoder",0.68,3,"https://huggingface.co/Qwen/Qwen2.5-Coder-0.5B-Instruct-GGUF/resolve/main/qwen2.5-coder-0.5b-instruct-q8_0.gguf"},
@@ -262,9 +263,12 @@ public class MainActivity extends AppCompatActivity {
             if(which==0)pickModelLauncher.launch(new String[]{"*/*"});
             else if(PACK.equals(MODEL_CATALOG[which-1][3])){
                 // Screen control model first (assigned to the assistant role), then the chat model, which is loaded.
+                // Under 6 GB of RAM the 1.2B chat model: Android itself needs about 2 GB of a 4 GB phone.
+                boolean small=ramGb>0&&ramGb<5.5;
                 prefs.edit().putString("pending_role_"+fileOf(QWEN35_2B),ROLE_MANAGER).apply();
                 downloadModel("Qwen3.5 2B",QWEN35_2B,false);
-                downloadModel("LFM2.5 2.6B",LFM_26B,true);
+                downloadModel(small?"LFM2.5 1.2B":"LFM2.5 2.6B",small?LFM_12B:LFM_26B,true);
+                setWorking(true,"📥 الحزمة لهاتف "+String.format(java.util.Locale.US,"%.0f",ramGb)+"GB: "+(small?"LFM2.5 1.2B":"LFM2.5 2.6B")+" + Qwen3.5 2B");
             }
             else downloadModel((String)MODEL_CATALOG[which-1][0],(String)MODEL_CATALOG[which-1][3]);
         }).show();

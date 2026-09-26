@@ -18,7 +18,7 @@ The candidates were measured on the same tests with the app's own code on a 4-co
 - LFM2.5 2.6B is the chat model.
 - Qwen3.5 2B is assigned to screen control automatically.
 
-Both stay loaded together on a 6 GB phone. On a 4 GB phone, use LFM2.5 1.2B.
+Both stay loaded together on a 6 GB phone. On a 4 GB phone the pack picks LFM2.5 1.2B for chat, and Qwen3.5 2B is loaded only for screen tasks (the model pool frees the other one when RAM is short).
 
 Links (free):
 - https://huggingface.co/LiquidAI/LFM2.5-2.6B-GGUF/resolve/main/LFM2.5-2.6B-QAD-Q4_0.gguf
