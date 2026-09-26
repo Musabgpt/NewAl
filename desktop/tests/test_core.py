@@ -278,6 +278,7 @@ class ServerTest(unittest.TestCase):
         self.assertEqual(self.post("/api/settings", {"auto_run": True}, {"Content-Type": "text/plain"}), 403)
         self.assertEqual(self.post("/api/settings", {}, {"X-NewAl": "1", "Origin": "https://evil.example"}), 403)
         self.assertEqual(self.post("/v1/chat/completions", {}, {"Content-Type": "text/plain"}), 403)
+        self.assertEqual(self.post("/api/settings", {}, {"X-NewAl": "1", "Origin": "vscode-webview://abc"}), 403)
         self.assertEqual(self.post("/api/settings", {}, {"X-NewAl": "1", "Content-Type": "application/json"}), 200)
         self.assertFalse(config.get("auto_run"))
 

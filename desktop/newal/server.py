@@ -178,7 +178,9 @@ class Handler(BaseHTTPRequestHandler):
         origin = self.headers.get("Origin")
         ok = host in ("127.0.0.1", "localhost")
         if origin and not re.fullmatch(r"https?://(127\.0\.0\.1|localhost)(:\d+)?", origin):
-            ok = False
+            # VS Code extensions (Continue) may send a vscode-webview:// or vscode-file:// origin: allowed for the
+            # model API only, never for the app's own API (settings, commands).
+            ok = self.path.startswith("/v1/") and origin.startswith(("vscode-webview://", "vscode-file://"))
         if self.command == "POST":
             if self.path.startswith("/v1/"):
                 ok &= (self.headers.get("Content-Type") or "").startswith("application/json")
