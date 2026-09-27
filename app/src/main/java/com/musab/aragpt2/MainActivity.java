@@ -1672,6 +1672,7 @@ public class MainActivity extends AppCompatActivity {
      * instead. Connected by scanning the QR code NewAl shows under «📱 الهاتف», or by pasting its link.
      */
     private void computerBrainDialog(){
+        prepareQrScanner();
         EditText field=new EditText(this);
         field.setHint("http://192.168.1.5:8767/?k=…");
         field.setSingleLine(true);
@@ -1703,10 +1704,24 @@ public class MainActivity extends AppCompatActivity {
             GmsBarcodeScanning.getClient(this,new GmsBarcodeScannerOptions.Builder().setBarcodeFormats(Barcode.FORMAT_QR_CODE).build())
                     .startScan()
                     .addOnSuccessListener(code->connectComputerBrain(code.getRawValue(),false))
-                    .addOnFailureListener(e->setWorking(false,"تعذّر فتح ماسح QR ("+safeMessage(e)+") — الصق الرابط بدلاً منه"));
+                    .addOnFailureListener(e->{
+                        String m=safeMessage(e);
+                        setWorking(false,m.toLowerCase(java.util.Locale.ROOT).contains("download")
+                                ?"جوجل عم ينزّل ماسح QR لأول مرة (مرة وحدة بس) — جرّب كمان شوي، أو الصق الرابط"
+                                :"تعذّر فتح ماسح QR ("+m+") — الصق الرابط بدلاً منه");
+                    });
         }catch(Exception e){
             setWorking(false,"ماسح QR مش متاح على هالهاتف — الصق الرابط بدلاً منه");
         }
+    }
+
+    /** The scanner is a Play services module: asked for when the dialog opens, so it is there by the first scan. */
+    private void prepareQrScanner(){
+        try{
+            com.google.android.gms.common.moduleinstall.ModuleInstall.getClient(this).installModules(
+                    com.google.android.gms.common.moduleinstall.ModuleInstallRequest.newBuilder()
+                            .addApi(GmsBarcodeScanning.getClient(this)).build());
+        }catch(Exception ignored){}
     }
 
     private String clipboardText(){

@@ -116,5 +116,9 @@
                 android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
                 android:value="Runs a local code-generation and execution task the user started" />
         </service>
+        <!-- Google's QR scanner (🖥 عقل الكمبيوتر): installed with the app when it comes from the Play Store. -->
+        <meta-data
+            android:name="com.google.mlkit.vision.DEPENDENCIES"
+            android:value="barcode_ui" />
     </application>
 </manifest>
