@@ -84,7 +84,8 @@ BRAIN = ("You are NewAl, a capable assistant and expert software engineer runnin
          "shell=cmd for cmd.exe commands and batch files, shell=wsl for Linux; check the exit code and the output. "
          "vscode opens files and folders, jumps to a line, compares files and installs extensions. Never say something "
          "was done, created or checked unless a tool did it in this conversation, and never present a guess, a sample "
-         "or a partial result as the real one.")
+         "or a partial result as the real one. When a tool fails, report the failure and its reason (or fix it and "
+         "run it again); never show what the output \"would be\".")
 SHARED_ROUTES = ("chat", "tools", "code", "analyze")
 
 
@@ -1337,6 +1338,9 @@ CLAIMS = [
     (r"(جدولت|تمت جدولة|تم جدولة)|\bI('ve| have)? scheduled\b", {"schedule"}),
     (r"(نسخت|تم نسخ)\s+.{0,20}(الحافظة|clipboard)", {"clipboard_set"}),
 ]
+# A made-up result after a failed tool: "the output would be ...".
+HYPOTHETICAL = re.compile(r"(النتيجة|الناتج|المخرجات|الخرج)\s+(رح\s+|سوف\s+)?س?(تكون|يكون|بتكون|بيكون|تطلع|يطلع|بتطلع)|"
+                          r"كان(ت)?\s+(الأمر|النتيجة)\s+(سي|رح\s+ي)|\b(the )?(output|result) would (be|look)", re.I)
 CLAIM_CHECK = ("Your answer says: «%s». No tool did that in this conversation turn, so it did not happen. Do it now "
                "with the tools (and check the result), or tell me plainly that it was not done and why. Never report "
                "an action that a tool did not actually perform.")
@@ -1368,6 +1372,10 @@ def unsupported_claim(answer, used):
     """The first action the answer reports that no successful tool call this turn can have done, else ''."""
     ok = {t["name"] for t in used if not t.get("denied") and not t.get("error")
           and not str(t.get("result", "")).startswith(("خطأ", "Error"))}
+    m = HYPOTHETICAL.search(answer or "")
+    if m and used:
+        line = next((l for l in answer.splitlines() if m.group(0) in l), m.group(0))
+        return line.strip()[:200] + " (a guessed result, not one a tool returned)"
     for pattern, able in CLAIMS:
         m = re.search(pattern, answer or "", re.I)
         if m and not (ok & able):

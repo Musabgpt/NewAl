@@ -75,6 +75,12 @@ def run_command(command, shell="powershell", cwd="", timeout=120):
     kind = {"ps": "powershell", "pwsh": "powershell", "bat": "cmd", "bash": "wsl"}.get(kind, kind)
     if kind not in ("powershell", "cmd", "wsl"):
         return "shell غير معروف: %s (المتاح: powershell, cmd, wsl)" % shell
+    # Models often repeat the shell inside the command ("cmd /c dir" with shell=cmd): run the command itself.
+    command = re.sub(r"^\s*(cmd(\.exe)?\s+/[cCkK]\s+)" if kind == "cmd" else
+                     r"^\s*((powershell|pwsh)(\.exe)?\s+(-NoProfile\s+)?(-Command|-c)\s+)" if kind == "powershell" else
+                     r"^\s*(wsl(\.exe)?\s+(-e\s+)?(bash\s+-l?c\s+)?)", "", command or "", flags=re.I).strip()
+    if kind != "powershell" and len(command) > 1 and command[0] == command[-1] == '"':
+        command = command[1:-1]
     folder = _path(cwd) if cwd else None
     if folder and not os.path.isdir(folder):
         return "المجلد غير موجود: " + folder

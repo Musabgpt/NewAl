@@ -110,6 +110,11 @@ class ToolsTest(unittest.TestCase):
         self.assertTrue(agent.unsupported_claim("I've installed pandas", [{"name": "run_command", "result": "خطأ: x"}]))
         self.assertFalse(agent.unsupported_claim("أنشأت الملف", [{"name": "write_file", "result": "تم إنشاء الملف"}]))
         self.assertFalse(agent.unsupported_claim("الجاذبية قوة بتجذب الأجسام لبعضها", []))
+        failed = [{"name": "run_command", "result": "exit code 127"}]
+        self.assertTrue(agent.unsupported_claim("لا يوجد cmd هنا. لكن النتيجة ستكون: NewAl-ok", failed))
+        self.assertFalse(agent.unsupported_claim("النتيجة: الملف فيه مرحبا", failed))
+        self.assertEqual(tools.call("run_command", {"command": "cmd /c echo NewAl-ok", "shell": "cmd"}),
+                         "exit code 0\nNewAl-ok")
 
     def test_read_only_calls_run_together(self):
         import time as _t
