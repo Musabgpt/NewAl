@@ -114,6 +114,12 @@ class ToolsTest(unittest.TestCase):
         failed = [{"name": "run_command", "result": "exit code 127"}]
         self.assertTrue(agent.unsupported_claim("لا يوجد cmd هنا. لكن النتيجة ستكون: NewAl-ok", failed))
         self.assertFalse(agent.unsupported_claim("النتيجة: الملف فيه مرحبا", failed))
+        worked = [{"name": "run_command", "result": "exit code 0\n5"}]
+        self.assertFalse(agent.unsupported_claim("الناتج سيكون 5 كل مرة", worked))    # an explanation, not a guess
+        self.assertTrue(agent.wants_action("ثبتلي بايثون"))
+        self.assertFalse(agent.wants_action("شو هي الجاذبية"))
+        self.assertTrue(agent.wants_action("قديش بيساوي 237 × 18؟"))              # worked out by a tool, not guessed
+        self.assertTrue(agent.wants_action("calculate the compound interest"))
         self.assertEqual(tools.call("run_command", {"command": "cmd /c echo NewAl-ok", "shell": "cmd"}),
                          "exit code 0\nNewAl-ok")
 
@@ -1409,24 +1415,35 @@ class SpeedTest(unittest.TestCase):
         finally:
             config.update({"about_me": "", "answer_style": ""})
 
-    def test_chat_sends_the_same_tools_and_allows_them(self):
+    def test_chat_sends_the_same_tools_and_bans_them_unless_asked(self):
         seen = []
+        replies = []
         old = (agent.pool.chat, agent.pool.no_tool_calls)
         agent.pool.no_tool_calls = lambda role: {"logit_bias": [[7, False]]}
         agent.pool.chat = lambda role, messages, tools=None, **kw: (seen.append((tools, kw.get("extra"))),
-                                                                   {"content": "أهلاً", "tps": 1, "tool_calls": []})[1]
+                                                                   {"content": replies.pop(0) if replies else "أهلاً",
+                                                                    "tps": 1, "tool_calls": []})[1]
         config.update({"one_brain": True})
+
+        def ask(text):
+            seen.clear()
+            return agent.Turn(None, text)._agent([{"role": "system", "content": "s"},
+                                                  {"role": "user", "content": text}], "coder", "chat")[0]
         try:
-            t = agent.Turn(None, "مرحبا")
-            answer, _ = t._agent([{"role": "system", "content": "s"}, {"role": "user", "content": "مرحبا"}], "coder", "chat")
+            self.assertEqual(ask("مرحبا"), "أهلاً")
+            tools_sent, extra = seen[0]
+            self.assertEqual(tools_sent, agent.brain_tools())                 # the shared list, in its fixed order
+            self.assertEqual({d["function"]["name"] for d in tools_sent}, set(tools.brain_names()))
+            self.assertIn("logit_bias", extra)            # plain chat: one answer, no needless tool round
+            self.assertFalse(extra["chat_template_kwargs"]["enable_thinking"])
+            self.assertEqual(len(seen), 1)
+            ask("افتح إعدادات الشبكة")
+            self.assertNotIn("logit_bias", seen[0][1])    # an action: the brain keeps its tools
+            replies[:] = ["أنشأت لك الملف notes.txt", "ما عملت شي"]
+            self.assertEqual(ask("شو رأيك"), "ما عملت شي")
+            self.assertNotIn("logit_bias", seen[1][1])    # it claimed an action: the tools path checks it
         finally:
             agent.pool.chat, agent.pool.no_tool_calls = old
-        self.assertEqual(answer, "أهلاً")
-        tools_sent, extra = seen[0]
-        self.assertEqual(tools_sent, agent.brain_tools())                 # the shared list, in its fixed order
-        self.assertEqual({d["function"]["name"] for d in tools_sent}, set(tools.brain_names()))
-        self.assertNotIn("logit_bias", extra)            # the brain decides itself when chat needs a tool
-        self.assertFalse(extra["chat_template_kwargs"]["enable_thinking"])
 
     def test_passing_asserts_replace_the_judge(self):
         judged = []

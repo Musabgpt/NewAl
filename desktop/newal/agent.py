@@ -1,6 +1,7 @@
 """One turn of a conversation: route, gather context, answer with the right model, verify code."""
 
 import datetime
+import json
 import os
 import platform
 import re
@@ -385,17 +386,20 @@ class Turn:
     def _agent(self, messages, role, route="tools"):
         context = " ".join(m["content"] for m in messages[-4:] if m["role"] == "user")
         shared = unified(role, route)
-        if route == "chat" and not shared:
-            # Plain conversation with a small model: no tool list (~1500 prompt tokens saved) and no tool calls.
-            # The brain always keeps its tools: it decides itself when a request needs one ("open the settings"
-            # sounds like chat but is an action), so nothing is answered as done without being done.
+        web_first = config.get("web") and needs_web(self.text)
+        if route == "chat" and not (shared and (web_first or wants_action(self.text))):
+            # Plain conversation: one answer, no tool calls. A small model gets no tool list (~1500 prompt tokens
+            # saved); the brain gets its usual one (already in its cache) with the tool-call token banned: a needless
+            # tool round re-reads its results at ~28 tokens/s on a laptop. A request that names an action ("open
+            # the settings") keeps its tools, and an answer that still reports an action or starts a tool call goes
+            # through the tools path below, so nothing is answered as done without being done.
             r = pool.chat(role, messages, tools=brain_tools() if shared else None, on_delta=self._delta,
                           cancel=self.cancel, extra=dict(pool.no_tool_calls(role) or {}, **self._extra(role)))
             if not TOOL_MARKUP.search(r["content"]) and not unsupported_claim(r["content"], self.tools_used):
                 return r["content"].strip(), {"tps": r["tps"]}
             # The model wanted a tool after all: go through the tools path.
             self.emit({"type": "draft_reset"})
-        if config.get("web") and needs_web(self.text):
+        if web_first:
             # Search and read the best pages in parallel, then answer once: one model call instead of
             # a round (with the whole prompt re-read on CPU) for every search and every page.
             found = self._web_context(self.text)
@@ -535,7 +539,7 @@ class Turn:
                                                       if missing_files else "") +
                                                      ("No tool did this: «%s»." % claim if claim else "")}
             else:
-                verdict = self._goal_check(self.text, messages, answer)
+                verdict = self._goal_check(self.text, messages, answer, role, defs)
             last_missing = verdict.get("missing", "")
             self.emit({"type": "goal_check", "done": verdict.get("done"), "missing": last_missing})
             if verdict.get("done"):
@@ -862,21 +866,39 @@ class Turn:
         self.tools_used.append({"name": "code_task", "args": task, "result": result[:500]})
         return result
 
-    def _goal_check(self, goal, messages, answer):
+    def _goal_check(self, goal, messages, answer, role=None, defs=None):
         judge = catalog.pick("judge")
         evidence = "\n\n".join("[%s] %s" % (m["role"], (m.get("content") or "")[-1200:])
                                  for m in messages[-12:] if m["role"] in ("tool", "assistant") and m.get("content"))
         schema = {"type": "object", "properties": {"done": {"type": "boolean"}, "missing": {"type": "string"}},
                   "required": ["done", "missing"]}
         self.emit({"type": "status", "text": "🧠 هل تحقق الهدف؟"})
+        workspace = "NewAl workspace folder: %s\n\n" % config.WORKSPACE
+        files = ""
+        for p in self._real_paths(answer + "\n" + evidence)[:10]:
+            files += "%s: %s\n" % (p, ("exists, %d bytes" % os.path.getsize(p)) if os.path.isfile(p) else
+                                    "folder exists" if os.path.isdir(p) else "DOES NOT EXIST")
+        if files:
+            evidence += "\n\n[filesystem check by NewAl]\n" + files
+        if role and judge == role:
+            # The judge is the model that did the work: asked inside the same conversation, llama.cpp still has all
+            # of it read and only reads the question (~150 tokens). A separate prompt re-read up to ~4000 tokens of
+            # evidence at every check (~2 minutes on a laptop CPU), and saw less of it (1200 characters per result).
+            try:
+                ask = messages + [{"role": "assistant", "content": answer}, {"role": "user", "content": (
+                    GOAL_CHECK_IN_PLACE % (goal[:2000], ("[filesystem check by NewAl]\n" + files) if files else ""))}]
+                r = pool.chat(role, ask, tools=defs, cancel=self.cancel, max_tokens=200, temperature=0,
+                              extra=dict(pool.no_tool_calls(role) or {},
+                                         chat_template_kwargs={"enable_thinking": False}, response_format={"type": "json_schema",
+                                                          "json_schema": {"name": "answer", "schema": schema}}))
+                verdict = json.loads(r["content"][r["content"].index("{"):r["content"].rindex("}") + 1])
+                if isinstance(verdict.get("done"), bool):
+                    return verdict
+            except Cancelled:
+                raise
+            except Exception:  # noqa: BLE001 - checked the usual way below
+                pass
         try:
-            workspace = "NewAl workspace folder: %s\n\n" % config.WORKSPACE
-            files = ""
-            for p in self._real_paths(answer + "\n" + evidence)[:10]:
-                files += "%s: %s\n" % (p, ("exists, %d bytes" % os.path.getsize(p)) if os.path.isfile(p) else
-                                        "folder exists" if os.path.isdir(p) else "DOES NOT EXIST")
-            if files:
-                evidence += "\n\n[filesystem check by NewAl]\n" + files
             return pool.complete_json(judge, [
                 {"role": "system", "content": "Decide whether the goal was actually reached, using only the tool results "
                                               "as evidence (claims without evidence do not count). Check every part: "
@@ -974,7 +996,7 @@ class Turn:
         for img in images_in(result):                # a picture the tool made (🎨): shown under the answer
             self.images.append(img)
             self.emit({"type": "image", "path": img, "caption": "🎨 " + os.path.basename(img)})
-        return result
+        return squeeze(result, None if name in FULL_RESULTS else TOOL_RESULT_CHARS)
 
     def _tools(self, calls):
         """Results of one step's tool calls, in order. Calls that only read (searches, pages, files) run at the same
@@ -1334,6 +1356,11 @@ REVIEW_PROMPT = ("You review a code change before it is handed to the user. Comp
                  "Report only real problems, not style or taste. JSON: ok (true when it can be handed over) and "
                  "problems (short, concrete fixes; empty when ok).")
 MAX_GOAL_CHECKS = 6
+GOAL_CHECK_IN_PLACE = ("Check now, before I accept it, whether the goal was actually reached, using only the tool "
+                       "results in this conversation as evidence (claims without evidence do not count). Check every "
+                       "part: the right place (folder/file names), the right numbers (count them yourself in the tool "
+                       "output, no duplicates) and the right content.\nGoal:\n%s\n%s\nReply with JSON only: done, and "
+                       "missing = what is wrong or still to do (or a one-line confirmation).")
 CODE_TASK_TOOL = {"type": "function", "function": {
     "name": "code_task",
     "description": "Write a program for a task and run/test/fix it until it works. Returns the working program, "
@@ -1391,12 +1418,53 @@ def claimed_paths(text, absolute_only=False):
     return out if config.IS_WINDOWS or os.environ.get("NEWAL_TEST_PATHS") else [p for p in out if not p[1:3] == ":\\"]
 
 
+# What the model reads back from a tool. Every character costs reading time (~28 tokens/s on a laptop CPU, and the
+# rest of the turn re-reads nothing before it): progress bars, colour codes and repeated lines are dropped, and
+# command output is kept to its start and its end, where the command and the error or the result are (tool-output
+# pruning without a model call, like Squeez, arXiv 2604.04979). Files read for editing are kept whole.
+TOOL_RESULT_CHARS = 3500
+FULL_RESULTS = {"read_file", "github_read", "read_project_file", "search_memory"}
+_ANSI = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
+_PROGRESS = re.compile(r"^\s*(?:\d{1,3}(?:\.\d+)?\s?%\s*\|.*|[━█▉▊▋▌▍▎▏░▒▓]+.*|[#=>.\-\s|]{12,}|(?:Downloading|"
+                       r"Using cached|Requirement already satisfied)\b.*)$")
+
+
+def squeeze(text, limit=None):
+    text = _ANSI.sub("", str(text))
+    out, last, repeats, blank = [], None, 0, 0
+    for line in text.replace("\r\n", "\n").split("\n"):
+        line = line.rsplit("\r", 1)[-1].rstrip()          # a line redrawn in place: its last state only
+        if _PROGRESS.fullmatch(line) and "rror" not in line:
+            continue
+        if line == last and line:
+            repeats += 1
+            continue
+        if repeats:
+            out.append("(the line above %d more times)" % repeats)
+            repeats = 0
+        blank = blank + 1 if not line else 0
+        if blank > 1:
+            continue
+        out.append(line)
+        last = line
+    if repeats:
+        out.append("(the line above %d more times)" % repeats)
+    text = "\n".join(out).strip()
+    return connectors.clip(text, limit) if limit else text
+
+
+_FAILED = re.compile(r"خطأ|Error|رفض|exit code [1-9-]")
+
+
 def unsupported_claim(answer, used):
     """The first action the answer reports that no successful tool call this turn can have done, else ''."""
     ok = {t["name"] for t in used if not t.get("denied") and not t.get("error")
           and not str(t.get("result", "")).startswith(("خطأ", "Error"))}
+    failed = [t for t in used if t.get("denied") or t.get("error") or _FAILED.match(str(t.get("result", "")))]
     m = HYPOTHETICAL.search(answer or "")
-    if m and used:
+    if m and failed:
+        # Only after a tool failed: "the result will be 5" after a tool that worked is an explanation, and sending it
+        # back cost a whole extra round.
         line = next((l for l in answer.splitlines() if m.group(0) in l), m.group(0))
         return line.strip()[:200] + " (a guessed result, not one a tool returned)"
     for pattern, able in CLAIMS:
@@ -1445,6 +1513,21 @@ BROWSER_WORDS = re.compile(r"متصفح|browser|سجل دخول|login|اضغط �
 
 def needs_web(text):
     return bool(_WEB.search(text)) and not _LOCAL.search(text)
+
+
+# Words that ask for something to be done (not only said): with these a chat request keeps its tools. Calculations
+# too: a number is worked out by running it, not guessed.
+_ACTION = re.compile(r"ثب[ّ]?ت|نز[ّ]?ل|حم[ّ]?ل|احذف|امسح|انقل|انسخ|سم[ّ]?ي|غي[ّ]?ر اسم|جدول|ذك[ّ]?رني|نب[ّ]?هني|سك[ّ]?ر|"
+                     r"ارفع|ابعث|ارسل|أرسل|احفظ|سج[ّ]?ل|اضبط|فع[ّ]?ل|وق[ّ]?ف|احسب|حسب|بيساوي|يساوي|حل المعادلة|"
+                     r"\d\s*[-+*/×÷^%]\s*\d|"
+                     r"\b(install|download|delete|remove|move|copy|rename|schedule|remind|save|upload|send|set|"
+                     r"enable|disable|stop|start|launch|check|calculate|compute|solve|equals)\b", re.I)
+
+
+def wants_action(text):
+    """The request names something to do on this computer or online (the brain keeps its tools for it)."""
+    from .router import _COMPUTER
+    return bool(_ACTION.search(text) or _LOCAL.search(text) or _COMPUTER.search(text))
 
 
 def is_local(text):
