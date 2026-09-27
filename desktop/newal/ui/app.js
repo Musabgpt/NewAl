@@ -322,9 +322,74 @@ function addBot() {
           }
         }
       }
+      if (meta.outputs && meta.outputs.files) out.appendChild(filesCard(meta.outputs));
       actions(d.querySelector(".actions"), text, meta, id);
     },
   };
+}
+
+// ------------------------------------------------------------------ files a program made
+
+const FILE_ICON = [[/\.(png|jpe?g|gif|svg|webp)$/i, "🖼"], [/\.(html?)$/i, "🌐"], [/\.(py|js|ts|java|c|cpp|cs|go|rs|ps1)$/i, "📜"],
+  [/\.(csv|xlsx?|json)$/i, "📊"], [/\.(docx?|pdf|md|txt)$/i, "📄"], [/\.(zip|exe)$/i, "📦"]];
+
+function fileSize(n) {
+  return n < 1024 ? n + " B" : n < 1 << 20 ? (n / 1024).toFixed(1) + " KB" : (n / (1 << 20)).toFixed(1) + " MB";
+}
+
+// The address of a file in the workspace served as a site (a page with its own css/js), or "" outside it.
+function outUrl(path) {
+  const ws = (state && state.workspace || "").replace(/[\\/]+$/, "");
+  if (!ws || !path.startsWith(ws)) return "";
+  return "/out/" + path.slice(ws.length + 1).split(/[\\/]/).map(encodeURIComponent).join("/");
+}
+
+function filesCard(o) {
+  const card = document.createElement("div");
+  card.className = "filecard";
+  const head = document.createElement("div");
+  head.className = "head";
+  const name = o.folder.split(/[\\/]/).pop();
+  head.innerHTML = '<span dir="ltr"></span>';
+  head.firstChild.textContent = "📁 " + name + " · " + (o.files.length + (o.more || 0)) + " ملف";
+  const btn = (label, title, fn) => {
+    const b = document.createElement("button");
+    b.textContent = label; b.title = title; b.onclick = fn; return b;
+  };
+  const tools = document.createElement("span");
+  tools.append(
+    btn("🗜 تنزيل الكل ZIP", "المجلد كامل بملف مضغوط", async () => {
+      const r = await api("/api/zip", {folder: o.folder});
+      if (r.path) location.href = "/api/file?path=" + encodeURIComponent(r.path);
+    }),
+    btn("📂 فتح المجلد", o.folder, () => api("/api/open", {path: o.folder})));
+  const page = o.files.find(f => f.rel === "index.html") || o.files.find(f => /\.html?$/i.test(f.name));
+  if (page && outUrl(page.path)) tools.prepend(btn("▶ تشغيل", "يفتح الموقع بلوحة المعاينة", () => openCanvasUrl(outUrl(page.path), page.rel, page.path)));
+  head.appendChild(tools);
+  card.appendChild(head);
+  const list = document.createElement("div");
+  list.className = "list";
+  for (const f of o.files) {
+    const row = document.createElement("div");
+    row.className = "row";
+    const icon = (FILE_ICON.find(([re]) => re.test(f.name)) || [0, "📄"])[1];
+    const label = document.createElement("span");
+    label.className = "name"; label.dir = "ltr"; label.textContent = icon + " " + f.rel;
+    const size = document.createElement("span");
+    size.className = "size"; size.textContent = fileSize(f.size);
+    const acts = document.createElement("span");
+    if (/\.(html?|svg|png|jpe?g|gif|webp|md|txt|py|js|css|json|csv)$/i.test(f.name) && outUrl(f.path))
+      acts.appendChild(btn("👁", "معاينة", () => openCanvasUrl(outUrl(f.path), f.rel, f.path)));
+    acts.appendChild(btn("↗", "فتح بالبرنامج المناسب", () => api("/api/open", {path: f.path})));
+    const dl = document.createElement("a");
+    dl.href = "/api/file?path=" + encodeURIComponent(f.path); dl.textContent = "⬇"; dl.title = "تنزيل";
+    acts.appendChild(dl);
+    row.append(label, size, acts);
+    list.appendChild(row);
+  }
+  if (o.more) { const m = document.createElement("div"); m.className = "size"; m.textContent = "+ " + o.more + " ملف آخر بالمجلد"; list.appendChild(m); }
+  card.appendChild(list);
+  return card;
 }
 
 function actions(el, text, meta, id) {
@@ -494,7 +559,20 @@ table{border-collapse:collapse}td,th{border:1px solid #ccc;padding:4px 8px}</sty
   return /<html[\s>]/i.test(code) ? code : `<!doctype html><html><head><meta charset="utf-8"></head><body>${code}</body></html>`;
 }
 
+// A file or a whole site from the workspace (a page with its css, js and pictures), run in the same sandbox.
+async function openCanvasUrl(url, file, path) {
+  let code = "";
+  if (!/\.(png|jpe?g|gif|webp)$/i.test(file)) try { code = (await (await fetch(url)).text()).slice(0, 200000); } catch (_) {}
+  Object.assign(canvas, {lang: /\.svg$/i.test(file) ? "svg" : "html", code, file, original: code, url, path});
+  $("#canvas").hidden = false;
+  document.body.classList.add("with-canvas");
+  $("#canvasTitle").textContent = "📄 " + file;
+  $("#canvasCode").value = code;
+  canvasTab("preview");
+}
+
 function openCanvas(lang, code, file) {
+  canvas.url = canvas.path = "";
   Object.assign(canvas, {lang: lang || (/^\s*<svg\b/i.test(code) ? "svg" : "html"), code, file: file || "", original: code});
   const el = $("#canvas");
   el.hidden = false;
@@ -517,7 +595,8 @@ function canvasTab(tab) {
     fresh.hidden = false;
     frame.replaceWith(fresh);
     frame = fresh;
-    frame.srcdoc = canvasDoc(canvas.lang, canvas.code);
+    if (canvas.url && canvas.code === canvas.original) frame.src = canvas.url;   // the site as it is on disk
+    else frame.srcdoc = canvasDoc(canvas.lang, canvas.code);                     // edited here: the edited copy
   }
   frame.hidden = tab !== "preview";
   code.hidden = tab !== "code";
@@ -561,7 +640,7 @@ function wireCanvas() {
     api("/api/open", {path: open ? j.path : j.path.replace(/[\\/][^\\/]+$/, "")});
   };
   $("#canvasSave").onclick = () => saveAs(false);
-  $("#canvasOpen").onclick = () => saveAs(true);
+  $("#canvasOpen").onclick = () => canvas.url && canvas.code === $("#canvasCode").value ? api("/api/open", {path: canvas.path}) : saveAs(true);
   $("#canvasSend").onclick = canvasAsk;
   $("#canvasAsk").onkeydown = e => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); canvasAsk(); } };
 }

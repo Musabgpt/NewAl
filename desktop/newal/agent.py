@@ -1011,6 +1011,11 @@ class Turn:
             answer += ("\n\n> ⚠️ جرّبت الكود %d مرات وما زال فيه مشكلة%s. آخر خطأ:\n> `%s`"
                        % (info["attempts"], " (أعاد النموذج نفس الكود)" if info.get("note") == "same_code" else "",
                           why[:300]))
+        kept = info.get("project") or folder
+        if kept and os.path.isdir(kept):
+            # Everything the program is made of and made: open, download, preview or zip it from the chat.
+            info["outputs"] = outputs(kept)
+            self.emit(dict(info["outputs"], type="files"))
         if history and info.get("verified") is not None:
             later(self._learn, request, history, code, info.get("verified"), info.get("run_output", ""))
         return answer, info
@@ -1335,9 +1340,13 @@ def run_page(path):
     return res["ok"], out, False
 
 
+_last_run = threading.local()        # the folder the last run_code of this thread worked in
+
+
 def run_code(runner, code, timeout=60):
     folder = os.path.join(config.WORKSPACE, "runs", time.strftime("%Y%m%d-%H%M%S-") + os.urandom(3).hex())
     os.makedirs(folder, exist_ok=True)
+    _last_run.folder = folder
     if runner in langs.FILES:
         return langs.run(runner, code, folder, timeout)
     if runner == "browser":
@@ -1483,7 +1492,7 @@ def run_program(prog, timeout=90):
     """Runs one block or a whole project: (ok, output, timed_out, folder)."""
     if not prog["project"]:
         ok, out, slow = run_code(prog["lang"], prog["files"]["main"])
-        return ok, out, slow, None
+        return ok, out, slow, getattr(_last_run, "folder", None)
     folder = os.path.join(config.WORKSPACE, "runs", time.strftime("%Y%m%d-%H%M%S-") + os.urandom(3).hex())
     for rel, code in prog["files"].items():
         path = os.path.join(folder, *rel.split("/"))
@@ -1519,8 +1528,41 @@ def run_boxed(prog):
     res = sandbox.run(prog["lang"], prog["files"]["main"], folder)
     if res is None:
         ok, out, slow = run_code(prog["lang"], prog["files"]["main"])
-        return ok, out, slow, None
+        return ok, out, slow, getattr(_last_run, "folder", None)
     return res[0], res[1], res[2], folder
+
+
+SKIP_DIRS = {"__pycache__", ".pytest_cache", ".git", "node_modules", ".venv", "venv"}
+
+
+def outputs(folder, limit=60):
+    """What a program left in its folder (its code and the files it wrote), for the file card under the answer:
+    {"folder", "files": [{"path", "rel", "name", "size"}], "more": n}."""
+    found = []
+    for root, dirs, names in os.walk(folder):
+        dirs[:] = sorted(d for d in dirs if d not in SKIP_DIRS)
+        for n in sorted(names):
+            path = os.path.join(root, n)
+            try:
+                size = os.path.getsize(path)
+            except OSError:
+                continue
+            found.append({"path": path, "rel": os.path.relpath(path, folder).replace(os.sep, "/"), "name": n,
+                          "size": size})
+    return {"folder": folder, "files": found[:limit], "more": max(0, len(found) - limit)}
+
+
+def zip_folder(folder):
+    """The folder as a .zip next to it (rebuilt each time: the program may have changed it)."""
+    import zipfile
+    dest = folder.rstrip("\\/") + ".zip"
+    with zipfile.ZipFile(dest, "w", zipfile.ZIP_DEFLATED) as z:
+        for root, dirs, names in os.walk(folder):
+            dirs[:] = [d for d in dirs if d not in SKIP_DIRS]
+            for n in names:
+                path = os.path.join(root, n)
+                z.write(path, os.path.join(os.path.basename(folder.rstrip("\\/")), os.path.relpath(path, folder)))
+    return dest
 
 
 def save_project(folder, request):

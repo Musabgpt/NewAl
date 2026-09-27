@@ -1608,6 +1608,30 @@ class FeaturesTest(unittest.TestCase):
         self.assertNotIn("m400,4000", user)          # not the whole table
 
 
+class OutputsTest(unittest.TestCase):
+    def test_program_files_are_listed_and_zipped(self):
+        prog = agent.program("```python\nimport os\nos.makedirs('out', exist_ok=True)\n"
+                             "open('out/report.txt', 'w').write('hi')\nprint('done')\n```")
+        ok, out, _, folder = agent.run_program(prog)
+        self.assertTrue(ok, out)
+        self.assertTrue(folder and os.path.isdir(folder))
+        o = agent.outputs(folder)
+        rels = [f["rel"] for f in o["files"]]
+        self.assertIn("out/report.txt", rels)
+        self.assertIn("main.py", rels)
+        z = agent.zip_folder(folder)
+        with zipfile.ZipFile(z) as zf:
+            names = zf.namelist()
+        self.assertTrue(any(n.endswith("out/report.txt") for n in names), names)
+
+    def test_outputs_skip_caches(self):
+        d = os.path.join(config.WORKSPACE, "runs", "skip-test")
+        os.makedirs(os.path.join(d, "__pycache__"), exist_ok=True)
+        open(os.path.join(d, "__pycache__", "x.pyc"), "w").close()
+        open(os.path.join(d, "a.py"), "w").close()
+        self.assertEqual([f["rel"] for f in agent.outputs(d)["files"]], ["a.py"])
+
+
 class ServerTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -1640,6 +1664,23 @@ class ServerTest(unittest.TestCase):
         self.assertEqual(self.post("/api/settings", {}, {"X-NewAl": "1", "Origin": "vscode-webview://abc"}), 403)
         self.assertEqual(self.post("/api/settings", {}, {"X-NewAl": "1", "Content-Type": "application/json"}), 200)
         self.assertFalse(config.get("auto_run"))
+
+    def test_workspace_files_served_for_preview(self):
+        d = os.path.join(config.WORKSPACE, "runs", "site")
+        os.makedirs(d, exist_ok=True)
+        with open(os.path.join(d, "index.html"), "w", encoding="utf-8") as f:
+            f.write("<h1>مرحبا</h1>")
+        with urllib.request.urlopen(self.base + "/out/runs/site/") as r:
+            self.assertIn("text/html", r.headers["Content-Type"])
+            self.assertIn("مرحبا", r.read().decode())
+        for bad in ("/out/../config.json", "/out/%2e%2e/%2e%2e/etc/passwd"):
+            try:
+                urllib.request.urlopen(self.base + bad)
+                self.fail("served " + bad)
+            except urllib.error.HTTPError as e:
+                self.assertEqual(e.code, 404)
+        self.assertEqual(self.post("/api/zip", {"folder": HOME}, {"X-NewAl": "1"}), 404)
+        self.assertEqual(self.post("/api/zip", {"folder": d}, {"X-NewAl": "1"}), 200)
 
     def test_static_path_traversal(self):
         try:

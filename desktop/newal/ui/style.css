@@ -190,3 +190,14 @@ body.temp-chat #title { color: var(--warn); }
 .menu { position: absolute; top: 100%; inset-inline-end: 0; z-index: 10; display: flex; flex-direction: column; gap: 4px;
   background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 6px; min-width: 150px; }
 .menu[hidden] { display: none; }
+
+/* files a program made: open, preview, download, zip */
+.filecard { margin-top: 10px; border: 1px solid var(--line, #333); border-radius: 12px; overflow: hidden; font-size: 13px; }
+.filecard .head { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; justify-content: space-between; padding: 8px 10px; background: var(--panel, rgba(127,127,127,.08)); font-weight: 600; }
+.filecard button { font: inherit; font-size: 12px; padding: 3px 8px; margin-inline-start: 4px; border-radius: 8px; border: 1px solid var(--line, #444); background: transparent; color: inherit; cursor: pointer; }
+.filecard button:hover { background: rgba(127,127,127,.15); }
+.filecard .list { max-height: 260px; overflow: auto; }
+.filecard .row { display: flex; align-items: center; gap: 8px; padding: 4px 10px; border-top: 1px solid rgba(127,127,127,.12); }
+.filecard .row .name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-align: left; }
+.filecard .size { opacity: .6; font-size: 12px; padding: 0 10px; }
+.filecard .row a { text-decoration: none; margin-inline-start: 4px; }

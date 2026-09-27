@@ -174,6 +174,15 @@ def tune_spec():
     return {"speeds": speeds, "chosen": keep or "none"}
 
 
+def in_workspace(path):
+    """The real path when it is inside the workspace (programs' folders, projects), else None."""
+    if not path:
+        return None
+    real = os.path.realpath(path)
+    root = os.path.realpath(config.WORKSPACE)
+    return real if real == root or real.startswith(root + os.sep) else None
+
+
 def open_path(path):
     if config.IS_WINDOWS:
         os.startfile(path)  # noqa: S606 - opening the user's own file
@@ -334,6 +343,9 @@ class Handler(BaseHTTPRequestHandler):
             return self._json([{k: v for k, v in x.items() if k != "path"} for x in skills.all_skills()])
         if p == "/api/file":
             return self._file(qs.get("path", [""])[0])
+        if p.startswith("/out/"):
+            # A program's files served as a site (its page with its own css/js/pictures), for the canvas preview.
+            return self._out(urllib.parse.unquote(p[5:]))
         if p == "/v1/models":
             return self._json(openai_models())
         self._json({"error": "not found"}, 404)
@@ -514,6 +526,11 @@ class Handler(BaseHTTPRequestHandler):
             if os.path.exists(path):
                 open_path(path)
             return self._json({"ok": os.path.exists(path)})
+        if p == "/api/zip":
+            folder = in_workspace(body.get("folder", ""))
+            if not folder or not os.path.isdir(folder):
+                return self._json({"error": "المجلد غير موجود"}, 404)
+            return self._json({"path": agent.zip_folder(folder)})
         if p == "/api/vscode":
             return self._json({"text": connectors.vscode_open(body.get("path", ""))})
         self._json({"error": "not found"}, 404)
@@ -556,6 +573,24 @@ class Handler(BaseHTTPRequestHandler):
                 if not chunk:
                     break
                 self.wfile.write(chunk)
+
+    def _out(self, rel):
+        path = in_workspace(os.path.join(config.WORKSPACE, *rel.split("/")))
+        if path and os.path.isdir(path):
+            path = os.path.join(path, "index.html")
+        if not path or not os.path.isfile(path):
+            return self._json({"error": "not found"}, 404)
+        with open(path, "rb") as f:
+            data = f.read()
+        ctype = mimetypes.guess_type(path)[0] or "application/octet-stream"
+        if ctype.startswith("text/") or ctype.endswith(("javascript", "json", "xml")):
+            ctype += "; charset=utf-8"
+        self.send_response(200)
+        self.send_header("Content-Type", ctype)
+        self.send_header("Content-Length", str(len(data)))
+        self.send_header("Cache-Control", "no-cache")
+        self.end_headers()
+        self.wfile.write(data)
 
     def _upload(self):
         name = urllib.parse.unquote(self.headers.get("X-Filename") or "file")
