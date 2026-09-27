@@ -1419,7 +1419,7 @@ class SpeedTest(unittest.TestCase):
 
     def test_one_prompt_and_tool_list_for_every_kind_of_request(self):
         config.update({"one_brain": True, "about_me": "", "answer_style": ""})
-        prompts = {r: agent._system(r, "coder") for r in ("chat", "tools", "code", "analyze")}
+        prompts = {r: agent._system(r, "coder") for r in ("chat", "tools", "code", "analyze", "goal")}
         self.assertEqual(len(set(prompts.values())), 1)
         self.assertIn("Code:", prompts["chat"])
         self.assertNotEqual(agent._system("project", "coder"), prompts["chat"])       # long tasks keep their own
@@ -1452,7 +1452,7 @@ class SpeedTest(unittest.TestCase):
             self.assertEqual(ask("مرحبا"), "أهلاً")
             tools_sent, extra = seen[0]
             self.assertEqual(tools_sent, agent.brain_tools())                 # the shared list, in its fixed order
-            self.assertEqual({d["function"]["name"] for d in tools_sent}, set(tools.brain_names()))
+            self.assertEqual({d["function"]["name"] for d in tools_sent}, set(tools.brain_names()) | {"code_task"})
             self.assertIn("logit_bias", extra)            # plain chat: one answer, no needless tool round
             self.assertFalse(extra["chat_template_kwargs"]["enable_thinking"])
             self.assertEqual(len(seen), 1)
@@ -1624,7 +1624,7 @@ class SpeedTest(unittest.TestCase):
         self.assertEqual(calls[0], ("get", "coder"))
         chat = [c for c in calls if c[0] == "chat"]
         self.assertEqual(chat[0][2], agent._system("chat", "coder"))
-        self.assertEqual(chat[0][3], len(tools.brain_names()))
+        self.assertEqual(chat[0][3], len(agent.brain_tools()))
         self.assertEqual(speed.state()["state"], "ready")
 
 
@@ -2215,3 +2215,43 @@ class LaptopFindingsTest(unittest.TestCase):
         finally:
             speed.state = old
         self.assertEqual(states, ["ready"])
+
+    def test_goals_share_the_brains_prompt_and_tools(self):
+        # A goal had its own system prompt and tool list: 2873 tokens re-read before its plan (126 s of a 234 s goal).
+        from newal.engine import Cancelled
+        seen = []
+
+        def plan(role, messages, tools=None, **kw):
+            seen.append((messages, tools))
+            raise Cancelled()
+        old = (agent.pool.chat, agent.pool.no_tool_calls)
+        agent.pool.chat, agent.pool.no_tool_calls = plan, (lambda role: None)
+        config.update({"one_brain": True})
+        try:
+            t = agent.Turn(None, "اعمل ملف notes.txt وحط فيه مهامي", mode="goal")
+            with self.assertRaises(Cancelled):
+                t._goal([{"role": "system", "content": agent._system("goal", "coder")},
+                         {"role": "user", "content": t.text}], "coder")
+        finally:
+            agent.pool.chat, agent.pool.no_tool_calls = old
+        messages, tools_sent = seen[0]
+        self.assertEqual(messages[0]["content"], agent._system("chat", "coder"))
+        self.assertEqual(tools_sent, agent.brain_tools())
+        self.assertTrue(messages[-1]["content"].startswith("Goal mode."))    # the goal's rules, after the shared start
+
+    def test_tests_importing_the_function_from_its_module(self):
+        answer = ("```python\ndef is_palindrome(s):\n    s = s.replace(' ', '').lower()\n    return s == s[::-1]\n```\n"
+                  "Tests:\n```python\nfrom palindrome import is_palindrome\n\nassert is_palindrome('Race car')\n"
+                  "print('ok')\n```")
+        lang, code = agent.runnable_block(answer)
+        self.assertNotIn("from palindrome", code)
+        self.assertIn("def is_palindrome", code)
+        ok, out, _ = agent.run_code(lang, code)
+        self.assertTrue(ok, out)
+        # A name the tests import but no block defines stays an import (a real library).
+        self.assertIn("from math import sqrt", agent.runnable_block("```python\ndef f():\n    pass\n```\n```python\n"
+                                                                      "from math import sqrt\nf()\n```")[1])
+        prog = agent.program(answer)
+        self.assertTrue(agent.own_module("palindrome", "save it as palindrome.py", prog))
+        self.assertTrue(agent.own_module("main", "", prog))
+        self.assertFalse(agent.own_module("requests", answer, prog))

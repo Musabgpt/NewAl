@@ -88,7 +88,9 @@ BRAIN = ("You are NewAl, a capable assistant and expert software engineer runnin
          "was done, created or checked unless a tool did it in this conversation, and never present a guess, a sample "
          "or a partial result as the real one. When a tool fails, report the failure and its reason (or fix it and "
          "run it again); never show what the output \"would be\".")
-SHARED_ROUTES = ("chat", "tools", "code", "analyze")
+# Goals too: with their own prompt and tool list every goal re-read ~2900 tokens first (126 s of a 234 s goal in the
+# laptop's quality test); their rules now go into the goal's first message (goal_rules).
+SHARED_ROUTES = ("chat", "tools", "code", "analyze", "goal")
 
 
 def unified(role, route):
@@ -121,10 +123,8 @@ def _system(route, role=None):
     # (a clock in it made every new message re-read the whole conversation).
     now = datetime.datetime.now().strftime("%A %Y-%m-%d")
     base = BRAIN if unified(role, route) else {"code": CODER, "analyze": JUDGE, "goal": GOAL, "project": PROJECT}.get(route, PERSONA)
-    if route == "goal":
-        from . import mcp
-        extra = [k for k in tools.connected() if k not in ("base", "desktop")] + ["add-on " + k for k in mcp.manager.enabled()]
-        base += " Connected services and add-ons: %s." % (", ".join(extra) or "none")
+    if route == "goal" and not unified(role, route):
+        base += " Connected services and add-ons: %s." % connected_services()
     home = os.path.expanduser("~")
     folders = ", ".join("%s: %s" % (n, os.path.join(home, n)) for n in ("Downloads", "Desktop", "Documents", "Pictures"))
     about = custom_instructions()
@@ -145,9 +145,21 @@ def custom_instructions():
     return "\n\n".join(parts)
 
 
+def connected_services():
+    from . import mcp
+    extra = [k for k in tools.connected() if k not in ("base", "desktop")] + ["add-on " + k for k in mcp.manager.enabled()]
+    return ", ".join(extra) or "none"
+
+
+def goal_rules():
+    """Goal mode's rules when the goal runs on the brain's shared prompt: in the goal's first message."""
+    return "Goal mode. %s Connected services and add-ons: %s.\n\n" % (GOAL, connected_services())
+
+
 def brain_tools():
-    """The brain's tool list: the same for every request (see BRAIN), so llama.cpp keeps it read."""
-    return tools.definitions(tools.brain_names())
+    """The brain's tool list: the same for every request (see BRAIN), so llama.cpp keeps it read. code_task is in it
+    for goals, which share the list."""
+    return tools.definitions(tools.brain_names()) + [CODE_TASK_TOOL]
 
 
 def warm_prompts(role):
@@ -476,7 +488,13 @@ class Turn:
     def _goal(self, messages, role):
         """Works toward a goal with every tool: after the executor says it is done, the judge checks the goal
         against what the tools actually returned; if something is missing the executor continues with that."""
-        defs = tools.definitions(tools.goal_names(self.text), with_mcp=tools.mcp_for(self.text) or []) + [CODE_TASK_TOOL]
+        shared = unified(role, "goal")
+        if shared:
+            from . import mcp
+            mcp_names = tools.mcp_for(self.text)
+            defs = brain_tools() + (mcp.manager.definitions(only=mcp_names) if mcp_names else [])
+        else:
+            defs = tools.definitions(tools.goal_names(self.text), with_mcp=tools.mcp_for(self.text) or []) + [CODE_TASK_TOOL]
         steps, checks, seen, per_tool, steps_since_check = 0, 0, {}, {}, 0
         try:
             self._procedures = procedures.relevant(self.text)
@@ -487,7 +505,8 @@ class Turn:
                                                       for p in self._procedures]})
         # A short plan first: small models keep to a numbered list far better than to an open goal.
         self.emit({"type": "status", "text": "🎯 يخطط…"})
-        ask_plan = {"role": "user", "content": PLAN_PROMPT + procedures.as_prompt(self._procedures)}
+        ask_plan = {"role": "user", "content": (goal_rules() if shared else "") + PLAN_PROMPT +
+                                               procedures.as_prompt(self._procedures)}
         plan = pool.chat(role, messages + [ask_plan], tools=defs, cancel=self.cancel,
                          max_tokens=400, extra=dict(pool.no_tool_calls(role) or {}, **self._extra(role)))
         plan_text = plan["content"].strip()
@@ -1005,6 +1024,8 @@ class Turn:
 
     def _tool(self, name, arguments):
         started = time.time()
+        if name == "code_task":
+            return self._code_task(arguments)          # in the brain's shared tool list (for goals)
         if not name.startswith("mcp__"):
             # Closed world: the call is mapped to a real tool (or refused) before anything runs or is approved.
             real, fixed, error = tools.resolve(name, arguments)
@@ -1120,6 +1141,8 @@ class Turn:
             self.emit({"type": "status", "text": ("🛡 تجربة %d بصندوق ويندوز المعزول…" if boxed else "▶ تجربة %d…") % attempt})
             ok, output, timed_out, folder = run_boxed(prog) if boxed else run_program(prog)
             missing = re.search(r"No module named '?([\w.]+)'?", output) if lang == "python" else None
+            if missing and own_module(missing.group(1), answer, prog):
+                missing = None               # the answer's own module: fixed in the code, never taken from PyPI
             if missing and install_package(missing.group(1)):
                 self.emit({"type": "run", "lang": lang, "ok": False, "attempt": attempt,
                            "output": output[-1500:] + "\n\n📦 تم تثبيت " + missing.group(1)})
@@ -1653,13 +1676,25 @@ def _defined(code):
     return names
 
 
+# `from palindrome import is_palindrome`: tests importing the function from "its" module.
+_FROM_IMPORT = re.compile(r"^from[ \t]+[\w.]+[ \t]+import[ \t]+\(?([\w \t,]+?)\)?[ \t]*$", re.M)
+
+
 def join_python(blocks):
     """The last Python block, plus the earlier ones when it uses what they define (function in one block,
-    its tests in the next). A last block that stands on its own (a corrected full version) runs alone."""
-    last = blocks[-1]
+    its tests in the next). A last block that stands on its own (a corrected full version) runs alone.
+    Tests that import the function from its module («from palindrome import is_palindrome», the module being an
+    earlier block of the answer) lose that import: run alone they failed on the laptop, and NewAl went to PyPI for a
+    package called «palindrome»."""
     earlier = set()
     for c in blocks[:-1]:
         earlier |= _defined(c)
+    last = blocks[-1]
+    for m in list(_FROM_IMPORT.finditer(last)):
+        names = [n.strip() for n in m.group(1).split(",") if n.strip()]
+        if names and all(re.fullmatch(r"\w+", n) and n in earlier for n in names):
+            last = last.replace(m.group(0), "", 1)
+    blocks = blocks[:-1] + [last]
     needed = {n for n in earlier - _defined(last) if re.search(r"\b%s\b" % re.escape(n), last)}
     if not needed:
         return last
@@ -1960,6 +1995,15 @@ MISSING_RUNTIME = re.compile(r"غير مثبت على الجهاز|was not found
 PIP_NAMES = {"cv2": "opencv-python", "PIL": "pillow", "sklearn": "scikit-learn", "yaml": "pyyaml",
              "bs4": "beautifulsoup4", "dotenv": "python-dotenv", "docx": "python-docx", "fitz": "pymupdf",
              "Crypto": "pycryptodome", "dateutil": "python-dateutil", "serial": "pyserial", "win32api": "pywin32"}
+
+
+def own_module(name, answer, prog):
+    """True when a missing import is a module of the answer itself: one of its files, or «name.py» in its text (the
+    laptop's quality test: tests did «from palindrome import …» and NewAl spent two minutes on pip install palindrome,
+    which could have installed whatever PyPI has under that name)."""
+    base = name.split(".")[0]
+    files = {os.path.splitext(p.split("/")[-1])[0] for p in (prog or {}).get("files", {})}
+    return base in files or bool(re.search(r"(?<![\w.])%s\.py\b" % re.escape(base), answer or ""))
 
 
 def install_package(module):
