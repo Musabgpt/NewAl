@@ -1253,6 +1253,67 @@ class SandboxTest(unittest.TestCase):
         self.assertTrue(info["verified"])
 
 
+class UpdateAndDiagnoseTest(unittest.TestCase):
+    def test_newest_release(self):
+        from newal import updater
+        rel = lambda tag, asset=True, draft=False: {"tag_name": tag, "draft": draft, "html_url": "u/" + tag, "body": "notes " + tag,
+                                                    "assets": [{"name": "NewAl-Setup.exe", "browser_download_url": "d/" + tag, "size": 5}] if asset else []}
+        best = updater.newest([rel("desktop-b31"), rel("desktop-b35", asset=False), rel("desktop-b33"),
+                               rel("desktop-b40", draft=True), rel("android-b99"), rel("v1.0")])
+        self.assertEqual(best["build"], 33)
+        self.assertEqual(best["asset"], "d/desktop-b33")
+        self.assertIsNone(updater.newest([rel("v1")]))
+        old = updater.BUILD
+        updater._state["latest"] = best
+        try:
+            updater.BUILD = 31
+            self.assertTrue(updater.status()["available"])
+            updater.BUILD = 33
+            self.assertFalse(updater.status()["available"])
+            updater.BUILD = 0                                   # a development copy never offers updates
+            self.assertFalse(updater.status()["available"])
+        finally:
+            updater.BUILD = old
+            updater._state["latest"] = None
+
+    def test_self_test_report(self):
+        import time
+        from newal import diagnose
+
+        def boom():
+            raise RuntimeError("engine stopped (exit code 0xC0000135)")
+        old = diagnose.QUICK
+        diagnose.QUICK = [("system", "💻 الجهاز", diagnose.step_system), ("app", "📦 البرنامج", diagnose.step_app),
+                          ("models", "🧠 النماذج", diagnose.step_models), ("x", "⚡ عطل مقصود", boom),
+                          ("skip", "👁 العيون", lambda: (None, "مش منزّلة"))]
+        try:
+            diagnose.start(full=False)
+            for _ in range(300):
+                if not diagnose.status()["running"]:
+                    break
+                time.sleep(0.05)
+        finally:
+            diagnose.QUICK = old
+        st = diagnose.status()
+        self.assertEqual([x["state"] for x in st["steps"]][3:], ["fail", "skip"])
+        self.assertIn("0xC0000135", st["report"])
+        self.assertIn("⏭ 👁 العيون", st["report"])
+        self.assertIn("الإعدادات:", st["report"])
+        self.assertTrue(os.path.exists(st["file"]))
+        self.assertIn("NewAl build", st["steps"][1]["detail"])
+
+    def test_browser_step(self):
+        from newal import browser, diagnose
+        if not browser.find():
+            self.skipTest("no browser")
+        ok, detail = diagnose.step_browser()
+        self.assertTrue(ok, detail)
+
+    def test_selftest_image_is_shipped(self):
+        from newal import diagnose
+        self.assertTrue(diagnose.asset("selftest-error.png"))
+
+
 class ServerTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):

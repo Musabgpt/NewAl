@@ -454,6 +454,7 @@ async function refreshState() {
     p.className = "pill on"; p.textContent = m.label.split(" ")[0] + " " + m.title;
     loaded.appendChild(p);
   }
+  showUpdate(state.update);
   const missing = state.models.filter(m => !m.ready && m.required);
   const n = $("#notice");
   if (!state.connectors.engine) {
@@ -859,6 +860,16 @@ const panels = {
         <span class="hint">أكبر = يتذكر محادثات أطول لكن أبطأ ويستهلك ذاكرة أكثر. يُطبَّق عند إعادة تحميل النماذج.</span></div>
       <div class="field"><label>المظهر</label><select id="theme"><option value="dark">داكن</option><option value="light">فاتح</option></select></div>
       <div class="row"><button class="primary" id="saveSettings">حفظ</button><button id="speed">⚡ ضبط السرعة لجهازك</button><span id="speedOut" class="hint"></span></div>
+      <h3>🩺 فحص شامل</h3>
+      <p class="hint">بيجرّب كل شي على جهازك (الجهاز، البرنامج، النماذج، سرعة العقل، حلقة البرمجة، العيون، وضع المشروع، النت،
+        المتصفح) وبيطلع تقرير واحد: انسخه وابعتلي ياه بدل الصور.</p>
+      <div class="row"><button class="primary" id="diagFull">🩺 فحص شامل (5–15 دقيقة)</button><button id="diagQuick">⚡ فحص سريع (ثواني)</button>
+        <button id="diagCopy" hidden>📋 نسخ التقرير</button><button id="diagOpen" hidden>📂 فتح الملف</button></div>
+      <div id="diagSteps"></div>
+      <h3>⬆ التحديث</h3>
+      <div class="field"><label><input type="checkbox" id="check_updates" ${s.check_updates ? "checked" : ""}> شوف إذا في نسخة جديدة كل كم ساعة</label>
+        <span class="hint" id="updInfo">النسخة: ${state.update.dev ? "نسخة تطوير" : state.update.current}</span>
+        <button id="updCheck">🔄 شوف هلق</button></div>
       <p class="hint">مجلد NewAl: <code dir="ltr">${escapeHtml(state.home)}</code> · <a href="#" id="openHome">فتح</a></p>`;
     body.querySelector("#theme").value = localStorage.getItem("theme") || "dark";
     body.querySelector("#saveSettings").onclick = async () => {
@@ -884,6 +895,28 @@ const panels = {
       body.querySelector("#threads").value = r.best || 0;
     };
     body.querySelector("#openHome").onclick = e => { e.preventDefault(); api("/api/open", {path: state.home}); };
+    const icons = {ok: "✅", fail: "❌", skip: "⏭", running: "⏳", waiting: "▫"};
+    const showDiag = d => {
+      const box = body.querySelector("#diagSteps");
+      if (!box || !d.steps.length) return;
+      box.innerHTML = d.steps.map(x => `<div class="card"><h4><span>${icons[x.state]} ${escapeHtml(x.title)}</span><span class="hint">${x.seconds ? x.seconds + " ث" : ""}</span></h4>
+        <div class="about" dir="auto">${escapeHtml(x.detail || (x.state === "running" ? "عم يجرّب…" : ""))}</div></div>`).join("");
+      body.querySelector("#diagFull").disabled = body.querySelector("#diagQuick").disabled = d.running;
+      body.querySelector("#diagCopy").hidden = body.querySelector("#diagOpen").hidden = !d.report;
+      body.querySelector("#diagCopy").onclick = () => { navigator.clipboard.writeText(d.report); body.querySelector("#diagCopy").textContent = "✓ انسخ"; };
+      body.querySelector("#diagOpen").onclick = () => api("/api/open", {path: d.file});
+      if (d.running) setTimeout(async () => { if (!$("#panel").hidden && body.dataset.panel === "settings") showDiag(await api("/api/diagnose")); }, 2000);
+    };
+    body.querySelector("#diagFull").onclick = async () => showDiag(await api("/api/diagnose", {full: true}));
+    body.querySelector("#diagQuick").onclick = async () => showDiag(await api("/api/diagnose", {full: false}));
+    api("/api/diagnose").then(showDiag);
+    body.querySelector("#check_updates").onchange = e => api("/api/settings", {check_updates: e.target.checked});
+    body.querySelector("#updCheck").onclick = async () => {
+      const u = await api("/api/app-update", {});
+      body.querySelector("#updInfo").textContent = u.error ? "ما قدرت أوصل لـ GitHub: " + u.error :
+        u.available ? `في نسخة ${u.latest.build} (عندك ${u.current}): شوف الشريط فوق` : `عندك أحدث نسخة${u.latest ? " (" + u.latest.build + ")" : ""}`;
+      showUpdate(u);
+    };
   },
 
   async update(body) {
@@ -953,6 +986,25 @@ function showPanel(name) {
 }
 
 // ------------------------------------------------------------------ wiring
+
+function showUpdate(u) {
+  const bar = $("#updateBar");
+  if (!u || !(u.available || u.downloading || u.message)) { bar.hidden = true; return; }
+  bar.hidden = false;
+  if (u.downloading || u.message) {
+    bar.textContent = u.message || `⬇ عم ينزّل النسخة ${u.latest.build}… ${u.total ? Math.round(100 * u.done / u.total) + "%" : ""}`;
+    setTimeout(async () => showUpdate(await api("/api/app-update")), 1500);
+    return;
+  }
+  bar.innerHTML = `⬆ في نسخة جديدة من NewAl (رقم ${u.latest.build}، عندك ${u.current}). `;
+  const go = document.createElement("button");
+  go.textContent = "حدّث هلق"; go.className = "primary";
+  go.onclick = async () => { go.disabled = true; showUpdate(Object.assign(u, await api("/api/app-update", {action: "install"}), {downloading: true})); };
+  const what = document.createElement("a");
+  what.href = "#"; what.textContent = "شو الجديد؟";
+  what.onclick = e => { e.preventDefault(); alert(u.latest.notes || "—"); };
+  bar.append(go, " ", what);
+}
 
 async function showProject() {
   const s = await api("/api/project");

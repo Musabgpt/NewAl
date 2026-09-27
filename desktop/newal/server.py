@@ -14,7 +14,7 @@ import urllib.request
 import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-from . import addons, agent, browser, catalog, config, connectors, lessons, memory, phone, router, sandbox, school, skills, tasks, training, workspace
+from . import addons, agent, browser, catalog, config, connectors, diagnose, lessons, memory, phone, router, sandbox, school, skills, tasks, training, updater, workspace
 from .engine import Cancelled, pool
 
 UI_DIR = os.path.join(config.BUNDLE, "ui")
@@ -96,6 +96,7 @@ def state():
         "index": memory.index_state(),
         "training": training.stats(),
         "sandbox": sandbox.available(),
+        "update": updater.status(),
         "browser": bool(browser.find()),
         "home": config.HOME,
         "workspace": config.WORKSPACE,
@@ -293,6 +294,10 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(school.status())
         if p == "/api/tasks":
             return self._json(tasks.listing())
+        if p == "/api/diagnose":
+            return self._json(diagnose.status())
+        if p == "/api/app-update":
+            return self._json(updater.status())
         if p == "/api/project":
             cur = config.get("project_path")
             return self._json({"path": cur if cur and os.path.isdir(cur) else "", "recent": workspace.recent(),
@@ -384,6 +389,12 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json(addons.install(body.get("id", ""), body.get("extra")))
             except Exception as e:  # noqa: BLE001
                 return self._json({"ok": False, "message": str(e)})
+        if p == "/api/diagnose":
+            return self._json(diagnose.start(full=bool(body.get("full", True))))
+        if p == "/api/app-update":
+            if body.get("action") == "install":
+                return self._json(updater.install())
+            return self._json(updater.check(force=True))
         if p == "/api/tasks":
             act = body.get("action")
             if act == "add":

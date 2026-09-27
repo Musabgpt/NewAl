@@ -80,7 +80,8 @@ DEFAULTS = {
     "api_port": 8766,
     "review_changes": True,
     "tests_first": True,
-    "sandbox_risky": True,        # risky generated code runs in Windows Sandbox (when Windows has it) instead of asking          # project mode: a project without tests gets a small pytest file first       # project mode: review the diff against the task before handing it over
+    "sandbox_risky": True,
+    "check_updates": True,        # look for a newer NewAl build on GitHub every few hours        # risky generated code runs in Windows Sandbox (when Windows has it) instead of asking          # project mode: a project without tests gets a small pytest file first       # project mode: review the diff against the task before handing it over
     "spec_type": "",              # speculative decoding for the brain ("ngram-mod"), kept only when measured faster
     "school_enabled": False,      # Kaggle School: hard tasks go to Kaggle's GPUs every week
     "school_hours": 30,           # GPU hours per week it may use (Kaggle gives ~30)

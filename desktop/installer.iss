@@ -34,5 +34,7 @@ Name: "{autodesktop}\NewAl"; Filename: "{app}\NewAl.exe"; Tasks: desktopicon
 
 [Run]
 Filename: "{app}\NewAl.exe"; Description: "{cm:LaunchProgram,NewAl}"; Flags: nowait postinstall skipifsilent
+; An update from inside NewAl installs silently: start the new version when it is done.
+Filename: "{app}\NewAl.exe"; Flags: nowait; Check: WizardSilent
 
 ; Models, conversations and settings live in %USERPROFILE%\NewAl and are kept on uninstall.

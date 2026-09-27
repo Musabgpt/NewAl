@@ -6,6 +6,9 @@ on:
     paths: [ "desktop/**", ".github/workflows/build-windows.yml" ]
   workflow_dispatch:
 
+permissions:
+  contents: write          # publish each build as a release for the in-app updater
+
 jobs:
   build:
     runs-on: windows-latest
@@ -110,6 +113,11 @@ jobs:
           Stop-Process -Id $p.Id -Force
           if (-not $ok -or -not $r.content) { throw "llama-server did not answer" }
 
+      - name: Stamp the build number
+        run: |
+          Set-Content newal/version.py "`"`"`"This build's number: the GitHub Actions run that built it.`"`"`"`n`nBUILD = ${{ github.run_number }}`nCOMMIT = `"${{ github.sha }}`"`n"
+          Get-Content newal/version.py
+
       - name: Build NewAl.exe
         run: |
           pyinstaller --noconfirm --windowed --name NewAl --icon assets/newal.ico `
@@ -129,6 +137,20 @@ jobs:
           if (-not (Test-Path $iscc)) { choco install innosetup -y --no-progress; $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" }
           & $iscc installer.iss
           Compress-Archive -Path dist/NewAl/* -DestinationPath dist/NewAl-portable.zip
+
+      - name: Publish the build (in-app updates)
+        if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $tag = "desktop-b${{ github.run_number }}"
+          $title = "NewAl build ${{ github.run_number }}"
+          git log -1 --format=%B | Set-Content notes.txt
+          gh release create $tag dist/NewAl-Setup.exe dist/NewAl-portable.zip --title $title --notes-file notes.txt --target ${{ github.sha }} --latest
+          # keep the newest 6 desktop builds
+          $old = gh release list --limit 60 --json tagName --jq '.[].tagName' | Where-Object { $_ -match '^desktop-b\d+$' } |
+                 Sort-Object { [int]($_ -replace 'desktop-b', '') } -Descending | Select-Object -Skip 6
+          foreach ($t in $old) { gh release delete $t --cleanup-tag --yes }
 
       - name: Upload installer
         uses: actions/upload-artifact@v4

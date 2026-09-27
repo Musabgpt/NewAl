@@ -100,6 +100,7 @@ class Turn:
                  project=None, plan=False):
         self.conv = conv
         self.plan = plan               # project mode: explore and write a plan only, change nothing
+        self.max_steps = MAX_PROJECT_STEPS
         self.project = project         # project mode: this folder instead of the open project (background tasks)
         self.text = text
         self.attachments = list(attachments)
@@ -420,7 +421,7 @@ class Turn:
         if self.plan:        # looking only: nothing that changes or runs anything
             defs = [d for d in defs if d["function"]["name"] not in READ_ONLY_BLOCKED]
         steps, checks, reviews, failures, verified, answer, tps, searched = 0, 0, 0, [], None, "", 0, False
-        while steps < MAX_PROJECT_STEPS:
+        while steps < self.max_steps:
             self.emit({"type": "status", "text": "🧑‍💻 خطوة %d…" % (steps + 1)})
             compact(messages, keep=8, budget_chars=context_chars(role))
             try:
@@ -779,9 +780,12 @@ class Turn:
                     break
                 problem = "The program ran but the result is wrong: %s\nOutput:\n%s" % (
                     verdict.get("reason", ""), output[-1500:])
+                info["judge"] = verdict.get("reason", "")        # why it was rejected, for the report
+                info["rejected"] = True
             else:
                 self.emit({"type": "run", "lang": lang, "ok": False, "attempt": attempt, "output": output[-2000:]})
                 problem = "Running it failed:\n" + output[-2000:]
+                info["rejected"] = False
             info["verified"] = False
             if attempt == limit:
                 break
@@ -821,7 +825,8 @@ class Turn:
                 info["project"] = save_project(folder, request)
                 answer += "\n\n📁 المشروع كامل ومجرّب، محفوظ في: `%s`" % info["project"]
         if info.get("verified") is False:
-            why = error_line(info.get("run_output", "")) or info.get("judge", "")
+            why = (info.get("judge") if info.get("rejected") else error_line(info.get("run_output", ""))) \
+                or info.get("judge", "")
             answer += ("\n\n> ⚠️ جرّبت الكود %d مرات وما زال فيه مشكلة%s. آخر خطأ:\n> `%s`"
                        % (info["attempts"], " (أعاد النموذج نفس الكود)" if info.get("note") == "same_code" else "",
                           why[:300]))
