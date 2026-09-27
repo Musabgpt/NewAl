@@ -14,7 +14,7 @@ import urllib.request
 import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-from . import addons, agent, catalog, config, connectors, lessons, memory, phone, router, skills, training, workspace
+from . import addons, agent, catalog, config, connectors, lessons, memory, phone, router, school, skills, training, workspace
 from .engine import Cancelled, pool
 
 UI_DIR = os.path.join(config.BUNDLE, "ui")
@@ -252,6 +252,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(addons.setup_status())
         if p == "/api/lessons":
             return self._json(lessons.all_lessons())
+        if p == "/api/school":
+            return self._json(school.status())
         if p == "/api/project":
             cur = config.get("project_path")
             return self._json({"path": cur if cur and os.path.isdir(cur) else "", "recent": workspace.recent(),
@@ -340,6 +342,15 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json(addons.install(body.get("id", ""), body.get("extra")))
             except Exception as e:  # noqa: BLE001
                 return self._json({"ok": False, "message": str(e)})
+        if p == "/api/school":
+            if "enabled" in body or "hours" in body:
+                config.update({k: v for k, v in (("school_enabled", body.get("enabled")),
+                                                 ("school_hours", body.get("hours"))) if v is not None})
+            if body.get("action") == "start":
+                return self._json(school.push(force=True))
+            if body.get("action") == "check":
+                return self._json(school.check())
+            return self._json(school.status())
         if p == "/api/project":
             return self._json(workspace.open_project(body.get("path", "")))
         if p == "/api/project/undo":

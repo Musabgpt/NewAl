@@ -47,6 +47,13 @@ PROJECT = ("You are NewAl, an autonomous coding agent (like Codex) working insid
            "answer by reading the code; do not touch files unrelated to the task. When finished, reply without a tool "
            "call: a short summary in the user's language of what you changed and how you checked it.")
 
+VERDICT_PROMPT = ("You check whether a program fulfils the user's request. List every thing the request asks for, then "
+                  "check each one in the code AND in the output. ok is true only if all of them are done and the printed "
+                  "results are correct. Reply with JSON; reason: one short sentence naming what is missing or wrong.")
+LESSON_PROMPT = ("A program failed and was then fixed. Write ONE general rule (English, max 30 words) that would have "
+                 "avoided the first error next time, e.g. 'On Windows open text files with encoding=\"utf-8\"'. Not about "
+                 "this task's details; about the mistake.")
+
 JUDGE = ("You are an analyst and reviewer. Think carefully, find root causes, compare options honestly, and turn vague "
          "ideas or errors into precise, actionable instructions. Answer in the user's language, using Markdown.")
 
@@ -113,6 +120,7 @@ class Turn:
         meta["seconds"] = round(time.time() - started, 1)
         user_msgs = [m for m in messages if m["role"] != "system"][-6:]
         meta["training_id"] = training.log(role, route, user_msgs, answer, verified=info.get("verified"),
+                                           attempts=info.get("attempts"),
                                            run=info.get("run_output"), judge=info.get("judge"), tools=self.tools_used)
         return answer, meta
 
@@ -634,10 +642,7 @@ class Turn:
         schema = {"type": "object", "properties": {"lesson": {"type": "string"}}, "required": ["lesson"]}
         try:
             r = pool.complete_json(brain, [
-                {"role": "system", "content": "A program failed and was then fixed. Write ONE general rule (English, "
-                                              "max 30 words) that would have avoided the first error next time, "
-                                              "e.g. 'On Windows open text files with encoding=\"utf-8\"'. Not about "
-                                              "this task's details; about the mistake."},
+                {"role": "system", "content": LESSON_PROMPT},
                 {"role": "user", "content": "Task: %s\n\nErrors in order:\n%s\n\nCode that finally worked:\n%s"
                                             % (task, "\n".join(history), final_code[:3000])}], schema, max_tokens=120)
             text = (r.get("lesson") or "").strip()
@@ -704,10 +709,7 @@ class Turn:
                   "required": ["ok", "reason"]}
         try:
             return pool.complete_json(judge, [
-                {"role": "system", "content": "You check whether a program fulfils the user's request. List every thing "
-                                              "the request asks for, then check each one in the code AND in the output. "
-                                              "ok is true only if all of them are done and the printed results are correct. "
-                                              "Reply with JSON; reason: one short sentence naming what is missing or wrong."},
+                {"role": "system", "content": VERDICT_PROMPT},
                 {"role": "user", "content": "Request:\n%s\n\nCode:\n%s\n\nOutput:\n%s" % (request[:2000], code[:5000], output[-2000:])}],
                 schema, max_tokens=150)
         except Exception:  # noqa: BLE001
@@ -819,14 +821,47 @@ def _safe_read(url, question):
         return ""
 
 
+def _defined(code):
+    """Names a Python block defines at its top level: functions, classes, imports, assignments."""
+    names = set(re.findall(r"^(?:async\s+)?(?:def|class)\s+(\w+)", code, re.M))
+    names |= set(re.findall(r"^(\w+)\s*(?::[^=\n]+)?=(?!=)", code, re.M))
+    for m in re.finditer(r"^(?:from\s+[\w.]+\s+)?import\s+(.+)$", code, re.M):
+        for part in m.group(1).replace("(", "").replace(")", "").split(","):
+            bits = part.split()
+            if bits:
+                names.add(bits[-1].split(".")[0])
+    return names
+
+
+def join_python(blocks):
+    """The last Python block, plus the earlier ones when it uses what they define (function in one block,
+    its tests in the next). A last block that stands on its own (a corrected full version) runs alone."""
+    last = blocks[-1]
+    earlier = set()
+    for c in blocks[:-1]:
+        earlier |= _defined(c)
+    needed = {n for n in earlier - _defined(last) if re.search(r"\b%s\b" % re.escape(n), last)}
+    if not needed:
+        return last
+    parts = []
+    for c in blocks:
+        if c not in parts:
+            parts.append(c)
+    return "\n\n".join(p.rstrip("\n") for p in parts) + "\n"
+
+
 def runnable_block(text):
-    """The last fenced block in a language we can run: (runner, code)."""
-    best = None
-    for lang, code in re.findall(r"```([\w+-]*)[^\n]*\n(.*?)```", text, re.S):
-        runner = RUNNABLE.get(lang.lower())
-        if runner and code.strip():
-            best = (runner, code)
-    return best
+    """The program in an answer: (runner, code). Models often put the function in one Python block and its tests
+    in the next: then the blocks are joined in order. Otherwise, and in other languages, the last block is the
+    program."""
+    blocks = [(RUNNABLE.get(lang.lower()), code) for lang, code in re.findall(r"```([\w+-]*)[^\n]*\n(.*?)```", text, re.S)]
+    blocks = [(r, c) for r, c in blocks if r and c.strip()]
+    if not blocks:
+        return None
+    runner = blocks[-1][0]
+    if runner != "python":
+        return blocks[-1]
+    return "python", join_python([c for r, c in blocks if r == "python"])
 
 
 def run_code(runner, code, timeout=60):

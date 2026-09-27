@@ -68,6 +68,8 @@ def main():
         return
     from newal import server
     httpd = server.serve(port)
+    from newal import school
+    school.start_scheduler()
     if config.get("phone_access"):
         from newal import phone
         phone.start()

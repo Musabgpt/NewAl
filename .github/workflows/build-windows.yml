@@ -113,7 +113,7 @@ jobs:
       - name: Build NewAl.exe
         run: |
           pyinstaller --noconfirm --windowed --name NewAl --icon assets/newal.ico `
-            --add-data "newal/ui;ui" --add-data "newal/skills;skills" --add-data "assets;assets" `
+            --add-data "newal/ui;ui" --add-data "newal/skills;skills" --add-data "newal/kaggle;kaggle" --add-data "assets;assets" `
             --collect-submodules newal --collect-data certifi --hidden-import truststore --collect-submodules qrcode NewAl.py
           Copy-Item -Recurse bin dist/NewAl/bin
 

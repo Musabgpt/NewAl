@@ -2,6 +2,7 @@
 
 import json
 import os
+import re
 import sys
 import tempfile
 import unittest
@@ -106,6 +107,18 @@ class AgentTest(unittest.TestCase):
         text = "شرح\n```python\nprint(1)\n```\nثم\n```bash\nls\n```\n```py\nprint(2)\n```"
         self.assertEqual(agent.runnable_block(text), ("python", "print(2)\n"))
         self.assertIsNone(agent.runnable_block("```html\n<p>x</p>\n```"))
+        split = "```python\ndef is_prime(n):\n    return n > 1\n```\nTests:\n```python\nassert is_prime(2)\nprint('ok')\n```"
+        lang, code = agent.runnable_block(split)
+        self.assertIn("def is_prime", code)
+        self.assertIn("assert is_prime(2)", code)
+        ok, out, _ = agent.run_code(lang, code)
+        self.assertTrue(ok, out)
+        self.assertEqual(agent.runnable_block("```js\nconst a = 1\n```\n```js\nconst a = 2\n```")[1], "const a = 2\n")
+        # a corrected full version after a draft runs alone
+        redo = "```python\ndef f():\n    return 1/0\nf()\n```\nFixed:\n```python\ndef f():\n    return 1\nprint(f())\n```"
+        self.assertEqual(agent.runnable_block(redo)[1], "def f():\n    return 1\nprint(f())\n")
+        imports = "```python\nimport math as m\n```\n```python\nprint(m.pi)\n```"
+        self.assertIn("import math as m", agent.runnable_block(imports)[1])
 
     def test_run_code(self):
         ok, out, slow = agent.run_code("python", "print('ok', 6*7)")
@@ -559,6 +572,12 @@ class ProjectModeTest(unittest.TestCase):
             self.assertIn("- 1", f.read())
         self.assertFalse(os.path.exists(os.path.join(root, "README.md")))
 
+    def test_powershell_line(self):
+        from newal import workspace
+        self.assertIn('; & "C:\\py\\python.exe" -m pytest; if ($LASTEXITCODE) { exit $LASTEXITCODE }',
+                      workspace.powershell_line('"C:\\py\\python.exe" -m pytest'))
+        self.assertIn("; npm test;", workspace.powershell_line("npm test"))
+
     def test_safe_commands(self):
         from newal import workspace
         self.assertTrue(workspace.is_safe("python -m pytest -q"))
@@ -602,6 +621,115 @@ class ProjectModeTest(unittest.TestCase):
         with open(os.path.join(root, "shop.py")) as f:
             self.assertIn("return sum(prices)\n", f.read())
         self.assertTrue(workspace.undo(info["checkpoint"])["ok"])
+
+
+class SchoolTest(unittest.TestCase):
+    def tearDown(self):
+        # the school tests log their own examples: leave the training folder as they found it
+        import shutil
+        shutil.rmtree(config.TRAINING)
+        shutil.copytree(self.saved, config.TRAINING)
+        shutil.rmtree(self.saved)
+        from newal import lessons
+        if os.path.exists(lessons.PATH):
+            os.remove(lessons.PATH)
+
+    def setUp(self):
+        import shutil
+        self.saved = tempfile.mkdtemp()
+        shutil.rmtree(self.saved)
+        shutil.copytree(config.TRAINING, self.saved)
+        from newal import school
+        if os.path.exists(school.STATE):
+            os.remove(school.STATE)
+        config.update({"kaggle_username": "me", "kaggle_key": "k", "school_hours": 30})
+
+    def log(self, text, **info):
+        return training.log("coder", "code", [{"role": "user", "content": "notes\n\nMy message:\n" + text}],
+                            "```python\nprint(1)\n```", **info)
+
+    def test_collect_hard_tasks_only(self):
+        from newal import school
+        easy = self.log("write a function that adds two numbers together", verified=True, attempts=1)
+        hard = self.log("parse this csv of sales and total by month", verified=True, attempts=3)
+        failed = self.log("scrape the titles from a news page with requests", verified=False, attempts=5)
+        win = self.log("اكتب سكربت باورشل يحذف الملفات القديمة", verified=False, attempts=5)
+        ids = [t["id"] for t in school.collect()]
+        self.assertIn(hard, ids)
+        self.assertIn(failed, ids)
+        self.assertNotIn(easy, ids)
+        self.assertNotIn(win, ids)                     # Windows-only: cannot run on Kaggle's Linux
+        req = next(t for t in school.collect() if t["id"] == hard)["request"]
+        self.assertEqual(req, "parse this csv of sales and total by month")
+
+    def test_kernel_source_embeds_tasks(self):
+        import base64
+        from newal import school
+        src = school.kernel_source([{"id": "a", "request": "اكتب دالة", "error": ""}], 2.5)
+        self.assertNotIn("__CONFIG__", src)
+        self.assertNotIn("__TASKS__", src)
+        compile(src, "school.py", "exec")
+        cfg = json.loads(base64.b64decode(re.search(r'CONFIG = json.loads\(base64.b64decode\("([^"]+)"', src).group(1)))
+        self.assertEqual(cfg["hours"], 2.5)
+        self.assertIn("Qwen3.6-35B-A3B", cfg["model_url"])
+        self.assertIn("self-test", cfg["coder_prompt"])
+
+    def test_push_and_import(self):
+        from newal import lessons, school
+        for i in range(3):
+            self.log("task number %d that was hard to get right" % i, verified=False, attempts=4)
+        calls = []
+
+        def fake_cli(args, timeout=0):
+            calls.append(args)
+            if args[0] == "quota":
+                return 0, '[{"resource": "GPU", "used": "4.00h", "remaining": "26.00h", "total": "30.00h"}]'
+            if args[:2] == ["kernels", "push"]:
+                return 0, "Kernel version 1 successfully pushed."
+            if args[:2] == ["kernels", "status"]:
+                return 0, 'me/newal-school has status "KernelWorkerStatus.COMPLETE"'
+            if args[:2] == ["kernels", "output"]:
+                folder = args[args.index("-p") + 1]
+                tasks = school.state()["tasks"]
+                with open(os.path.join(folder, "results.jsonl"), "w") as f:
+                    f.write(json.dumps({"id": tasks[0], "request": "task 0", "solved": True, "answer": "```python\nok\n```",
+                                        "lesson": "Close files with a with-block so the data is flushed before reading.",
+                                        "errors": ["try 1: ValueError"], "output": "ok"}) + "\n")
+                    f.write(json.dumps({"id": tasks[1], "request": "task 1", "solved": False, "errors": ["try 1: x"]}) + "\n")
+                with open(os.path.join(folder, "summary.json"), "w") as f:
+                    json.dump({"session_seconds": 7200}, f)
+                return 0, "ok"
+            return 1, "?"
+        old = school.cli
+        school.cli = fake_cli
+        try:
+            r = school.push()
+            self.assertTrue(r["ok"], r)
+            push = next(a for a in calls if a[:2] == ["kernels", "push"])
+            self.assertIn("NvidiaTeslaT4", push)
+            self.assertLessEqual(float(push[push.index("--timeout") + 1]), 8.5 * 3600 + 900)
+            self.assertFalse(school.push()["ok"])          # one session at a time
+            done = school.check()
+        finally:
+            school.cli = old
+        self.assertEqual((done["solved"], done["done"], done["lessons"]), (1, 2, 1))
+        st = school.state()
+        self.assertFalse(st["running"])
+        self.assertEqual(st["sessions"][-1]["hours"], 2.0)
+        self.assertTrue(any("with-block" in x["text"] for x in lessons.all_lessons()))
+        self.assertEqual(training.examples("coder", "task 0 please")[0][1], "```python\nok\n```")
+        ids = [t["id"] for t in school.collect()]
+        self.assertNotIn(st["tasks"][0], ids)             # learned: not sent again
+        self.assertIn(st["tasks"][1], ids)                # failed once: tried again next session
+
+    def test_week_starts_saturday(self):
+        import datetime
+        from newal import school
+        sat = datetime.datetime(2026, 9, 26, 10, tzinfo=datetime.timezone.utc)
+        fri = datetime.datetime(2026, 10, 2, 23, tzinfo=datetime.timezone.utc)
+        self.assertEqual(school.week_key(sat), "2026-09-26")
+        self.assertEqual(school.week_key(fri), "2026-09-26")
+        self.assertEqual(school.week_key(fri + datetime.timedelta(hours=2)), "2026-10-03")
 
 
 class ServerTest(unittest.TestCase):

@@ -70,7 +70,7 @@ def shell(command, kind="powershell", cwd=None, timeout=120):
     elif config.IS_WINDOWS:
         ps = shutil.which("pwsh") or "powershell.exe"
         args = [ps, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command",
-                "[Console]::OutputEncoding=[Text.Encoding]::UTF8; " + command]
+                "[Console]::OutputEncoding=[Text.Encoding]::UTF8; " + ("& " if command.lstrip().startswith('"') else "") + command]
     else:
         args = ["bash", "-lc", command]      # development on Linux
     code, out = run(args, cwd=cwd, timeout=timeout)

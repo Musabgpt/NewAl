@@ -30,6 +30,14 @@ DANGEROUS = re.compile(r"[;&|`]|\$\(|>\s*\S|Remove-Item|\brm\b|\bdel\b|rmdir|For
                        re.I)
 
 
+def powershell_line(command):
+    """PowerShell reads a line that starts with a quoted path as a string, not a program: it needs the call
+    operator. The program's exit code is passed on (PowerShell itself would only say 0 or 1)."""
+    if command.startswith('"'):
+        command = "& " + command
+    return "[Console]::OutputEncoding=[Text.Encoding]::UTF8; " + command + "; if ($LASTEXITCODE) { exit $LASTEXITCODE }"
+
+
 def is_safe(command):
     return bool(SAFE_COMMAND.search(command)) and not DANGEROUS.search(command)
 
@@ -199,7 +207,7 @@ class Project:
                          command)
         if config.IS_WINDOWS:
             shell = shutil.which("pwsh") or shutil.which("powershell.exe") or "powershell"
-            args = [shell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", command]
+            args = [shell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", powershell_line(command)]
         else:
             args = ["/bin/sh", "-c", command]
         code, out = connectors.run(args, cwd=self.root, timeout=int(timeout or 180))

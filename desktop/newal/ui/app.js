@@ -786,21 +786,59 @@ const panels = {
   },
 
   async update(body) {
-    const s = await refreshState();
+    const [s, sc] = await Promise.all([refreshState(), api("/api/school")]);
     const rows = Object.entries(s.training);
-    body.innerHTML = `<h2>📈 تحديث</h2>
-      <p class="hint">كل جواب يُسجَّل مع نتيجته: هل اشتغل الكود بالطرفية، حكم Qwen3.5، وتقييمك 👍/👎.
-      التدريب الليلي (LoRA) مؤجل، لكن البيانات تُجمع من الآن، والأمثلة الناجحة تُستخدم فوراً كأمثلة للنماذج،
-      وتقييمك 👍 يعلّم الموجّه.</p>
+    const when = t => t ? new Date(t * 1000).toLocaleString("ar") : "";
+    body.innerHTML = `<h2>🏫 مدرسة Kaggle (التطوير الأسبوعي)</h2>
+      <p class="hint">كل أسبوع NewAl بيبعت المهام البرمجية اللي صعبت عليه (فشلت، أو نجحت بعد كذا محاولة، أو قيّمتها 👎)
+        لكروت Kaggle المجانية (T4 ×2). هناك نفس العقل Qwen3.6 (بنسخة أدق من اللي عاللابتوب) بيشتغل عليها لساعات:
+        يكتب ← يشغّل ← يحكم ← يصلّح، بمحاولات أكتر بكتير من اللابتوب. كل مهمة بيحلّها بترجع <b>درس</b> بدفتر الدروس
+        و<b>مثال مجرّب</b> بيستخدمه بالمهام المشابهة. الأوزان ما بتتغير (تدريبها بيحتاج 74GB)، بس دفتره وأمثلته بتكبر.</p>
+      ${sc.connected ? "" : '<p class="bad">اربط حساب Kaggle أولاً من 🔗 الربط، وفعّل رقم الهاتف بإعدادات Kaggle (مشان كروت الشاشة والنت).</p>'}
+      <div class="card"><h4><span>الحالة</span><span>${sc.running ? '<span class="pill on">⏳ شغالة على Kaggle</span>' : '<span class="hint">ما في جلسة هلق</span>'}</span></h4>
+        <div class="about">
+          هالأسبوع: <b>${sc.week_hours}</b> من <b>${sc.target_hours}</b> ساعة ·
+          مهام صعبة بانتظار المدرسة: <b>${sc.pending}</b> · مهام اتعلّمها: <b>${sc.learned}</b>
+          ${sc.running ? `<br>بدأت ${when(sc.pushed_at)} لمدة حتى ${(+sc.planned_hours).toFixed(1)} ساعة` : ""}
+          ${sc.message ? `<br><span class="bad">${escapeHtml(sc.message)}</span>` : ""}
+          ${sc.url ? `<br><a href="#" id="kgLink" dir="ltr">${escapeHtml(sc.url)}</a>` : ""}</div>
+        <div class="row">
+          <label><input type="checkbox" id="scOn" ${sc.enabled ? "checked" : ""}> شغّلها تلقائياً كل أسبوع</label>
+          <label>ساعات بالأسبوع <input type="number" id="scHours" min="1" max="30" step="0.5" value="${sc.target_hours}" style="width:70px"></label>
+        </div>
+        <div class="row"><button class="primary" id="scStart" ${sc.running || !sc.connected ? "disabled" : ""}>▶ ابدأ جلسة هلق</button>
+          <button id="scCheck" ${sc.running ? "" : "disabled"}>↻ شوف النتيجة</button><span class="hint" id="scOut"></span></div></div>
+      ${sc.sessions.length ? `<h3>الجلسات</h3><table class="stats"><tr><th>الوقت</th><th>الساعات</th><th>المهام</th><th>✓ انحلّت</th><th>دروس</th></tr>
+        ${sc.sessions.slice().reverse().map(x => `<tr><td>${escapeHtml(x.time)}</td><td>${x.hours}</td><td>${x.done}</td><td class="ok">${x.solved}</td><td>${x.lessons}</td></tr>`).join("")}</table>` : ""}
+      <h3>📈 البيانات المجمّعة</h3>
       <table class="stats"><tr><th>النموذج</th><th>كل الأجوبة</th><th>✓ صحيحة</th><th>✗ خاطئة</th></tr>
       ${rows.map(([r, v]) => `<tr><td>${r}</td><td>${v.total}</td><td class="ok">${v.good}</td><td class="bad">${v.bad}</td></tr>`).join("") || '<tr><td colspan="4" class="hint">لا بيانات بعد</td></tr>'}</table>
-      <div class="row"><button id="prep" class="primary">تجهيز بيانات التدريب</button><button id="openTrain">فتح المجلد</button></div>
+      <div class="row"><button id="prep">تصدير بيانات التدريب (JSONL)</button><button id="openTrain">فتح المجلد</button></div>
       <pre id="prepOut" hidden></pre>`;
+    const out = body.querySelector("#scOut");
+    const save = () => api("/api/school", {enabled: body.querySelector("#scOn").checked, hours: +body.querySelector("#scHours").value});
+    body.querySelector("#scOn").onchange = save;
+    body.querySelector("#scHours").onchange = save;
+    body.querySelector("#scStart").onclick = async e => {
+      e.target.disabled = true; out.textContent = "يجهّز المهام ويبعتها لـ Kaggle… (أول مرة بيثبّت أداة Kaggle)";
+      await save();
+      const r = await api("/api/school", {action: "start"});
+      out.className = r.ok ? "ok" : "bad"; out.textContent = r.message;
+      if (r.ok) setTimeout(() => panels.update(body), 1500); else e.target.disabled = false;
+    };
+    body.querySelector("#scCheck").onclick = async () => {
+      out.textContent = "يسأل Kaggle…";
+      const r = await api("/api/school", {action: "check"});
+      out.textContent = r.state === "finished" ? `خلصت: ${r.solved}/${r.done} انحلّت، ${r.lessons} درس جديد` : "لسا شغالة (" + r.state + ")";
+      if (r.state === "finished") setTimeout(() => panels.update(body), 1500);
+    };
+    const kg = body.querySelector("#kgLink");
+    if (kg) kg.onclick = e => { e.preventDefault(); api("/api/open", {path: sc.url}); };
     body.querySelector("#prep").onclick = async () => {
       const r = await api("/api/update", {});
       const o = body.querySelector("#prepOut");
       o.hidden = false;
-      o.textContent = r.note + "\n\n" + Object.entries(r.prepared).map(([k, v]) => `${k}: ${v.examples} مثال → ${v.file}`).join("\n");
+      o.textContent = Object.entries(r.prepared).map(([k, v]) => `${k}: ${v.examples} مثال → ${v.file}`).join("\n");
     };
     body.querySelector("#openTrain").onclick = () => api("/api/open", {path: s.home + (s.home.includes("\\") ? "\\" : "/") + "training"});
   },
