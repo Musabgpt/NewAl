@@ -76,8 +76,10 @@ def _system(route):
 
 
 class Turn:
-    def __init__(self, conv, text, attachments=(), emit=None, approve=None, cancel=None, mode="auto", think=False):
+    def __init__(self, conv, text, attachments=(), emit=None, approve=None, cancel=None, mode="auto", think=False,
+                 project=None):
         self.conv = conv
+        self.project = project         # project mode: this folder instead of the open project (background tasks)
         self.text = text
         self.attachments = list(attachments)
         self.emit = emit or (lambda e: None)
@@ -319,7 +321,7 @@ class Turn:
         """Works inside the open project folder: reads, searches, edits and runs, then checks the change with the
         project's own tests and keeps fixing while they fail. Every changed file is backed up (undo), and the diff
         is shown at the end."""
-        root = config.get("project_path")
+        root = self.project or config.get("project_path")
         if not root or not os.path.isdir(root):
             return "افتح مجلد مشروع أولاً: 📂 فوق المحادثة، أو من القائمة ← 🧑‍💻 المشروع.", {}
         proj = workspace.Project(root, approve=self.approve)

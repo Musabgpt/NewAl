@@ -14,7 +14,7 @@ import urllib.request
 import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-from . import addons, agent, catalog, config, connectors, lessons, memory, phone, router, school, skills, training, workspace
+from . import addons, agent, catalog, config, connectors, lessons, memory, phone, router, school, skills, tasks, training, workspace
 from .engine import Cancelled, pool
 
 UI_DIR = os.path.join(config.BUNDLE, "ui")
@@ -254,6 +254,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(lessons.all_lessons())
         if p == "/api/school":
             return self._json(school.status())
+        if p == "/api/tasks":
+            return self._json(tasks.listing())
         if p == "/api/project":
             cur = config.get("project_path")
             return self._json({"path": cur if cur and os.path.isdir(cur) else "", "recent": workspace.recent(),
@@ -342,6 +344,17 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json(addons.install(body.get("id", ""), body.get("extra")))
             except Exception as e:  # noqa: BLE001
                 return self._json({"ok": False, "message": str(e)})
+        if p == "/api/tasks":
+            act = body.get("action")
+            if act == "add":
+                return self._json(tasks.add(body.get("prompt", ""), body.get("project")))
+            if act == "apply":
+                return self._json(tasks.apply(body.get("id", "")))
+            if act == "discard":
+                return self._json(tasks.discard(body.get("id", "")))
+            if act == "diff":
+                return self._json(tasks.diff_of(body.get("id", "")))
+            return self._json(tasks.listing())
         if p == "/api/school":
             if "enabled" in body or "hours" in body:
                 config.update({k: v for k, v in (("school_enabled", body.get("enabled")),

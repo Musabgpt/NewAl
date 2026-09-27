@@ -178,21 +178,21 @@ class MemoryTest(unittest.TestCase):
 
 class TrainingTest(unittest.TestCase):
     def test_log_feedback_examples_export(self):
-        rid = training.log("coder", "code", [{"role": "user", "content": "write fizzbuzz in python please"}],
+        rid = training.log("trainrole", "code", [{"role": "user", "content": "write fizzbuzz in python please"}],
                            "```python\n...\n```", verified=False)
-        rid2 = training.log("coder", "code", [{"role": "user", "content": "reverse a string in python"}], "s[::-1]",
+        rid2 = training.log("trainrole", "code", [{"role": "user", "content": "reverse a string in python"}], "s[::-1]",
                             verified=True)
         training.feedback(rid, True)            # the user's 👍 beats the failed run
-        good = {r["id"]: r["good"] for r in training.records("coder")}
+        good = {r["id"]: r["good"] for r in training.records("trainrole")}
         self.assertTrue(good[rid])
         self.assertTrue(good[rid2])
-        ex = training.examples("coder", "please write fizzbuzz in python")
+        ex = training.examples("trainrole", "please write fizzbuzz in python")
         self.assertEqual(ex[0][0], "write fizzbuzz in python please")
-        path, n = training.export("coder")
+        path, n = training.export("trainrole")
         self.assertEqual(n, 2)
         with open(path, encoding="utf-8") as f:
             self.assertEqual(json.loads(f.readline())["messages"][-1]["role"], "assistant")
-        self.assertIn("coder", training.update()["prepared"])
+        self.assertIn("trainrole", training.update()["prepared"])
 
 
 class RouterTest(unittest.TestCase):
@@ -730,6 +730,63 @@ class SchoolTest(unittest.TestCase):
         self.assertEqual(school.week_key(sat), "2026-09-26")
         self.assertEqual(school.week_key(fri), "2026-09-26")
         self.assertEqual(school.week_key(fri + datetime.timedelta(hours=2)), "2026-10-03")
+
+
+class BackgroundTaskTest(unittest.TestCase):
+    def project(self, git):
+        root = ProjectModeTest.make(self)
+        if git:
+            import subprocess
+            run = lambda *a: subprocess.run(["git", "-C", root] + list(a), capture_output=True, check=True)
+            run("init", "-q")
+            run("-c", "user.email=t@t", "-c", "user.name=t", "add", "-A")
+            run("-c", "user.email=t@t", "-c", "user.name=t", "commit", "-qm", "start")
+        return root
+
+    def run_task(self, git):
+        from newal import tasks, workspace
+        root = self.project(git)
+        call = lambda n, a: {"id": "", "name": n, "arguments": json.dumps(a)}
+        replies = [{"content": "", "tool_calls": [call("edit_file", {"path": "shop.py", "old": "sum(prices) - 1",
+                                                                      "new": "sum(prices)"})]},
+                   {"content": "صلّحت.", "tool_calls": []}]
+        old = (agent.pool.chat, catalog.pick, workspace.test_command)
+        agent.pool.chat = lambda role, messages, **kw: dict(replies.pop(0), tps=1)
+        catalog.pick = lambda role: "coder"
+        workspace.test_command = lambda r: "python -m unittest discover -s tests -q"
+        try:
+            t = tasks.add("fix the total", root)["task"]
+            tasks.run_one(t)
+        finally:
+            agent.pool.chat, catalog.pick, workspace.test_command = old
+        return root, tasks.get(t["id"])
+
+    def check(self, git):
+        from newal import tasks, workspace
+        root, t = self.run_task(git)
+        self.assertEqual(t["status"], "done", t)
+        self.assertEqual(t["kind"], "git" if git else "copy")
+        self.assertTrue(t["verified"])
+        with open(os.path.join(root, "shop.py")) as f:
+            self.assertIn("- 1", f.read())                    # the real project is untouched until applied
+        self.assertIn("+    return sum(prices)", tasks.diff_of(t["id"])["diff"])
+        r = tasks.apply(t["id"])
+        self.assertTrue(r["ok"], r)
+        with open(os.path.join(root, "shop.py")) as f:
+            self.assertNotIn("- 1", f.read())
+        self.assertFalse(os.path.exists(os.path.join(tasks.TREES, t["id"])))     # the copy is cleaned up
+        workspace.undo(r["checkpoint"])
+        with open(os.path.join(root, "shop.py")) as f:
+            self.assertIn("- 1", f.read())
+
+    def test_task_in_git_worktree(self):
+        import shutil
+        if not shutil.which("git"):
+            self.skipTest("git not installed")
+        self.check(git=True)
+
+    def test_task_in_copy(self):
+        self.check(git=False)
 
 
 class ServerTest(unittest.TestCase):

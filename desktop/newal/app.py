@@ -68,8 +68,9 @@ def main():
         return
     from newal import server
     httpd = server.serve(port)
-    from newal import school
+    from newal import school, tasks
     school.start_scheduler()
+    tasks.start_worker()
     if config.get("phone_access"):
         from newal import phone
         phone.start()

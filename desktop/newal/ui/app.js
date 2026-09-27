@@ -691,6 +691,64 @@ const panels = {
     if (ix.running) setTimeout(() => { if (!$("#panel").hidden && body.dataset.panel === "memory") panels.memory(body); }, 2000);
   },
 
+  async tasks(body) {
+    const [list, pj] = await Promise.all([api("/api/tasks"), api("/api/project")]);
+    const LABEL = {queued: "⏳ بالدور", running: "⚙ شغالة", done: "✅ جاهزة للمراجعة", no_changes: "— ما في تغييرات",
+      failed: "❌ فشلت", applied: "✔ طُبّقت", discarded: "🗑 انرمت", cancelled: "⛔ أُلغيت"};
+    const name = p => (p || "").split(/[\\/]/).filter(Boolean).pop();
+    body.innerHTML = `<h2>🗂 مهام بالخلفية (متل Codex Cloud)</h2>
+      <p class="hint">حط كذا مهمة ورا بعض وروح اشتغل شي تاني، حتى من الهاتف. كل مهمة بتشتغل على <b>نسخة منفصلة</b> من المشروع
+        (فرع git خاص إذا المشروع git)، فملفاتك ما بتنلمس. لما تخلص بتراجع التغييرات وبتضغط «طبّق» أو «ارمِ».
+        بالخلفية بتشتغل أوامر الاختبار والبناء بس، وأي أمر تاني بينرفض لحاله.</p>
+      <div class="card"><h4>➕ مهمة جديدة ${pj.path ? `على <span dir="ltr">${escapeHtml(name(pj.path))}</span>` : ""}</h4>
+        ${pj.path ? `<textarea id="tkPrompt" rows="3" style="width:100%" dir="auto" placeholder="مثلاً: زيد صفحة تسجيل دخول مع اختبارات"></textarea>
+        <div class="row"><button class="primary" id="tkAdd">➕ ضيف للدور</button><span class="hint" id="tkOut"></span></div>`
+        : '<p class="bad">افتح مجلد مشروع أولاً (📂 فوق).</p>'}</div>
+      <div id="tkList"></div>`;
+    const add = body.querySelector("#tkAdd");
+    if (add) add.onclick = async () => {
+      const r = await api("/api/tasks", {action: "add", prompt: body.querySelector("#tkPrompt").value});
+      body.querySelector("#tkOut").textContent = r.ok ? "✓ انضافت" : r.message;
+      if (r.ok) panels.tasks(body);
+    };
+    const box = body.querySelector("#tkList");
+    for (const t of list) {
+      const c = document.createElement("div");
+      c.className = "card";
+      const files = (t.files || []).map(f => f.path).join("، ");
+      c.innerHTML = `<h4><span dir="auto"></span><span>${LABEL[t.status] || t.status}</span></h4>
+        <div class="about"><span dir="ltr">${escapeHtml(name(t.project))}</span>${t.live ? " · " + escapeHtml(t.live) : ""}
+          ${files ? `<br>الملفات: <span dir="ltr">${escapeHtml(files)}</span>` : ""}
+          ${t.verified === true ? '<br><span class="ok">🧪 الاختبارات نجحت</span>' : t.verified === false ? '<br><span class="bad">🧪 الاختبارات ما نجحت</span>' : ""}
+          ${t.status === "failed" && t.summary ? `<br><span class="bad">${escapeHtml(t.summary.slice(0, 300))}</span>` : ""}</div>
+        <div class="row"></div><div class="tkDiff"></div>`;
+      c.querySelector("h4 span").textContent = t.prompt;
+      const row = c.querySelector(".row");
+      const b = (label, fn, cls) => { const x = document.createElement("button"); x.textContent = label; if (cls) x.className = cls; x.onclick = () => fn(x); row.appendChild(x); };
+      if (t.status === "done") {
+        b("± شوف التغييرات", async () => {
+          const d = await api("/api/tasks", {action: "diff", id: t.id});
+          const pre = document.createElement("div");
+          pre.className = "box diff"; pre.innerHTML = "<div class='inner'></div>";
+          for (const line of d.diff.split("\n")) {
+            const s = document.createElement("div");
+            s.textContent = line;
+            s.className = /^\+(?!\+\+)/.test(line) ? "add" : /^-(?!--)/.test(line) ? "del" : /^@@/.test(line) ? "hunk" : "";
+            pre.firstChild.appendChild(s);
+          }
+          const holder = c.querySelector(".tkDiff"); holder.innerHTML = ""; holder.appendChild(pre);
+        });
+        b("✅ طبّق على المشروع", async x => { const r = await api("/api/tasks", {action: "apply", id: t.id}); x.textContent = r.message; setTimeout(() => panels.tasks(body), 900); }, "primary");
+      }
+      if (["done", "queued", "running", "no_changes", "failed"].includes(t.status))
+        b(t.status === "running" ? "⛔ أوقف" : "🗑 ارمِ", async () => { await api("/api/tasks", {action: "discard", id: t.id}); panels.tasks(body); });
+      if (t.conv) b("💬 المحادثة", () => { $("#closePanel").click(); openConv(t.conv); });
+      box.appendChild(c);
+    }
+    if (list.some(t => ["queued", "running"].includes(t.status)))
+      setTimeout(() => { if (!$("#panel").hidden && body.dataset.panel === "tasks") panels.tasks(body); }, 3000);
+  },
+
   async project(body) {
     const s = await api("/api/project");
     body.innerHTML = `<h2>🧑‍💻 وضع المشروع (متل Codex)</h2>

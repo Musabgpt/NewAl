@@ -193,7 +193,7 @@ class Project:
         full = self.path(path)
         self._backup(full)
         os.makedirs(os.path.dirname(full), exist_ok=True)
-        with open(full, "w", encoding="utf-8") as f:
+        with open(full, "w", encoding="utf-8", newline="") as f:       # the text as given: no \r\r\n on Windows
             f.write(content)
         return "✓ كُتب %s (%d سطر)" % (path, content.count("\n") + 1)
 
