@@ -9,7 +9,8 @@ const ROUTE_LABEL = {code: "💻 برمجة", tools: "🛠 أدوات", analyze:
 const TOOL_LABEL = {
   web_search: "🔎 بحث بالنت", read_url: "🌐 قراءة صفحة", weather: "⛅ الطقس", currency: "💱 عملات",
   current_time: "🕒 الوقت", library_docs: "📚 توثيق المكتبة", list_files: "📁 ملفات المشروع", search: "🔎 بحث بالكود",
-  edit_file: "✏️ تعديل", run: "▶ تشغيل", diff: "± التغييرات", look: "👁 قراءة الصورة", run_command: "⌨ الطرفية", write_file: "📝 إنشاء ملف", read_file: "📄 قراءة ملف",
+  edit_file: "✏️ تعديل", run: "▶ تشغيل", diff: "± التغييرات", look: "👁 نظرة", start_server: "🌐 تشغيل سيرفر",
+  http_request: "↔ طلب للسيرفر", server_output: "📜 مخرجات السيرفر", stop_server: "⏹ إيقاف سيرفر", run_command: "⌨ الطرفية", write_file: "📝 إنشاء ملف", read_file: "📄 قراءة ملف",
   list_dir: "📁 مجلد", search_memory: "🗂 الذاكرة", remember: "🗂 حفظ بالذاكرة", github_repos: "GitHub",
   github_read: "GitHub", github_issues: "GitHub", github_create_issue: "GitHub", github_create_repo: "GitHub",
   git_clone: "git clone", git_push: "git push", gitlab_projects: "GitLab", gitlab_read: "GitLab",
@@ -200,6 +201,15 @@ function addBot() {
       extras.appendChild(v);
     },
     fix(e) { extras.appendChild(box("", `🔧 طلب الإصلاح ${e.attempt}`, e.prompt)); },
+    image(e) {
+      // What the model looked at (a page it built): shown small, full size on click.
+      const b = box("ok", e.caption || "📸", "");
+      const img = document.createElement("img");
+      img.src = "/api/file?path=" + encodeURIComponent(e.path); img.className = "shot";
+      img.onclick = () => window.open(img.src, "_blank");
+      b.querySelector(".inner").appendChild(img); b.open = true;
+      extras.appendChild(b); scrollDown();
+    },
     diff(e) {
       const b = box("diff", `± التغييرات: ${e.files.length} ملف`, "");
       const pre = b.querySelector(".inner");
@@ -369,6 +379,7 @@ async function send(text, files, editId) {
       case "verdict": bot.verdict(e); break;
       case "fix": bot.fix(e); break;
       case "diff": bot.diff(e); break;
+      case "image": bot.image(e); break;
       case "draft_reset": bot.draftReset(); break;
       case "skills": bot.status("🎓 " + e.names.join("، ")); break;
       case "lessons": bot.status("📒 يتذكر " + e.items.length + " درس من أغلاط سابقة"); break;

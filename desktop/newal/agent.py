@@ -7,7 +7,7 @@ import re
 import threading
 import time
 
-from . import catalog, config, connectors, files, lessons, memory, router, skills, tools, training, web, workspace
+from . import browser, catalog, config, connectors, files, lessons, memory, router, skills, tools, training, web, workspace
 from .engine import Cancelled, pool
 
 MAX_TOOL_ROUNDS = 6
@@ -74,7 +74,7 @@ def data_url(path, limit=8_000_000):
 
 
 RUNNABLE = {"python": "python", "py": "python", "powershell": "powershell", "ps1": "powershell", "pwsh": "powershell",
-            "javascript": "node", "js": "node", "node": "node"}
+            "javascript": "node", "js": "node", "node": "node", "html": "browser", "htm": "browser"}
 
 
 def _system(route):
@@ -376,13 +376,21 @@ class Turn:
     # -------------------------------------------------------------- project: work in a real folder (like Codex)
 
     def _project(self, messages, role):
+        self._proj = None
+        try:
+            return self._project_run(messages, role)
+        finally:
+            if self._proj:
+                self._proj.stop_servers()          # servers started for checking never outlive the task
+
+    def _project_run(self, messages, role):
         """Works inside the open project folder: reads, searches, edits and runs, then checks the change with the
         project's own tests and keeps fixing while they fail. Every changed file is backed up (undo), and the diff
         is shown at the end."""
         root = self.project or config.get("project_path")
         if not root or not os.path.isdir(root):
             return "افتح مجلد مشروع أولاً: 📂 فوق المحادثة، أو من القائمة ← 🧑‍💻 المشروع.", {}
-        proj = workspace.Project(root, approve=self.approve)
+        proj = self._proj = workspace.Project(root, approve=self.approve)
         self.emit({"type": "status", "text": "📂 يقرأ المشروع…"})
         tree = proj.list_files()
         tree = "\n".join(tree.splitlines()[:150])
@@ -496,6 +504,7 @@ class Turn:
             "tps": tps, "verified": verified, "steps": steps, "attempts": checks or 1,
             "checkpoint": proj.id if changed else None, "files": changed, "project": root}
 
+
     def _review(self, task, diff, tested):
         brain = catalog.pick("judge")
         if not brain or not diff.strip():
@@ -514,6 +523,39 @@ class Turn:
             raise
         except Exception:  # noqa: BLE001 - a failed review never blocks the result
             return {"ok": True, "problems": []}
+
+    def _look_page(self, proj, arguments):
+        """The look tool: a page (a URL of a started server, or an HTML file) rendered headless; with the brain's eyes
+        its screenshot is described, and its console errors are listed."""
+        import json
+        try:
+            a = json.loads(arguments or "{}") if isinstance(arguments, str) else dict(arguments or {})
+        except ValueError:
+            a = {}
+        target = (a.get("target") or "").strip()
+        if not target:
+            return "Give the page: a URL (http://127.0.0.1:5000/) or an HTML file in the project."
+        try:
+            where = target if re.match(r"^[a-z]+://", target) else proj.path(target)
+        except ValueError as e:
+            return "خطأ: %s" % e
+        res = browser.render(where)
+        text = browser.report(res)
+        if not res.get("png"):
+            return "The page could not be opened:\n" + text
+        self.emit({"type": "image", "path": res["png"], "caption": "📸 " + target})
+        if not catalog.sees("coder"):
+            return text + "\n(no eyes: «👁 العيون» is not downloaded, so only the console is known)"
+        try:
+            r = pool.chat("coder", [{"role": "user", "content": PAGE_PROMPT % (a.get("question") or self.text[:600]),
+                                     "_images": [data_url(res["png"])]}], cancel=self.cancel, max_tokens=700,
+                          temperature=0, extra={"chat_template_kwargs": {"enable_thinking": False}})
+            seen = r["content"].strip()
+        except Cancelled:
+            raise
+        except Exception as e:  # noqa: BLE001
+            seen = "(could not look at the screenshot: %s)" % e
+        return "What the page shows:\n%s\n\n%s" % (seen, text)
 
     def _search_error(self, error, hint=""):
         """What others found for an error that keeps coming back: the error text searched on the web
@@ -543,6 +585,8 @@ class Turn:
         self.emit({"type": "tool", "name": name, "args": arguments, "state": "start"})
         if self.plan and name in READ_ONLY_BLOCKED:
             result = "Plan mode: nothing is changed or run now. Finish the plan."
+        elif name == "look":
+            result = self._look_page(proj, arguments)
         elif name in proj.TOOLS:
             result = proj.call(name, arguments)
         elif name.startswith("mcp__"):
@@ -859,11 +903,16 @@ class Turn:
         self.emit({"type": "status", "text": "🧠 الحكم على النتيجة…"})
         schema = {"type": "object", "properties": {"ok": {"type": "boolean"}, "reason": {"type": "string"}},
                   "required": ["ok", "reason"]}
+        ask = {"role": "user", "content": "Request:\n%s\n\nCode:\n%s\n\nOutput:\n%s" % (request[:2000], code[:5000], output[-2000:])}
+        shot = re.search(r"^screenshot: (.+)$", output, re.M)
+        if shot and os.path.exists(shot.group(1).strip()):
+            self.emit({"type": "image", "path": shot.group(1).strip(), "caption": "📸 شكل الصفحة"})
+            if catalog.sees(judge):
+                # A page is judged by what it shows: the screenshot goes with the code and the console output.
+                ask["content"] += "\n\nThe screenshot of the rendered page is attached: check it shows what was asked."
+                ask["_images"] = [data_url(shot.group(1).strip())]
         try:
-            return pool.complete_json(judge, [
-                {"role": "system", "content": VERDICT_PROMPT},
-                {"role": "user", "content": "Request:\n%s\n\nCode:\n%s\n\nOutput:\n%s" % (request[:2000], code[:5000], output[-2000:])}],
-                schema, max_tokens=150)
+            return pool.complete_json(judge, [{"role": "system", "content": VERDICT_PROMPT}, ask], schema, max_tokens=150)
         except Exception:  # noqa: BLE001
             return {"ok": True, "reason": "ran without errors"}
 
@@ -919,6 +968,8 @@ MAX_GOAL_STEPS = 25
 MAX_PROJECT_STEPS = 60
 MAX_PROJECT_CHECKS = 5
 MAX_REVIEWS = 2
+PAGE_PROMPT = ("This is a screenshot of a web page being built. Describe what it shows: the visible text, the layout and "
+               "anything that looks broken (overlapping, empty areas, error messages, unstyled content). Then answer: %s")
 PLAN_ONLY = ("Plan only, change nothing now. Explore with list_files, search and read_file, then reply (without a tool "
              "call) with a numbered plan in the user's language: which files change and how, what new files are needed, "
              "how the result will be tested, and any risk or question. Keep it short and concrete. The user reads the "
@@ -1030,9 +1081,26 @@ def runnable_block(text):
     return "python", join_python([c for r, c in blocks if r == "python"])
 
 
+def run_page(path):
+    """A web page runs in a headless browser: it passes when it renders without console errors (and the judge then
+    looks at its screenshot)."""
+    res = browser.render(path)
+    if res.get("missing"):
+        return False, "browser غير مثبت على الجهاز (Edge أو Chrome)", False
+    out = "$ open %s in a headless browser\n%s%s\n(exit code %d)" % (
+        os.path.basename(path), browser.report(res), ("\nscreenshot: " + res["png"]) if res.get("png") else "",
+        0 if res["ok"] else 1)
+    return res["ok"], out, False
+
+
 def run_code(runner, code, timeout=60):
     folder = os.path.join(config.WORKSPACE, "runs", time.strftime("%Y%m%d-%H%M%S-") + os.urandom(3).hex())
     os.makedirs(folder, exist_ok=True)
+    if runner == "browser":
+        path = os.path.join(folder, "index.html")
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(code)
+        return run_page(path)
     ext = {"python": ".py", "powershell": ".ps1", "node": ".js"}[runner]
     path = os.path.join(folder, "main" + ext)
     with open(path, "w", encoding="utf-8-sig" if runner == "powershell" else "utf-8") as f:
@@ -1117,8 +1185,9 @@ def program(answer, previous=None):
         py = [p for p in files if p.endswith(".py")]
         js = [p for p in files if p.endswith((".js", ".mjs"))]
         tests = [p for p in py if re.search(r"(^|/)(tests?/|test_[^/]*\.py$)|_test\.py$", p)]
+        html = any(p.endswith((".html", ".htm")) for p in files)
         return {"project": True, "files": files, "run": run, "tests": bool(tests),
-                "lang": "python" if py or not js else "node"}
+                "lang": "python" if py else "node" if js and not html else "browser" if html else "python"}
     block = runnable_block(answer)
     if not block:
         return None
@@ -1176,6 +1245,10 @@ def run_program(prog, timeout=90):
         with open(path, "w", encoding="utf-8") as f:
             f.write(code)
     py = config.find_python()
+    page = next((p for p in sorted(prog["files"], key=len) if p.split("/")[-1] == "index.html"), None)
+    if page and not any(p.endswith(".py") for p in prog["files"]) and not prog["run"]:
+        ok, out, slow = run_page(os.path.join(folder, *page.split("/")))
+        return ok, out, slow, folder
     argv = _entry_command(prog, py)
     if not argv:
         return False, "%s غير مثبت على الجهاز، أو لا يوجد ملف تشغيل (main.py / tests)" % prog["lang"], False, folder

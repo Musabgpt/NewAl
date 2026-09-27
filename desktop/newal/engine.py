@@ -169,6 +169,9 @@ class Server:
             # One slot with the whole context: with automatic slots llama-server splits -c between them
             # (a 10.9k-token goal request hit a 4096-token slot on the laptop).
             args += ["-c", str(self.context()), "-np", "1", "--jinja", "-tb", str(os.cpu_count() or config.threads())]
+            # Earlier conversations kept in RAM: a side request (review, a look at a page) does not make the next
+            # step re-read the whole task (measured: 53 tokens instead of ~4000). Capped for a 24 GB laptop.
+            args += ["--cache-ram", "2048" if self.role == "coder" else "512"]
 
         elif kind == "embed":
             args += ["--embedding", "--pooling", "last", "-c", "8192", "-b", "8192", "-ub", "8192"]

@@ -8,7 +8,11 @@ import json
 import os
 import re
 import shutil
+import signal
+import subprocess
 import time
+import urllib.error
+import urllib.request
 import uuid
 
 from . import config, connectors
@@ -20,10 +24,12 @@ os.makedirs(CHECKPOINTS, exist_ok=True)
 MAX_READ_LINES = 400
 # Commands that only build, test or inspect: they run without asking. Anything else waits for approval.
 SAFE_COMMAND = re.compile(
-    r"^\s*(python|py|python3)(\s+-X\s+\w+)?\s+(-m\s+(pytest|unittest|compileall|py_compile|pip\s+(install|list|show))|[\w./\\-]+\.py)\b|"
-    r"^\s*(pytest|ruff|black --check|mypy|flake8|pylint)\b|"
-    r"^\s*(npm|pnpm|yarn)\s+(test|run\s+(test|build|lint)|install|ci|ls)\b|^\s*node\s+[\w./\\-]+\.m?js\b|"
-    r"^\s*npx\s+(tsc|jest|vitest|eslint|prettier --check)\b|"
+    r"^\s*(python|py|python3)(\s+-X\s+\w+)?\s+(-m\s+(pytest|unittest|compileall|py_compile|pip\s+(install|list|show)|"
+    r"http\.server|flask|uvicorn|streamlit)|[\w./\\-]+\.py)\b|"
+    r"^\s*(pytest|ruff|black --check|mypy|flake8|pylint|flask\s+run|uvicorn)\b|"
+    r"^\s*(npm|pnpm|yarn)\s+(test|start|run\s+(test|build|lint|dev|start|serve|preview)|install|ci|ls)\b|"
+    r"^\s*node\s+[\w./\\-]+\.m?js\b|"
+    r"^\s*npx\s+(tsc|jest|vitest|eslint|prettier --check|vite|serve|http-server)\b|"
     r"^\s*git\s+(status|diff|log|show|branch|rev-parse)\b|^\s*(cargo|go|dotnet)\s+(test|build|check|vet|run)\b|"
     r"^\s*(dir|ls|Get-ChildItem|type|cat|Get-Content|Select-String|where|which)\b", re.I)
 DANGEROUS = re.compile(r"[;&|`]|\$\(|>\s*\S|Remove-Item|\brm\b|\bdel\b|rmdir|Format-|shutdown|git\s+(push|reset|clean|checkout|rebase)",
@@ -160,6 +166,7 @@ class Project:
         self.id = time.strftime("%Y%m%d-%H%M%S-") + uuid.uuid4().hex[:6]
         self.backups = {}           # rel path -> original text (None = the file did not exist)
         self.test_cmd = test_command(self.root)
+        self.servers = []           # (command, process, log path, url) started with start_server
 
     # ---------------------------------------------------------- paths and backups
 
@@ -271,6 +278,81 @@ class Project:
         code, out = connectors.run(args, cwd=self.root, timeout=int(timeout or 180))
         return "$ %s\n%s\n(exit code %d)" % (command, connectors.clip(out, 6000), code)
 
+    # ---------------------------------------------------------- servers (web apps, APIs)
+
+    def _shell_args(self, command):
+        command = re.sub(r"^\s*(python|py|python3)\b", lambda m: '"%s" -X utf8' % (config.find_python() or m.group(1)),
+                         command)
+        if config.IS_WINDOWS:
+            shell = shutil.which("pwsh") or shutil.which("powershell.exe") or "powershell"
+            return [shell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", powershell_line(command)]
+        return ["/bin/sh", "-c", "exec " + command]
+
+    def start_server(self, command, url="", timeout=90):
+        """Starts a program that keeps running (a web server, an API) and waits until it answers."""
+        command = (command or "").strip()
+        if not command:
+            return "أمر فارغ"
+        if not is_safe(command) and not self.approve("تشغيل سيرفر داخل المشروع %s:\n%s" % (os.path.basename(self.root), command)):
+            return "رفض المستخدم تشغيل هذا الأمر."
+        log_path = os.path.join(CHECKPOINTS, "%s-server%d.log" % (self.id, len(self.servers) + 1))
+        log = open(log_path, "w", encoding="utf-8", errors="replace")
+        kw = {"creationflags": 0x08000000 | 0x00000200} if config.IS_WINDOWS else {"start_new_session": True}
+        env = dict(os.environ, PYTHONUNBUFFERED="1", PYTHONIOENCODING="utf-8", BROWSER="none")
+        proc = subprocess.Popen(self._shell_args(command), cwd=self.root, stdout=log, stderr=subprocess.STDOUT,
+                                stdin=subprocess.DEVNULL, env=env, **kw)
+        proc.log_file = log                  # closed when the server stops
+        self.servers.append((command, proc, log_path, url))
+        deadline = time.time() + int(timeout or 90)
+        while time.time() < deadline:
+            time.sleep(0.5)
+            out = _read(log_path)
+            if proc.poll() is not None:
+                return "The server stopped (exit code %s):\n%s" % (proc.returncode, connectors.clip(out, 3000))
+            found = url or _url_in(out)
+            if found and _answers(found):
+                self.servers[-1] = (command, proc, log_path, found)
+                return "Running at %s (pid %d). Its output so far:\n%s" % (found, proc.pid, connectors.clip(out, 1500))
+        return ("Still starting after %d s (it may need a URL: start_server(command, url)). Output:\n%s"
+                % (timeout, connectors.clip(_read(log_path), 2000)))
+
+    def server_output(self):
+        return "\n\n".join("%s (%s):\n%s" % (c, u or "?", connectors.clip(_read(l), 1500))
+                            for c, p, l, u in self.servers) or "لا يوجد سيرفر شغال"
+
+    def stop_server(self, command=""):
+        n = 0
+        for entry in list(self.servers):
+            if not command or command in entry[0]:
+                _kill_tree(entry[1])
+                try:
+                    entry[1].log_file.close()
+                except (AttributeError, OSError):
+                    pass
+                self.servers.remove(entry)
+                n += 1
+        return "أُوقف %d" % n
+
+    def stop_servers(self):
+        return self.stop_server("")
+
+    def http_request(self, url, method="GET", body=""):
+        """A request to a server on this computer only."""
+        if not re.match(r"^https?://(127\.0\.0\.1|localhost|0\.0\.0\.0)(:\d+)?(/|$)", url or ""):
+            return "Only local servers (http://127.0.0.1:PORT/...)."
+        url = url.replace("0.0.0.0", "127.0.0.1")
+        data = body.encode("utf-8") if body else None
+        headers = {"Content-Type": "application/json"} if body and body.strip()[:1] in "[{" else {}
+        req = urllib.request.Request(url, data=data, method=(method or "GET").upper(), headers=headers)
+        try:
+            with urllib.request.urlopen(req, timeout=30) as r:
+                return "HTTP %d %s\n%s" % (r.status, r.headers.get("Content-Type", ""),
+                                           connectors.clip(r.read().decode("utf-8", "replace"), 4000))
+        except urllib.error.HTTPError as e:
+            return "HTTP %d\n%s" % (e.code, connectors.clip(e.read().decode("utf-8", "replace"), 3000))
+        except OSError as e:
+            return "No answer: %s" % e
+
     def diff(self):
         parts = []
         for rel, before in self.backups.items():
@@ -311,6 +393,19 @@ class Project:
         "run": ("Run a command in the project folder (tests, the program, pip/npm install, git status...). "
                 "Windows PowerShell.", {"command": "command line", "timeout": "seconds, default 180"}, ["command"]),
         "diff": ("Show every change made so far (unified diff).", {}, []),
+        "start_server": ("Start a program that keeps running (web server, API, dev server) in the background and wait "
+                         "until it answers; returns its URL and first output. Stopped automatically at the end.",
+                         {"command": "command line, e.g. python app.py or npm run dev", "url": "the URL it serves, if known"},
+                         ["command"]),
+        "http_request": ("Send an HTTP request to a local server (127.0.0.1 only): status and body.",
+                         {"url": "http://127.0.0.1:PORT/path", "method": "GET, POST...", "body": "request body (JSON)"},
+                         ["url"]),
+        "server_output": ("Show what the started servers printed (errors, request logs).", {}, []),
+        "stop_server": ("Stop started servers (all, or the one whose command contains the text).",
+                        {"command": "part of the command"}, []),
+        "look": ("Open a web page in a headless browser and look at it: a description of its screenshot and its console "
+                 "errors. Use it to check pages and web apps you build (a URL of a started server or an HTML file).",
+                 {"target": "URL or HTML file path", "question": "what to check on the page"}, ["target"]),
     }
 
     def definitions(self):
@@ -335,6 +430,35 @@ class Project:
             return fn(**{k: v for k, v in args.items() if k in self.TOOLS[name][1]})
         except (OSError, ValueError, TypeError) as e:
             return "خطأ: %s" % e
+
+
+def _url_in(text):
+    m = re.findall(r"https?://(?:127\.0\.0\.1|localhost|0\.0\.0\.0|\[::1?\])(?::\d+)?[^\s'\"<>]*", text or "")
+    return m[-1].rstrip(".,)").replace("0.0.0.0", "127.0.0.1").replace("[::]", "127.0.0.1").replace("[::1]", "127.0.0.1") if m else ""
+
+
+def _answers(url):
+    try:
+        with urllib.request.urlopen(url, timeout=3):
+            return True
+    except urllib.error.HTTPError:
+        return True                  # it answered (404/500 still means the server is up)
+    except OSError:
+        return False
+
+
+def _kill_tree(proc):
+    if proc.poll() is not None:
+        return
+    try:
+        if config.IS_WINDOWS:
+            subprocess.run(["taskkill", "/T", "/F", "/PID", str(proc.pid)], capture_output=True, timeout=30,
+                           creationflags=0x08000000)
+        else:
+            os.killpg(proc.pid, signal.SIGTERM)
+        proc.wait(timeout=10)
+    except Exception:  # noqa: BLE001
+        proc.kill()
 
 
 def undo(checkpoint_id):

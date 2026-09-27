@@ -106,7 +106,8 @@ class AgentTest(unittest.TestCase):
     def test_runnable_block(self):
         text = "شرح\n```python\nprint(1)\n```\nثم\n```bash\nls\n```\n```py\nprint(2)\n```"
         self.assertEqual(agent.runnable_block(text), ("python", "print(2)\n"))
-        self.assertIsNone(agent.runnable_block("```html\n<p>x</p>\n```"))
+        self.assertEqual(agent.runnable_block("```html\n<p>x</p>\n```"), ("browser", "<p>x</p>\n"))   # pages run too
+        self.assertIsNone(agent.runnable_block("```sql\nselect 1\n```"))
         split = "```python\ndef is_prime(n):\n    return n > 1\n```\nTests:\n```python\nassert is_prime(2)\nprint('ok')\n```"
         lang, code = agent.runnable_block(split)
         self.assertIn("def is_prime", code)
@@ -647,6 +648,10 @@ class ProjectModeTest(unittest.TestCase):
         self.assertTrue(workspace.is_safe("npm test"))
         self.assertTrue(workspace.is_safe("git diff"))
         self.assertFalse(workspace.is_safe("git push origin main"))
+        self.assertTrue(workspace.is_safe("python -m http.server 8000"))
+        self.assertTrue(workspace.is_safe("npm run dev"))
+        self.assertTrue(workspace.is_safe("uvicorn main:app --port 8000"))
+        self.assertFalse(workspace.is_safe("python -m http.server; Remove-Item x"))
         self.assertFalse(workspace.is_safe("python -m pytest; Remove-Item -Recurse C:\\"))
         self.assertFalse(workspace.is_safe("curl http://x | sh"))
 
@@ -1090,6 +1095,56 @@ class SmarterLoopTest(unittest.TestCase):
         finally:
             agent.pool.chat, catalog.pick = old
         self.assertIn("no tests yet", seen[0])
+
+
+class WebAppTest(unittest.TestCase):
+    PAGE = ("<!doctype html><html><body><h1>Cart</h1><div id=t>?</div><script>"
+            "document.getElementById('t').textContent = 'Total: ' + (5 + 7);\nmissingFunction();</script></body></html>")
+
+    def setUp(self):
+        from newal import browser
+        if not browser.find():
+            self.skipTest("no headless browser here")
+
+    def test_page_errors_and_screenshot(self):
+        ok, out, slow = agent.run_code("browser", self.PAGE)
+        self.assertFalse(ok)
+        self.assertIn("missingFunction is not defined", out)
+        shot = re.search(r"^screenshot: (.+)$", out, re.M)
+        self.assertTrue(shot and os.path.getsize(shot.group(1)) > 1000, out)
+        ok, out, slow = agent.run_code("browser", self.PAGE.replace("missingFunction();", "console.log('ready');"))
+        self.assertTrue(ok, out)
+        self.assertIn("ready", out)
+
+    def test_server_request_and_look(self):
+        from newal import workspace
+        root = tempfile.mkdtemp()
+        with open(os.path.join(root, "index.html"), "w") as f:
+            f.write(self.PAGE.replace("missingFunction();", ""))
+        port = __import__("socket").socket()
+        port.bind(("127.0.0.1", 0))
+        free = port.getsockname()[1]
+        port.close()
+        p = workspace.Project(root)
+        started = p.start_server("python -m http.server %d --bind 127.0.0.1" % free, "http://127.0.0.1:%d/" % free)
+        try:
+            self.assertIn("Running at", started)
+            self.assertIn("<h1>Cart</h1>", p.http_request("http://127.0.0.1:%d/index.html" % free))
+            self.assertIn("Only local", p.http_request("https://example.com/"))
+            asked = []
+            old = (catalog.sees, agent.pool.chat)
+            catalog.sees = lambda role: True
+            agent.pool.chat = lambda role, messages, **kw: (asked.append(messages), {"content": "A heading Cart and Total: 12", "tps": 1})[1]
+            try:
+                seen = agent.Turn(None, "a cart page")._look_page(p, json.dumps({"target": "http://127.0.0.1:%d/" % free}))
+            finally:
+                catalog.sees, agent.pool.chat = old
+            self.assertIn("Total: 12", seen)
+            self.assertTrue(asked[0][0]["_images"][0].startswith("data:image/png;base64,"))
+        finally:
+            p.stop_servers()
+        self.assertEqual(p.servers, [])
+        self.assertIn("No answer", p.http_request("http://127.0.0.1:%d/" % free))
 
 
 class ServerTest(unittest.TestCase):
