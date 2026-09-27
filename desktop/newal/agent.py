@@ -147,7 +147,7 @@ class Turn:
 
     def _extra(self, role, budget=0):
         """Thinking for this request: off by default (speed), `budget` tokens when given, unlimited with 💭."""
-        if role == "judge":
+        if catalog.MODELS[role]["file"].lower().startswith("qwen3"):
             extra = {"chat_template_kwargs": {"enable_thinking": bool(self.think or budget)}}
             if budget and not self.think:
                 extra["thinking_budget_tokens"] = budget
