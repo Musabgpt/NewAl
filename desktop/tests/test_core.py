@@ -100,9 +100,10 @@ class ToolsTest(unittest.TestCase):
         self.assertEqual(tools.resolve("vscode_open", {"path": "a.py"})[:2], ("vscode", {"path": "a.py"}))
         self.assertEqual(tools.resolve("run_comand", {"command": "x", "bogus": 1})[:2], ("run_command", {"command": "x"}))
         self.assertIn("shell غير معروف", tools.call("run_command", {"command": "x", "shell": "zsh"}))
-        out = tools.call("run_command", {"command": "echo مرحبا", "shell": "cmd"})
-        self.assertIn("exit code 0", out)
-        self.assertIn("مرحبا", out)
+        for shell in ("cmd", "powershell"):
+            out = tools.call("run_command", {"command": "echo مرحبا", "shell": shell})
+            self.assertIn("exit code 0", out)
+            self.assertIn("مرحبا", out, shell)
 
     def test_false_success_is_caught(self):
         self.assertTrue(agent.unsupported_claim("تمام، أنشأت لك الملف plan.md", []))
@@ -1829,15 +1830,19 @@ class KaggleConnectTest(unittest.TestCase):
         with open(os.path.join(home, ".kaggle", "kaggle.json"), "w") as f:
             json.dump({"username": "musab", "key": "k" * 32}, f)
         sent = []
-        old_api, old_home = connectors._api, os.environ.get("HOME")
+        old_api, old_env = connectors._api, {k: os.environ.get(k) for k in ("HOME", "USERPROFILE")}
         connectors._api = lambda url, h=None, *a, **k: (sent.append(h), [{"ref": "musab/nb"}])[1]
-        os.environ["HOME"] = home
+        os.environ["HOME"] = os.environ["USERPROFILE"] = home          # Windows reads USERPROFILE
         config.update({"kaggle_username": "", "kaggle_key": "", "kaggle_token": ""})
         try:
             r = connectors.kaggle_connect(open_page=False)
         finally:
             connectors._api = old_api
-            os.environ["HOME"] = old_home or ""
+            for k, v in old_env.items():
+                if v is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = v
         self.assertEqual(r["state"], "ok", r)
         self.assertTrue(connectors.kaggle_connected())
         self.assertTrue(sent[0]["Authorization"].startswith("Basic "))

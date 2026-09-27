@@ -43,8 +43,24 @@ def run(args, cwd=None, timeout=120, env=None):
         return -1, "انتهت المهلة (%d ث)" % timeout
     except FileNotFoundError as e:
         return -1, "البرنامج غير موجود: %s" % e
-    out = _decode(p.stdout) + _decode(p.stderr)
+    dec = _decode_mixed if isinstance(args, str) and args.startswith("cmd.exe /d /u") else _decode
+    out = dec(p.stdout) + dec(p.stderr)
     return p.returncode, out
+
+
+_UTF16_RUN = re.compile(rb"(?:[\x01-\xff][\x00\x06]){3,}")
+
+
+def _decode_mixed(b):
+    """cmd /u output: its own text in UTF-16LE (every character's second byte 0x00, or 0x06 for Arabic, never
+    found in UTF-8 text), what other programs print in UTF-8."""
+    out, pos = [], 0
+    for m in _UTF16_RUN.finditer(b):
+        out.append(_decode(b[pos:m.start()]))
+        out.append(m.group(0).decode("utf-16-le", "replace"))
+        pos = m.end()
+    out.append(_decode(b[pos:]))
+    return "".join(out)
 
 
 def _decode(b):
@@ -69,9 +85,11 @@ def shell(command, kind="powershell", cwd=None, timeout=120):
     if kind == "wsl":
         args = ["wsl.exe", "-e", "bash", "-lc", command]
     elif kind == "cmd":
-        # UTF-8 code page first: cmd prints Arabic file names in the OEM code page (720/864) otherwise, which
-        # came back as nonsense. One string: cmd /s /c keeps the command's own quotes as they are.
-        args = 'cmd.exe /d /s /c "chcp 65001>nul & %s"' % command if config.IS_WINDOWS else ["bash", "-lc", command]
+        # Through a pipe cmd writes its own output (echo, dir...) in the ANSI code page: Arabic came back as
+        # "?????" even with chcp 65001. /u makes it write UTF-16 instead; programs it starts write UTF-8 (chcp
+        # 65001), so the output is decoded piece by piece (_decode_mixed). One string: /s /c keeps the command's
+        # own quotes as they are.
+        args = 'cmd.exe /d /u /s /c "chcp 65001>nul & %s"' % command if config.IS_WINDOWS else ["bash", "-lc", command]
     elif config.IS_WINDOWS:
         ps = shutil.which("pwsh") or "powershell.exe"
         args = [ps, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command",
