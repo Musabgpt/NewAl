@@ -4,7 +4,7 @@ import datetime
 import json
 import os
 
-from . import config, connectors, memory, web
+from . import config, connectors, memory, web, wintools
 
 
 def _p(**props):
@@ -52,6 +52,23 @@ def list_dir(path=""):
     return full + "\n" + ("\n".join(rows) or "(فارغ)")
 
 
+def find_files(pattern="*", folder=""):
+    """Files matching a pattern in a folder and ALL its sub-folders, with the exact count."""
+    import fnmatch
+    root = _path(folder) if folder else config.WORKSPACE
+    if not os.path.isdir(root):
+        return "ليس مجلداً: " + root
+    found = []
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = [d for d in dirnames if not d.startswith(".")]
+        for n in filenames:
+            if fnmatch.fnmatch(n.lower(), pattern.lower()):
+                found.append(os.path.relpath(os.path.join(dirpath, n), root))
+    found.sort()
+    lines = "\n".join(found[:300]) + ("\n… (%d more)" % (len(found) - 300) if len(found) > 300 else "")
+    return "Folder: %s\nPattern: %s (all sub-folders)\nCount: %d\n%s" % (root, pattern, len(found), lines)
+
+
 def web_search(query):
     r = web.search(query)
     if not r:
@@ -91,6 +108,9 @@ TOOLS = {
                    _p(path=S("file path"), content=S("full file content")), True),
     "read_file": (read_file, "Read a file: text, code, PDF, Word, Excel, PowerPoint.", _p(path=S("file path")), False),
     "list_dir": (list_dir, "List a folder (default: the workspace).", _p(path=S("folder", True)), False),
+    "find_files": (find_files, "Find files by name pattern (e.g. *.py, *.pdf, report*) in a folder and all its "
+                   "sub-folders; returns the exact count and the paths. Default folder: the workspace.",
+                   _p(pattern=S("file name pattern"), folder=S("folder", True)), False),
     "search_memory": (search_memory, "Search the long-term memory and the indexed project files.",
                       _p(query=S("what to find")), False),
     "remember": (remember, "Save a fact about the user or the project in long-term memory.", _p(fact=S("the fact")), False),
@@ -123,6 +143,21 @@ TOOLS = {
                         _p(ref=S("owner/dataset")), False),
     "kaggle_notebooks": (connectors.kaggle_notebooks, "List the user's Kaggle notebooks.", _p(), False),
     "vscode_open": (connectors.vscode_open, "Open a file or folder in VS Code.", _p(path=S("file or folder", True)), False),
+    "system_info": (wintools.system_info, "This computer: name, Windows version, CPU, RAM, free disk space, IP.", _p(), False),
+    "open_target": (wintools.open_target, "Open an app (notepad, calc, excel, chrome, code...), a website URL or a "
+                    "file/folder on this computer.", _p(target=S("app name, URL or path")), False),
+    "clipboard_get": (wintools.clipboard_get, "Read the text in the clipboard.", _p(), False),
+    "clipboard_set": (wintools.clipboard_set, "Copy text to the clipboard.", _p(text=S("text")), False),
+    "screenshot": (wintools.screenshot, "Save a screenshot of the screen as a PNG file.", _p(), False),
+    "notify": (wintools.notify, "Show a Windows notification.", _p(title=S("title"), message=S("message")), False),
+    "download_file": (wintools.download_file, "Download a file from a URL into Downloads\\NewAl.",
+                      _p(url=S("URL"), filename=S("file name", True)), False),
+    "zip_path": (wintools.zip_path, "Compress a file or folder into a .zip.",
+                 _p(source=S("file or folder"), archive=S("zip path", True)), False),
+    "unzip_path": (wintools.unzip_path, "Extract a .zip archive.", _p(archive=S("zip file"), folder=S("target folder", True)), False),
+    "schedule_task": (wintools.schedule_task, "Schedule a PowerShell command in Windows Task Scheduler, daily or once at HH:MM.",
+                      _p(name=S("task name"), command=S("PowerShell command"), time_hhmm=S("HH:MM"),
+                         daily=B("repeat every day")), True),
 }
 
 ARG_ALIASES = {"currency": {"from_currency": "frm", "to_currency": "to"}}
@@ -131,7 +166,11 @@ ARG_ALIASES = {"currency": {"from_currency": "frm", "to_currency": "to"}}
 # (LFM2.5) cannot reuse them from cache across requests, so only relevant groups are sent.
 GROUPS = {
     "base": (None, ["web_search", "read_url", "weather", "currency", "current_time", "run_command", "write_file",
-                    "read_file", "list_dir", "search_memory", "remember"]),
+                    "read_file", "list_dir", "find_files", "search_memory", "remember", "system_info", "open_target"]),
+    "desktop": (r"حافظة|clipboard|انسخ|الصق|لقطة|screenshot|سكرين|اشعار|إشعار|notify|ذكرني|نبهني|نزّل|نزل ملف|download|"
+                r"zip|ضغط|فك الضغط|جدول|schedule|كل يوم|يومياً",
+                ["clipboard_get", "clipboard_set", "screenshot", "notify", "download_file", "zip_path", "unzip_path",
+                 "schedule_task"]),
     "github": (r"git ?hub|جيت ?هاب|جيتهب|جت هب|مستودع|repo|\bpr\b|issue|git_|push|clone|كلون",
                ["github_repos", "github_read", "github_issues", "github_create_issue", "github_create_repo",
                 "git_clone", "git_push"]),
@@ -153,12 +192,41 @@ def select(text):
     return names
 
 
-def definitions(names=None):
+def connected():
+    """Services the user has connected: their tools are offered in goal mode."""
+    from . import mcp
+    out = ["base", "desktop"]
+    if config.get("github_token"):
+        out.append("github")
+    if config.get("gitlab_token"):
+        out.append("gitlab")
+    if connectors.drive_connected():
+        out.append("drive")
+    if config.get("kaggle_username") and config.get("kaggle_key"):
+        out.append("kaggle")
+    if connectors.vscode_path():
+        out.append("vscode")
+    return out
+
+
+def goal_names():
+    names = []
+    for key in connected():
+        for n in GROUPS[key][1]:
+            if n not in names:
+                names.append(n)
+    return names
+
+
+def definitions(names=None, with_mcp=False):
     out = []
     for name, (fn, desc, params, _) in TOOLS.items():
         if names and name not in names:
             continue
         out.append({"type": "function", "function": {"name": name, "description": desc, "parameters": params}})
+    if with_mcp:
+        from . import mcp
+        out += mcp.manager.definitions()
     return out
 
 
@@ -167,6 +235,12 @@ def needs_approval(name):
 
 
 def call(name, arguments):
+    if name.startswith("mcp__"):
+        from . import mcp
+        try:
+            return connectors.clip(mcp.manager.call(name, arguments), 8000)
+        except Exception as e:  # noqa: BLE001
+            return "خطأ: %s" % e
     if name not in TOOLS:
         return "أداة غير معروفة: " + name
     if isinstance(arguments, str):

@@ -55,7 +55,10 @@ def new_conversation(title="محادثة جديدة"):
 
 
 def conversations():
-    return [dict(r) for r in db().execute("SELECT * FROM conversations ORDER BY updated DESC LIMIT 300")]
+    # Conversations nobody wrote in (e.g. "new chat" pressed twice) are not listed.
+    return [dict(r) for r in db().execute(
+        "SELECT * FROM conversations c WHERE EXISTS (SELECT 1 FROM messages m WHERE m.conv = c.id) "
+        "ORDER BY updated DESC LIMIT 300")]
 
 
 def rename(conv, title):

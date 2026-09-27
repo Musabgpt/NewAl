@@ -78,6 +78,15 @@ class ToolsTest(unittest.TestCase):
         self.assertEqual(tools.call("read_file", '{"path": "dir/x.md"}'), "# hi")
         self.assertIn("x.md", tools.call("list_dir", {"path": "dir"}))
 
+    def test_find_files_is_recursive_and_counts(self):
+        for rel in ("ff/a.py", "ff/sub/b.py", "ff/sub/deep/c.py", "ff/sub/n.txt"):
+            full = os.path.join(config.WORKSPACE, rel)
+            os.makedirs(os.path.dirname(full), exist_ok=True)
+            open(full, "w").close()
+        out = tools.call("find_files", {"pattern": "*.py", "folder": "ff"})
+        self.assertIn("Count: 3", out)
+        self.assertIn(os.path.join("sub", "deep", "c.py"), out)
+
     def test_bad_calls(self):
         self.assertIn("غير معروفة", tools.call("nope", {}))
         self.assertIn("وسائط خاطئة", tools.call("write_file", {"path": "a"}))
@@ -213,6 +222,50 @@ class ComputerRequestTest(unittest.TestCase):
     def test_missing_runtime_stops_the_loop(self):
         self.assertTrue(agent.MISSING_RUNTIME.search("Python was not found; run without arguments to install\n(exit code 9009)"))
         self.assertFalse(agent.MISSING_RUNTIME.search("NameError: name 'x' is not defined"))
+
+
+class SkillsTest(unittest.TestCase):
+    def test_builtin_skills_match_requests(self):
+        from newal import skills
+        names = [s["name"] for s in skills.all_skills()]
+        self.assertIn("خبير PowerShell", names)
+        self.assertEqual(skills.relevant("حلل ملف excel وعملي رسم بياني")[0]["name"], "تحليل البيانات وExcel")
+        self.assertEqual(skills.relevant("مرحبا"), [])
+        # «repo» inside «report.md» once pulled in the Git skill and sent goal mode cloning a made-up repo.
+        self.assertEqual(skills.relevant("اكتب النتيجة بملف اسمه report.md"), [])
+        self.assertEqual(skills.relevant("ارفع المشروع على github")[0]["name"], "Git وGitHub")
+        self.assertEqual(skills.relevant("حلل البيانات بالإكسل")[0]["name"], "تحليل البيانات وExcel")
+
+    def test_user_skill_save_toggle_delete(self):
+        from newal import skills
+        sid = skills.save("فواتير", "حساب الفواتير", "فاتورة, invoice", "- اجمع البنود\n- أضف الضريبة")
+        self.assertEqual(skills.relevant("اعملي فاتورة")[0]["id"], sid)
+        skills.set_enabled(sid, False)
+        self.assertEqual(skills.relevant("اعملي فاتورة"), [])
+        skills.delete(sid)
+        self.assertNotIn(sid, [s["id"] for s in skills.all_skills()])
+
+
+class WinToolsTest(unittest.TestCase):
+    def test_zip_roundtrip_and_unsafe_archive(self):
+        from newal import wintools
+        d = os.path.join(config.WORKSPACE, "ziptest")
+        os.makedirs(d, exist_ok=True)
+        with open(os.path.join(d, "a.txt"), "w") as f:
+            f.write("hi")
+        self.assertIn("تم الضغط", wintools.zip_path("ziptest"))
+        self.assertIn("تم فك الضغط", wintools.unzip_path("ziptest.zip", "unzipped"))
+        self.assertTrue(os.path.exists(os.path.join(config.WORKSPACE, "unzipped", "ziptest", "a.txt")))
+        bad = os.path.join(config.WORKSPACE, "bad.zip")
+        with zipfile.ZipFile(bad, "w") as z:
+            z.writestr("../evil.txt", "x")
+        self.assertIn("غير آمن", wintools.unzip_path(bad))
+
+    def test_goal_tools_follow_connections(self):
+        config.update({"github_token": ""})
+        self.assertNotIn("github_repos", tools.goal_names())
+        self.assertIn("run_command", tools.goal_names())
+        self.assertIn("schedule_task", tools.goal_names())
 
 
 class SignInTest(unittest.TestCase):

@@ -6,7 +6,7 @@ import platform
 import re
 import time
 
-from . import catalog, config, connectors, files, memory, router, tools, training, web
+from . import catalog, config, connectors, files, memory, router, skills, tools, training, web
 from .engine import Cancelled, pool
 
 MAX_TOOL_ROUNDS = 6
@@ -25,9 +25,9 @@ GOAL = ("You are NewAl working autonomously toward the user's goal on their Wind
         "Use every tool that helps: run_command (PowerShell) to inspect and change the computer, code_task to write "
         "and test a program until it works, write_file/read_file for files, web_search/read_url for information. "
         "Do not ask the user questions you can answer with a tool, and do not stop until the goal is reached and "
-        "checked. Unless the user names another place, create files and folders in the NewAl workspace (use relative "
-        "paths; commands start there). Finish with a short report in the user's language: what you did, the result, "
-        "and where files are.")
+        "checked. «مجلد العمل» / \"workspace\" means the NewAl workspace folder given below; unless the user names "
+        "another place, create files and folders there (relative paths go there, commands start there). Finish with a "
+        "short report in the user's language: what you did, the result, and where files are.")
 
 CODER = ("You are an expert software engineer on Windows 11 (PowerShell, Python, Git, VS Code, Docker/WSL available). "
          "Write complete, working code in fenced blocks with the language tag (```python, ```powershell, ```javascript...). "
@@ -45,6 +45,10 @@ RUNNABLE = {"python": "python", "py": "python", "powershell": "powershell", "ps1
 def _system(route):
     now = datetime.datetime.now().strftime("%A %Y-%m-%d %H:%M")
     base = {"code": CODER, "analyze": JUDGE, "goal": GOAL}.get(route, PERSONA)
+    if route == "goal":
+        from . import mcp
+        extra = [k for k in tools.connected() if k not in ("base", "desktop")] + ["add-on " + k for k in mcp.manager.enabled()]
+        base += " Connected services and add-ons: %s." % (", ".join(extra) or "none")
     home = os.path.expanduser("~")
     folders = ", ".join("%s: %s" % (n, os.path.join(home, n)) for n in ("Downloads", "Desktop", "Documents", "Pictures"))
     return ("%s\nToday: %s. OS: %s. User folders: %s. NewAl workspace: %s. Anything about this computer "
@@ -63,13 +67,14 @@ class Turn:
         self.mode = mode
         self.think = think
         self.tools_used = []
+        self.approved = set()          # add-ons (MCP servers) the user allowed during this turn
 
     # -------------------------------------------------------------- entry
 
     def run(self):
         started = time.time()
         route = self.mode if self.mode in router.ROUTES + ("goal",) else router.route(self.text)
-        role = catalog.pick(router.ROLE_OF.get(route, "agent"))
+        role = catalog.pick(config.get("goal_model") if route == "goal" else router.ROLE_OF[route])
         if not role:
             raise RuntimeError("لا يوجد نموذج منزّل. افتح «النماذج» ونزّل الموجّه ونموذج الأدوات على الأقل.")
         self.emit({"type": "route", "route": route, "role": role, "model": catalog.MODELS[role]["title"]})
@@ -121,6 +126,10 @@ class Turn:
             kept.append({"role": m["role"], "content": m["content"]})
         msgs += reversed(kept)
         user = self.text
+        found = skills.relevant(self.text) if route in ("tools", "goal", "code", "analyze") else []
+        if found:
+            self.emit({"type": "skills", "names": [x["name"] for x in found]})
+            notes_text = skills.as_prompt(found) + notes_text
         if notes_text:
             user = notes_text + "My message:\n" + self.text
         for path in self.attachments:
@@ -135,7 +144,10 @@ class Turn:
     def _extra(self, role, budget=0):
         """Thinking for this request: off by default (speed), `budget` tokens when given, unlimited with 💭."""
         if role == "judge":
-            return {"chat_template_kwargs": {"enable_thinking": bool(self.think or budget)}}
+            extra = {"chat_template_kwargs": {"enable_thinking": bool(self.think or budget)}}
+            if budget and not self.think:
+                extra["thinking_budget_tokens"] = budget
+            return extra
         return {"thinking_budget_tokens": -1 if self.think else budget}
 
     # -------------------------------------------------------------- plain answer (judge)
@@ -173,7 +185,7 @@ class Turn:
             # About this computer: only the tools that can see it (a free choice sent LFM2.5 to the web 12 times
             # for "what is my computer's name").
             names = [n for n in names if n not in WEB_TOOLS]
-        defs = tools.definitions(names)
+        defs = tools.definitions(names, with_mcp=bool(BROWSER_WORDS.search(self.text)))
         seen = set()
         r = None
         if web.is_arabic(self.text):
@@ -206,7 +218,7 @@ class Turn:
     def _goal(self, messages, role):
         """Works toward a goal with every tool: after the executor says it is done, the judge checks the goal
         against what the tools actually returned; if something is missing the executor continues with that."""
-        defs = tools.definitions() + [CODE_TASK_TOOL]
+        defs = tools.definitions(tools.goal_names(), with_mcp=True) + [CODE_TASK_TOOL]
         steps, checks, seen = 0, 0, {}
         answer, tps = "", 0
         while steps < MAX_GOAL_STEPS:
@@ -277,12 +289,16 @@ class Turn:
                   "required": ["done", "missing"]}
         self.emit({"type": "status", "text": "🧠 هل تحقق الهدف؟"})
         try:
+            workspace = "NewAl workspace folder: %s\n\n" % config.WORKSPACE
             return pool.complete_json(judge, [
                 {"role": "system", "content": "Decide whether the goal was actually reached, using only the tool results "
-                                              "as evidence (claims without evidence do not count). JSON: done, and "
-                                              "missing = what still has to be done (or a one-line confirmation)."},
-                {"role": "user", "content": "Goal:\n%s\n\nTool results and messages:\n%s\n\nFinal report:\n%s"
-                                            % (goal[:2000], evidence[-8000:], answer[:2000])}], schema, max_tokens=200)
+                                              "as evidence (claims without evidence do not count). Check every part: "
+                                              "the right place (folder/file names), the right numbers (count them "
+                                              "yourself in the tool output, no duplicates) and the right content. JSON: "
+                                              "done, and missing = what is wrong or still to do (or a one-line confirmation)."},
+                {"role": "user", "content": "%sGoal:\n%s\n\nTool results and messages:\n%s\n\nFinal report:\n%s"
+                                            % (workspace, goal[:2000], evidence[-8000:], answer[:2000])}], schema,
+                max_tokens=200)
         except Exception:  # noqa: BLE001
             return {"done": True, "missing": ""}
 
@@ -318,6 +334,13 @@ class Turn:
 
     def _tool(self, name, arguments):
         self.emit({"type": "tool", "name": name, "args": arguments, "state": "start"})
+        if name.startswith("mcp__") and not config.get("auto_run"):
+            server = name.split("__")[1]
+            if server not in self.approved:
+                if not self.approve("السماح لإضافة «%s» بالعمل في هذه المهمة؟\n%s" % (server, tools.describe(name, arguments))):
+                    self.emit({"type": "tool", "name": name, "state": "denied", "result": "رفض المستخدم"})
+                    return "رفض المستخدم استخدام هذه الإضافة."
+                self.approved.add(server)
         if name in tools.TOOLS and tools.needs_approval(name):
             if not self.approve(tools.describe(name, arguments)):
                 result = "رفض المستخدم تنفيذ هذه الأداة."
@@ -503,6 +526,7 @@ CODE_TASK_TOOL = {"type": "function", "function": {
 
 
 WEB_TOOLS = {"web_search", "read_url", "weather", "currency"}
+BROWSER_WORDS = re.compile(r"متصفح|browser|سجل دخول|login|اضغط على|click|عبّي|عبي النموذج|form|احجز|playwright", re.I)
 
 
 def needs_web(text):

@@ -62,6 +62,7 @@ DEFAULTS = {
     "auto_run": False,            # run commands and code without asking
     "verify_code": True,          # run generated code and let the judge check it
     "max_fix_attempts": 5,        # run -> judge -> fix rounds before giving the best attempt
+    "goal_model": "judge",        # model that works on goals: judge (Qwen3.5-4B, better at many steps) or agent
     "web": True,
     "language": "ar",
     "project_dirs": [],           # folders indexed for the project memory

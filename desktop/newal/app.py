@@ -74,6 +74,8 @@ def main():
         _window(url, own_server=True)
     finally:
         pool.stop_all()
+        from newal import mcp
+        mcp.manager.stop_all()
         httpd.shutdown()
 
 

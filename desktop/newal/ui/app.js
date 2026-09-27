@@ -334,6 +334,7 @@ async function send(text, files, editId) {
       case "verdict": bot.verdict(e); break;
       case "fix": bot.fix(e); break;
       case "draft_reset": bot.draftReset(); break;
+      case "skills": bot.status("🎓 " + e.names.join("، ")); break;
       case "goal_check": bot.verdict({ok: e.done, reason: (e.done ? "🎯 تحقق الهدف. " : "🎯 لم يكتمل بعد، يكمل: ") + (e.missing || "")}); break;
       case "memory": bot.memory(e); break;
       case "approve": askApproval(e); break;
@@ -478,7 +479,7 @@ const panels = {
         <div class="about">NewAl يفتح الملفات والمشاريع في VS Code. ولاستخدام نماذج NewAl داخل VS Code: ثبّت إضافة
         <b>Continue</b> وأضف نموذجاً من نوع OpenAI بعنوان <code dir="ltr">${s.api}</code> واسم <code dir="ltr">newal-auto</code>
         (أو newal-coder للبرمجة فقط). يبقى NewAl مفتوحاً ليعمل.</div>
-        <div class="row"><button id="openVs">فتح مجلد العمل في VS Code</button></div></div>
+        <div class="row"><button class="primary" id="vsConnect">🔗 ربط VS Code بضغطة زر</button><button id="openVs">فتح مجلد العمل في VS Code</button><span class="hint" id="vsOut"></span></div></div>
       <div class="card"><h4>🌐 الإنترنت</h4><div class="about">البحث مجاني بدون مفاتيح: Bing ثم DuckDuckGo ثم ويكيبيديا، والطقس Open-Meteo، والعملات open.er-api.</div></div>
       <div class="row"><button class="primary" id="saveConnect">حفظ</button><span id="saved" class="ok"></span></div>`;
     body.querySelector("#saveConnect").onclick = async () => {
@@ -515,9 +516,75 @@ const panels = {
       const r = await api("/api/drive/connect", {});
       body.querySelector("#driveOut").textContent = r.ok ? "✓ تم الربط" : "فشل: " + r.output;
     };
+    body.querySelector("#vsConnect").onclick = async e => {
+      e.target.disabled = true;
+      body.querySelector("#vsOut").textContent = "يثبّت Continue ويعدّه… (قد يأخذ دقيقة)";
+      const r = await api("/api/addons/install", {id: "vscode"});
+      e.target.disabled = false;
+      const o = body.querySelector("#vsOut"); o.className = r.ok ? "ok" : "bad"; o.textContent = r.message;
+    };
     body.querySelector("#openVs").onclick = async () => {
       const r = await api("/api/vscode", {});
       alert(r.text);
+    };
+  },
+
+  async addons(body) {
+    const [items, sk] = await Promise.all([api("/api/addons"), api("/api/skills")]);
+    const group = (g, title, hint) => `<h3>${title}</h3><p class="hint">${hint}</p>` +
+      items.filter(i => i.group === g).map(i => `<div class="card" data-id="${escapeHtml(i.id)}"><h4><span>${escapeHtml(i.title)}</span>
+        <span>${i.ready === true ? '<span class="ok">✓ جاهز</span>' + (i.running ? ` <span class="pill on">${i.tools} أداة</span>` : "") : i.ready === false ? '<span class="hint">غير مثبت</span>' : ""}</span></h4>
+        <div class="about">${escapeHtml(i.about)}${i.detail ? ` <span class="hint">(${escapeHtml(i.detail)})</span>` : ""}</div>
+        <div class="row">${i.ready === true && g !== "python" ? (g === "mcp" ? '<button data-remove>إزالة</button>' : "") :
+          '<button class="primary" data-install>⬇ تثبيت / ربط بضغطة</button>'}<span class="hint" data-out></span></div></div>`).join("");
+    body.innerHTML = `<h2>🧩 الإضافات والمهارات</h2>
+      <p class="hint">كل ما يُثبت هنا يستخدمه NewAl تلقائياً عندما يحتاجه، خاصة في وضع 🎯 هدف.</p>
+      ${group("apps", "البرامج", "برامج مجانية يحتاجها NewAl لبعض المهام، تُثبت من مصادرها الرسمية (winget).")}
+      ${group("mcp", "إضافات الأدوات (MCP)", "MCP معيار مفتوح لأدوات الذكاء الاصطناعي: كل إضافة تعطي NewAl أدوات جديدة.")}
+      <div class="card"><h4>➕ إضافة MCP أخرى</h4><div class="about">أي خادم MCP: اسم قصير وأمر التشغيل، مثل <code dir="ltr">npx -y @modelcontextprotocol/server-memory</code></div>
+        <div class="row"><input type="text" id="mcpName" placeholder="الاسم (إنكليزي)" dir="ltr"><input type="text" id="mcpCmd" style="flex:1" placeholder="npx -y package-name" dir="ltr"><button id="mcpAdd">إضافة</button><span class="hint" id="mcpOut"></span></div></div>
+      ${group("python", "حزم Python", "مكتبات تُستخدم عند كتابة وتشغيل الكود.")}
+      <h3>🎓 المهارات</h3><p class="hint">خبرات جاهزة يضيفها NewAl للطلب المناسب تلقائياً.</p>
+      <div id="skillList"></div>
+      <details class="card"><summary>➕ مهارة جديدة</summary>
+        <div class="field"><input type="text" id="skName" placeholder="الاسم"></div>
+        <div class="field"><input type="text" id="skDesc" placeholder="وصف قصير"></div>
+        <div class="field"><input type="text" id="skTrig" placeholder="كلمات تفعّلها، مفصولة بفاصلة: فاتورة, محاسبة, invoice"></div>
+        <div class="field"><textarea id="skBody" rows="6" placeholder="التعليمات والخبرة (نقاط)"></textarea></div>
+        <button class="primary" id="skSave">حفظ المهارة</button></details>`;
+    body.querySelectorAll("[data-install]").forEach(b => b.onclick = async () => {
+      const card = b.closest(".card"), out = card.querySelector("[data-out]");
+      b.disabled = true; out.className = "hint"; out.textContent = "جارٍ التثبيت… (قد يأخذ دقائق)";
+      const r = await api("/api/addons/install", {id: card.dataset.id});
+      out.className = r.ok ? "ok" : "bad"; out.textContent = r.message; b.disabled = false;
+      if (r.ok) setTimeout(() => panels.addons(body), 1500);
+    });
+    body.querySelectorAll("[data-remove]").forEach(b => b.onclick = async () => {
+      await api("/api/addons/remove", {id: b.closest(".card").dataset.id}); panels.addons(body);
+    });
+    body.querySelector("#mcpAdd").onclick = async () => {
+      const out = body.querySelector("#mcpOut"); out.textContent = "يشغّل الإضافة…";
+      const r = await api("/api/addons/install", {id: "mcp:custom", extra: {name: body.querySelector("#mcpName").value, command: body.querySelector("#mcpCmd").value}});
+      out.className = r.ok ? "ok" : "bad"; out.textContent = r.message;
+      if (r.ok) setTimeout(() => panels.addons(body), 1200);
+    };
+    const list = body.querySelector("#skillList");
+    for (const k of sk) {
+      const r = document.createElement("div");
+      r.className = "row";
+      r.innerHTML = `<label style="flex:1"><input type="checkbox" ${k.enabled ? "checked" : ""}> <b></b> — <span class="hint"></span></label>${k.builtin ? "" : "<button>🗑</button>"}`;
+      r.querySelector("b").textContent = k.name;
+      r.querySelector(".hint").textContent = k.description;
+      r.querySelector("input").onchange = e => api("/api/skills/toggle", {id: k.id, enabled: e.target.checked});
+      const del = r.querySelector("button");
+      if (del) del.onclick = async () => { await api("/api/skills/delete", {id: k.id}); panels.addons(body); };
+      list.appendChild(r);
+    }
+    body.querySelector("#skSave").onclick = async () => {
+      const v = id => body.querySelector(id).value;
+      if (!v("#skName").trim() || !v("#skBody").trim()) return;
+      await api("/api/skills/save", {name: v("#skName"), description: v("#skDesc"), triggers: v("#skTrig"), body: v("#skBody")});
+      panels.addons(body);
     };
   },
 

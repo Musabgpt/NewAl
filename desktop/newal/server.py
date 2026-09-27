@@ -14,7 +14,7 @@ import urllib.request
 import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-from . import agent, catalog, config, connectors, memory, router, training
+from . import addons, agent, catalog, config, connectors, memory, router, skills, training
 from .engine import Cancelled, pool
 
 UI_DIR = os.path.join(config.BUNDLE, "ui")
@@ -209,6 +209,10 @@ class Handler(BaseHTTPRequestHandler):
             return self._stream(qs.get("job", [""])[0])
         if p == "/api/memories":
             return self._json(memory.memories())
+        if p == "/api/addons":
+            return self._json(addons.status())
+        if p == "/api/skills":
+            return self._json([{k: v for k, v in x.items() if k != "path"} for x in skills.all_skills()])
         if p == "/api/file":
             return self._file(qs.get("path", [""])[0])
         if p == "/v1/models":
@@ -284,6 +288,22 @@ class Handler(BaseHTTPRequestHandler):
             config.update({"project_dirs": dirs})
             memory.index_dirs(dirs)
             return self._json({"ok": True, "dirs": dirs})
+        if p == "/api/addons/install":
+            try:
+                return self._json(addons.install(body.get("id", ""), body.get("extra")))
+            except Exception as e:  # noqa: BLE001
+                return self._json({"ok": False, "message": str(e)})
+        if p == "/api/addons/remove":
+            return self._json(addons.remove(body.get("id", "")))
+        if p == "/api/skills/save":
+            return self._json({"id": skills.save(body.get("name", ""), body.get("description", ""),
+                                                 body.get("triggers", ""), body.get("body", ""))})
+        if p == "/api/skills/toggle":
+            skills.set_enabled(body.get("id", ""), bool(body.get("enabled")))
+            return self._json({"ok": True})
+        if p == "/api/skills/delete":
+            skills.delete(body.get("id", ""))
+            return self._json({"ok": True})
         if p == "/api/install/git":
             ok, out = connectors.install_git()
             return self._json({"ok": ok, "output": out})
