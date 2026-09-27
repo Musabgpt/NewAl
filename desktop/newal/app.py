@@ -86,7 +86,15 @@ def _window(url, own_server):
     if "--browser" not in sys.argv:
         try:
             import webview
-            webview.create_window("NewAl", url, width=1280, height=860, min_size=(720, 520), text_select=True)
+
+            class Api:
+                def pick_folder(self):
+                    """The Windows folder picker for project mode."""
+                    r = webview.windows[0].create_file_dialog(webview.FOLDER_DIALOG)
+                    return r[0] if r else ""
+
+            webview.create_window("NewAl", url, width=1280, height=860, min_size=(720, 520), text_select=True,
+                                  js_api=Api())
             webview.start(private_mode=False)
             return
         except Exception as e:  # noqa: BLE001 - no WebView2: use the browser

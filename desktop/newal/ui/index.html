@@ -17,6 +17,7 @@
     <button data-panel="connect">🔗 الربط</button>
     <button data-panel="addons">🧩 الإضافات والمهارات</button>
     <button data-panel="memory">🗂 الذاكرة والمشروع</button>
+    <button data-panel="project">🧑‍💻 المشروع</button>
     <button data-panel="phone">📱 الهاتف</button>
     <button data-panel="settings">⚙ الإعدادات</button>
     <button data-panel="update">📈 تحديث</button>
@@ -27,6 +28,7 @@
   <header>
     <button id="toggleSide" title="القائمة">☰</button>
     <div id="title">NewAl</div>
+    <button id="projectBtn" class="project-chip" title="مجلد المشروع لوضع 🧑‍💻">📂 <span>افتح مشروع</span></button>
     <div id="loaded"></div>
   </header>
   <div id="notice" hidden></div>
@@ -54,6 +56,7 @@
     <div id="modes">
       <label class="chip"><input type="radio" name="mode" value="auto" checked>🧭 تلقائي</label>
       <label class="chip goal" title="أعطه هدفاً: يخطط وينفذ ويجرّب ويصحح حتى يتحقق"><input type="radio" name="mode" value="goal">🎯 هدف</label>
+      <label class="chip" title="يشتغل بمجلد مشروعك متل Codex: يقرأ ويعدّل ويشغّل الاختبارات ويصلّح"><input type="radio" name="mode" value="project">🧑‍💻 مشروع</label>
       <label class="chip"><input type="radio" name="mode" value="code">💻 برمجة</label>
       <label class="chip"><input type="radio" name="mode" value="tools">🛠 أدوات</label>
       <label class="chip"><input type="radio" name="mode" value="analyze">🧠 تحليل</label>

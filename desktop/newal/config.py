@@ -76,6 +76,8 @@ DEFAULTS = {
     "context7_key": "",           # optional free key for the library-docs add-on (a higher daily limit)
     "drive_remote": "gdrive",
     "api_port": 8766,
+    "project_path": "",           # the folder project mode (🧑‍💻) works in
+    "recent_projects": [],
     "phone_access": False,        # the page on a phone next to the computer (QR code + key)
     "phone_port": 8767,
     "phone_key": "",             # OpenAI-compatible endpoint for VS Code extensions

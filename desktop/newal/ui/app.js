@@ -5,10 +5,11 @@ const api = (path, body) => fetch(path, body === undefined ? {} : {method: "POST
   .then(r => r.json());
 
 let conv = null, job = null, attachments = [], state = null;
-const ROUTE_LABEL = {code: "💻 برمجة", tools: "🛠 أدوات", analyze: "🧠 تحليل", chat: "💬 محادثة", goal: "🎯 هدف"};
+const ROUTE_LABEL = {code: "💻 برمجة", tools: "🛠 أدوات", analyze: "🧠 تحليل", chat: "💬 محادثة", goal: "🎯 هدف", project: "🧑‍💻 مشروع"};
 const TOOL_LABEL = {
   web_search: "🔎 بحث بالنت", read_url: "🌐 قراءة صفحة", weather: "⛅ الطقس", currency: "💱 عملات",
-  current_time: "🕒 الوقت", library_docs: "📚 توثيق المكتبة", run_command: "⌨ الطرفية", write_file: "📝 إنشاء ملف", read_file: "📄 قراءة ملف",
+  current_time: "🕒 الوقت", library_docs: "📚 توثيق المكتبة", list_files: "📁 ملفات المشروع", search: "🔎 بحث بالكود",
+  edit_file: "✏️ تعديل", run: "▶ تشغيل", diff: "± التغييرات", run_command: "⌨ الطرفية", write_file: "📝 إنشاء ملف", read_file: "📄 قراءة ملف",
   list_dir: "📁 مجلد", search_memory: "🗂 الذاكرة", remember: "🗂 حفظ بالذاكرة", github_repos: "GitHub",
   github_read: "GitHub", github_issues: "GitHub", github_create_issue: "GitHub", github_create_repo: "GitHub",
   git_clone: "git clone", git_push: "git push", gitlab_projects: "GitLab", gitlab_read: "GitLab",
@@ -199,6 +200,20 @@ function addBot() {
       extras.appendChild(v);
     },
     fix(e) { extras.appendChild(box("", `🔧 طلب الإصلاح ${e.attempt}`, e.prompt)); },
+    diff(e) {
+      const b = box("diff", `± التغييرات: ${e.files.length} ملف`, "");
+      const pre = b.querySelector(".inner");
+      pre.textContent = "";
+      for (const line of e.diff.split("\n")) {
+        const s = document.createElement("div");
+        s.textContent = line;
+        s.className = /^\+(?!\+\+)/.test(line) ? "add" : /^-(?!--)/.test(line) ? "del" : /^@@/.test(line) ? "hunk" : "";
+        pre.appendChild(s);
+      }
+      b.open = true;
+      extras.appendChild(b);
+      scrollDown();
+    },
     memory(e) {
       extras.appendChild(box("", `🗂 من الذاكرة (${e.items.length})`, e.items.map(i => `[${i.source}] ${i.text}`).join("\n\n")));
     },
@@ -257,6 +272,14 @@ function actions(el, text, meta, id) {
   if (meta.feedback === true) up.classList.add("picked");
   if (meta.feedback === false) down.classList.add("picked");
   btn("↻", "إعادة التوليد", () => regenerate(id));
+  if (meta.checkpoint) {
+    const u = btn("↩ تراجع عن تعديلات المشروع", "يرجّع كل الملفات اللي غيّرها بهالرد متل ما كانت", async b => {
+      if (!confirm("ترجيع الملفات اللي تغيرت بهالرد متل ما كانت؟")) return;
+      const r = await api("/api/project/undo", {id: meta.checkpoint});
+      b.textContent = r.ok ? "✓ " + r.message : r.message; b.disabled = true;
+    });
+    u.className = "undo";
+  }
   const parts = [];
   if (meta.tps) parts.push(meta.tps.toFixed(1) + " كلمة/ث");
   if (meta.seconds) parts.push(meta.seconds + " ث");
@@ -336,6 +359,7 @@ async function send(text, files, editId) {
       case "run": bot.run(e); break;
       case "verdict": bot.verdict(e); break;
       case "fix": bot.fix(e); break;
+      case "diff": bot.diff(e); break;
       case "draft_reset": bot.draftReset(); break;
       case "skills": bot.status("🎓 " + e.names.join("، ")); break;
       case "lessons": bot.status("📒 يتذكر " + e.items.length + " درس من أغلاط سابقة"); break;
@@ -667,6 +691,28 @@ const panels = {
     if (ix.running) setTimeout(() => { if (!$("#panel").hidden && body.dataset.panel === "memory") panels.memory(body); }, 2000);
   },
 
+  async project(body) {
+    const s = await api("/api/project");
+    body.innerHTML = `<h2>🧑‍💻 وضع المشروع (متل Codex)</h2>
+      <p class="hint">بتفتح مجلد مشروعك، وبتختار 🧑‍💻 مشروع تحت، وبتكتب شو بدك («زيد تسجيل دخول»، «صلّح الخطأ بـ test_api»...).
+        NewAl بيقرأ الملفات ويدوّر بالكود، بيعدّل، بيشغّل الاختبارات وبيصلّح لحتى تنجح، وبالآخر بيوريك التغييرات (diff)
+        مع زر «↩ تراجع». إذا بالمشروع ملف <code>AGENTS.md</code> بيمشي على تعليماته.</p>
+      <div class="field"><label>مجلد المشروع</label>
+        <div class="row"><input type="text" id="projPath" dir="ltr" style="flex:1" placeholder="C:\\Users\\me\\projects\\app" value="${escapeHtml(s.path)}">
+        ${window.pywebview ? '<button id="projPick">📂 اختيار…</button>' : ""}<button class="primary" id="projOpen">فتح</button></div>
+        <span class="hint" id="projOut">${s.path ? "الاختبارات: " + escapeHtml(s.tests || "ما لقيت، بيجرّب البرنامج نفسه") : ""}</span></div>
+      ${s.recent.length ? "<h3>مشاريع سابقة</h3>" + s.recent.map(p => `<div class="row"><a href="#" data-recent="${escapeHtml(p)}" dir="ltr">${escapeHtml(p)}</a></div>`).join("") : ""}`;
+    const open = async path => {
+      const r = await api("/api/project", {path});
+      body.querySelector("#projOut").textContent = r.ok ? `✓ ${r.name} — الاختبارات: ${r.tests || "ما لقيت"}${r.instructions ? " · فيه تعليمات للوكيل" : ""}` : r.message;
+      if (r.ok) { showProject(); document.querySelector("input[name=mode][value=project]").checked = true; setTimeout(() => $("#closePanel").click(), 700); }
+    };
+    body.querySelector("#projOpen").onclick = () => open(body.querySelector("#projPath").value);
+    const pick = body.querySelector("#projPick");
+    if (pick) pick.onclick = async () => { const p = await window.pywebview.api.pick_folder(); if (p) { body.querySelector("#projPath").value = p; open(p); } };
+    body.querySelectorAll("[data-recent]").forEach(a => a.onclick = e => { e.preventDefault(); open(a.dataset.recent); });
+  },
+
   async phone(body) {
     const s = await api("/api/phone");
     body.innerHTML = `<h2>📱 التحكم من الهاتف</h2>
@@ -769,6 +815,12 @@ function showPanel(name) {
 
 // ------------------------------------------------------------------ wiring
 
+async function showProject() {
+  const s = await api("/api/project");
+  $("#projectBtn span").textContent = s.path ? s.path.split(/[\\/]/).filter(Boolean).pop() : "افتح مشروع";
+  $("#projectBtn").title = s.path || "مجلد المشروع لوضع 🧑‍💻";
+}
+
 function autosize() {
   const t = $("#input");
   t.style.height = "auto";
@@ -779,6 +831,8 @@ document.addEventListener("DOMContentLoaded", () => {
   try { document.documentElement.dataset.theme = localStorage.getItem("theme") || "dark"; } catch (_) {}
   $("#newChat").onclick = newChat;
   $("#toggleSide").onclick = () => document.body.classList.toggle("side-hidden");
+  $("#projectBtn").onclick = () => showPanel("project");
+  showProject();
   // Phones: the chat first; the menu slides over it and closes once something in it is chosen.
   const narrow = () => matchMedia("(max-width: 800px)").matches;
   if (narrow()) document.body.classList.add("side-hidden");

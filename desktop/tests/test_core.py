@@ -528,6 +528,82 @@ class PhoneTest(unittest.TestCase):
             self.assertTrue(st["urls"][0]["svg"].startswith("<svg"))
 
 
+class ProjectModeTest(unittest.TestCase):
+    def make(self):
+        root = tempfile.mkdtemp(prefix="proj-")
+        with open(os.path.join(root, "shop.py"), "w") as f:
+            f.write("def total(prices):\n    return sum(prices) - 1\n")
+        os.makedirs(os.path.join(root, "tests"))
+        with open(os.path.join(root, "tests", "test_shop.py"), "w") as f:
+            f.write("import unittest, sys, os\nsys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))\n"
+                    "from shop import total\n\nclass T(unittest.TestCase):\n    def test_total(self):\n"
+                    "        self.assertEqual(total([2, 3]), 5)\n")
+        return root
+
+    def test_tools_and_undo(self):
+        from newal import workspace
+        root = self.make()
+        p = workspace.Project(root)
+        self.assertIn("tests/test_shop.py", p.list_files())
+        self.assertIn("shop.py:2:", p.search(r"sum\("))
+        self.assertIn("    2| ", p.read_file("shop.py"))
+        self.assertIn("0 مرة", p.edit_file("shop.py", "no such text", "x"))      # must match exactly once
+        self.assertIn("✓", p.edit_file("shop.py", "sum(prices) - 1", "sum(prices)"))
+        self.assertIn("✓", p.write_file("README.md", "# shop\n"))
+        self.assertRaises(ValueError, p.path, "../outside.txt")
+        self.assertIn("-    return sum(prices) - 1", p.diff())
+        self.assertEqual({f["path"] for f in p.changed()}, {"shop.py", "README.md"})
+        r = workspace.undo(p.id)
+        self.assertTrue(r["ok"])
+        with open(os.path.join(root, "shop.py")) as f:
+            self.assertIn("- 1", f.read())
+        self.assertFalse(os.path.exists(os.path.join(root, "README.md")))
+
+    def test_safe_commands(self):
+        from newal import workspace
+        self.assertTrue(workspace.is_safe("python -m pytest -q"))
+        self.assertTrue(workspace.is_safe("npm test"))
+        self.assertTrue(workspace.is_safe("git diff"))
+        self.assertFalse(workspace.is_safe("git push origin main"))
+        self.assertFalse(workspace.is_safe("python -m pytest; Remove-Item -Recurse C:\\"))
+        self.assertFalse(workspace.is_safe("curl http://x | sh"))
+
+    def test_agent_fixes_until_tests_pass(self):
+        from newal import workspace
+        root = self.make()
+        config.update({"project_path": root})
+        call = lambda n, a: {"id": "", "name": n, "arguments": json.dumps(a)}
+        replies = [
+            {"content": "", "tool_calls": [call("search", {"pattern": "def total"})]},
+            {"content": "", "tool_calls": [call("read_file", {"path": "shop.py"})]},
+            {"content": "", "tool_calls": [call("edit_file", {"path": "shop.py", "old": "sum(prices) - 1",
+                                                                "new": "sum(prices) - 2"})]},
+            {"content": "Done.", "tool_calls": []},                                   # tests fail -> back to work
+            {"content": "", "tool_calls": [call("edit_file", {"path": "shop.py", "old": "sum(prices) - 2",
+                                                                "new": "sum(prices)"})]},
+            {"content": "صلّحت الجمع.", "tool_calls": []},
+        ]
+        old = (agent.pool.chat, catalog.pick, workspace.test_command)
+        agent.pool.chat = lambda role, messages, **kw: dict(replies.pop(0), tps=1)
+        catalog.pick = lambda role: None
+        workspace.test_command = lambda r: "python -m unittest discover -s tests -q"
+        events = []
+        try:
+            t = agent.Turn(None, "fix the total", emit=events.append, mode="project")
+            answer, info = t._project([{"role": "user", "content": "fix the total"}], "coder")
+        finally:
+            agent.pool.chat, catalog.pick, workspace.test_command = old
+        self.assertTrue(info["verified"], answer)
+        self.assertEqual(info["attempts"], 2)
+        self.assertIn("shop.py", answer)
+        runs = [e for e in events if e["type"] == "run"]
+        self.assertEqual([r["ok"] for r in runs], [False, True])
+        self.assertTrue(any(e["type"] == "diff" for e in events))
+        with open(os.path.join(root, "shop.py")) as f:
+            self.assertIn("return sum(prices)\n", f.read())
+        self.assertTrue(workspace.undo(info["checkpoint"])["ok"])
+
+
 class ServerTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):

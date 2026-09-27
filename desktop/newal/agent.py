@@ -7,7 +7,7 @@ import re
 import threading
 import time
 
-from . import catalog, config, connectors, files, lessons, memory, router, skills, tools, training, web
+from . import catalog, config, connectors, files, lessons, memory, router, skills, tools, training, web, workspace
 from .engine import Cancelled, pool
 
 MAX_TOOL_ROUNDS = 6
@@ -39,6 +39,14 @@ CODER = ("You are an expert software engineer on Windows 11 (PowerShell, Python,
          "(pytest), and give the command that checks it on its own line: RUN: python -m pytest -q. "
          "Explain briefly in the user's language.")
 
+PROJECT = ("You are NewAl, an autonomous coding agent (like Codex) working inside the user's project folder on Windows. "
+           "First understand: list, search and read the files the task touches before changing anything. Then make "
+           "focused changes with edit_file (an exact, unique piece of the file) or write_file for new files, keeping the "
+           "project's style and structure. After changing code, check it: run the tests or the program with run, read "
+           "the errors and fix them, until it works. Do the work, do not just describe it; do not ask questions you can "
+           "answer by reading the code; do not touch files unrelated to the task. When finished, reply without a tool "
+           "call: a short summary in the user's language of what you changed and how you checked it.")
+
 JUDGE = ("You are an analyst and reviewer. Think carefully, find root causes, compare options honestly, and turn vague "
          "ideas or errors into precise, actionable instructions. Answer in the user's language, using Markdown.")
 
@@ -48,7 +56,7 @@ RUNNABLE = {"python": "python", "py": "python", "powershell": "powershell", "ps1
 
 def _system(route):
     now = datetime.datetime.now().strftime("%A %Y-%m-%d %H:%M")
-    base = {"code": CODER, "analyze": JUDGE, "goal": GOAL}.get(route, PERSONA)
+    base = {"code": CODER, "analyze": JUDGE, "goal": GOAL, "project": PROJECT}.get(route, PERSONA)
     if route == "goal":
         from . import mcp
         extra = [k for k in tools.connected() if k not in ("base", "desktop")] + ["add-on " + k for k in mcp.manager.enabled()]
@@ -77,19 +85,22 @@ class Turn:
 
     def run(self):
         started = time.time()
-        route = self.mode if self.mode in router.ROUTES + ("goal",) else router.route(self.text)
+        route = self.mode if self.mode in router.ROUTES + ("goal", "project") else router.route(self.text)
         if route == "code" and self.mode == "auto" and MULTI_STEP.search(self.text):
             # "write X, build an exe, push it to GitHub" is a task, not one program: a single script cannot
             # push without the user's credentials. Goal mode has git_push, run_command and code_task for it.
             route = "goal"
-        role = catalog.pick(config.get("goal_model") if route == "goal" else router.ROLE_OF[route])
+        role = catalog.pick(config.get("goal_model") if route == "goal" else "coder" if route == "project"
+                            else router.ROLE_OF[route])
         if not role:
             raise RuntimeError("لا يوجد نموذج منزّل. افتح «النماذج» ونزّل الموجّه ونموذج الأدوات على الأقل.")
         self.emit({"type": "route", "route": route, "role": role, "model": catalog.MODELS[role]["title"]})
 
         messages = self._context(route, role)
         meta = {"route": route, "role": role, "model": catalog.MODELS[role]["title"]}
-        if route == "goal":
+        if route == "project":
+            answer, info = self._project(messages, role)
+        elif route == "goal":
             answer, info = self._goal(messages, role)
         elif route == "code":
             answer, info = self._code(messages, role)
@@ -134,7 +145,7 @@ class Turn:
             kept.append({"role": m["role"], "content": m["content"]})
         msgs += reversed(kept)
         user = self.text
-        found = skills.relevant(self.text) if route in ("tools", "goal", "code", "analyze") else []
+        found = skills.relevant(self.text) if route in ("tools", "goal", "code", "analyze", "project") else []
         if found:
             self.emit({"type": "skills", "names": [x["name"] for x in found]})
             notes_text = skills.as_prompt(found) + notes_text
@@ -293,6 +304,103 @@ class Turn:
                                                         "tools until it is done." % verdict.get("missing", "")})
             self.emit({"type": "draft_reset"})
         return answer or "توقفت بعد %d خطوة بدون إكمال الهدف." % steps, {"tps": tps, "verified": False, "steps": steps}
+
+    # -------------------------------------------------------------- project: work in a real folder (like Codex)
+
+    def _project(self, messages, role):
+        """Works inside the open project folder: reads, searches, edits and runs, then checks the change with the
+        project's own tests and keeps fixing while they fail. Every changed file is backed up (undo), and the diff
+        is shown at the end."""
+        root = config.get("project_path")
+        if not root or not os.path.isdir(root):
+            return "افتح مجلد مشروع أولاً: 📂 فوق المحادثة، أو من القائمة ← 🧑‍💻 المشروع.", {}
+        proj = workspace.Project(root, approve=self.approve)
+        self.emit({"type": "status", "text": "📂 يقرأ المشروع…"})
+        tree = proj.list_files()
+        tree = "\n".join(tree.splitlines()[:150])
+        notes = [workspace.instructions(root)]
+        known = lessons.relevant(self.text)
+        if known:
+            self.emit({"type": "lessons", "items": [x["text"] for x in known]})
+            notes.append(lessons.as_prompt(known))
+        docs = self._docs(self.text)
+        if docs:
+            notes.append(docs)
+        head = ("Project folder: %s\nTest command: %s\nFiles:\n%s\n\n%s\n\nTask:\n"
+                % (root, proj.test_cmd or "(none found: run the program itself to check)", tree,
+                   "\n\n".join(n for n in notes if n)))
+        messages[-1] = dict(messages[-1], content=head + messages[-1]["content"])
+        from . import mcp
+        web_defs = tools.definitions(["web_search", "read_url"]) if config.get("web") else []
+        defs = proj.definitions() + web_defs + (mcp.manager.definitions(only=["docs"]) if "docs" in mcp.manager.enabled() else [])
+        steps, checks, failures, verified, answer, tps = 0, 0, [], None, "", 0
+        while steps < MAX_PROJECT_STEPS:
+            self.emit({"type": "status", "text": "🧑‍💻 خطوة %d…" % (steps + 1)})
+            compact(messages, keep=8, budget_chars=36000)
+            r = pool.chat(role, messages, tools=defs, on_delta=self._delta, cancel=self.cancel,
+                          extra=self._extra(role, budget=GOAL_THINKING), max_tokens=4096)
+            tps = r["tps"] or tps
+            if r["tool_calls"]:
+                messages.append({"role": "assistant", "content": r["content"] or "",
+                                 "tool_calls": [{"id": c["id"] or "call_%d_%d" % (steps, i), "type": "function",
+                                                 "function": {"name": c["name"], "arguments": c["arguments"] or "{}"}}
+                                                for i, c in enumerate(r["tool_calls"])]})
+                for i, c in enumerate(r["tool_calls"]):
+                    result = self._project_tool(proj, c["name"], c["arguments"])
+                    messages.append({"role": "tool", "tool_call_id": c["id"] or "call_%d_%d" % (steps, i),
+                                     "content": result})
+                    steps += 1
+                self.emit({"type": "draft_reset"})
+                continue
+            answer = r["content"].strip()
+            if not proj.changed() or not proj.test_cmd or checks >= MAX_PROJECT_CHECKS:
+                break
+            # The agent says it is done: the project's own tests decide.
+            checks += 1
+            self.emit({"type": "status", "text": "🧪 يشغّل اختبارات المشروع…"})
+            out = proj.run(proj.test_cmd, timeout=600)
+            if "No module named pytest" in out and install_package("pytest"):
+                out = proj.run(proj.test_cmd, timeout=600)
+            ok = out.rstrip().endswith("(exit code 0)")
+            self.emit({"type": "run", "lang": proj.test_cmd, "ok": ok, "attempt": checks, "output": out[-3000:]})
+            if ok:
+                verified = True
+                break
+            verified = False
+            failures.append("check %d: %s" % (checks, error_line(out)))
+            messages.append({"role": "assistant", "content": answer})
+            messages.append({"role": "user", "content": "The project's tests fail:\n%s\n\nFix the code (change a test "
+                                                        "only if the test itself is wrong), then run the tests again."
+                                                        % out[-3000:]})
+            self.emit({"type": "draft_reset"})
+        changed = proj.changed()
+        diff = proj.diff()
+        if changed:
+            self.emit({"type": "diff", "diff": diff[:80000], "files": changed, "checkpoint": proj.id})
+            answer = (answer or "خلصت.") + "\n\n**الملفات اللي تغيرت:**\n" + "\n".join(
+                "- `%s` %s" % (f["path"], "(جديد)" if f["new"] else "(+%d −%d)" % (f["plus"], f["minus"])) for f in changed)
+        if verified is False:
+            answer += "\n\n> ⚠️ اختبارات المشروع ما زالت تفشل: `%s`" % failures[-1].split(": ", 1)[-1][:300]
+        if failures and verified is not None:
+            threading.Thread(target=self._learn, args=(self.text, failures, diff[:4000], verified, ""),
+                             daemon=True).start()
+        return answer or "ما قدرت كمّل خلال %d خطوة." % steps, {
+            "tps": tps, "verified": verified, "steps": steps, "attempts": checks or 1,
+            "checkpoint": proj.id if changed else None, "files": changed, "project": root}
+
+    def _project_tool(self, proj, name, arguments):
+        self.emit({"type": "tool", "name": name, "args": arguments, "state": "start"})
+        if name in proj.TOOLS:
+            result = proj.call(name, arguments)
+        elif name.startswith("mcp__"):
+            result = tools.call(name, arguments)
+        elif name in ("web_search", "read_url"):
+            result = tools.call(name, arguments)
+        else:
+            result = "أداة غير متاحة في وضع المشروع: " + name
+        self.tools_used.append({"name": name, "args": arguments, "result": result[:500]})
+        self.emit({"type": "tool", "name": name, "state": "done", "result": result[:4000]})
+        return result
 
     def _code_task(self, arguments):
         """The code_task tool: the coder writes the program and the run/judge/fix loop makes it work."""
@@ -653,6 +761,8 @@ PLAN_PROMPT = ("Before acting, write a short plan for this goal: at most 6 numbe
 MAX_SEARCHES = 3
 GOAL_THINKING = 160            # tokens of thinking before each goal step (~6 s): better choices, still moving
 MAX_GOAL_STEPS = 25
+MAX_PROJECT_STEPS = 60
+MAX_PROJECT_CHECKS = 5
 MAX_GOAL_CHECKS = 4
 CODE_TASK_TOOL = {"type": "function", "function": {
     "name": "code_task",

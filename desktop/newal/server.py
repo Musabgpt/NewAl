@@ -14,7 +14,7 @@ import urllib.request
 import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-from . import addons, agent, catalog, config, connectors, lessons, memory, phone, router, skills, training
+from . import addons, agent, catalog, config, connectors, lessons, memory, phone, router, skills, training, workspace
 from .engine import Cancelled, pool
 
 UI_DIR = os.path.join(config.BUNDLE, "ui")
@@ -252,6 +252,10 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(addons.setup_status())
         if p == "/api/lessons":
             return self._json(lessons.all_lessons())
+        if p == "/api/project":
+            cur = config.get("project_path")
+            return self._json({"path": cur if cur and os.path.isdir(cur) else "", "recent": workspace.recent(),
+                               "tests": workspace.test_command(cur) if cur and os.path.isdir(cur) else ""})
         if p == "/api/phone":
             return self._json(phone.status())
         if p == "/api/skills":
@@ -336,6 +340,10 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json(addons.install(body.get("id", ""), body.get("extra")))
             except Exception as e:  # noqa: BLE001
                 return self._json({"ok": False, "message": str(e)})
+        if p == "/api/project":
+            return self._json(workspace.open_project(body.get("path", "")))
+        if p == "/api/project/undo":
+            return self._json(workspace.undo(body.get("id", "")))
         if p == "/api/lessons":
             if body.get("delete"):
                 lessons.forget(int(body["delete"]))
