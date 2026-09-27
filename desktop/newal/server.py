@@ -115,7 +115,40 @@ def tune_speed():
     best = max(results, key=results.get)
     config.update({"threads": best})
     pool.stop_all()
-    return {"results": results, "best": best}
+    report = {"results": results, "best": best}
+    if catalog.available("coder"):
+        report["spec"] = tune_spec()
+    return report
+
+
+FIX_PROGRAM = "\n".join('''def process_%d(items):
+    """Process batch %d of the records and return the total of the active ones."""
+    total = 0
+    for item in items:
+        if item.get("active"):
+            total += item.get("amount", 0) * %d
+    return total
+''' % (i, i, i) for i in range(10)).replace("total = 0\n    for item in items:\n        if item.get(\"active\"):\n            total += item.get(\"amount\", 0) * 4",
+                                             "total = 1\n    for item in items:\n        if item.get(\"active\"):\n            total += item.get(\"amount\", 0) * 4")
+
+
+def tune_spec():
+    """Measures the brain on a typical fix (a long program returned with one line changed) with and without
+    speculative decoding, on this computer, and keeps the faster (drafting only when it is clearly faster:
+    on a laptop CPU it can also be slower)."""
+    ask = [{"role": "user", "content": "Here is my program:\n```python\n" + FIX_PROGRAM + "```\nBug: process_4 starts "
+                                       "its total at 1 instead of 0. Return the full corrected program in one code "
+                                       "block, nothing else."}]
+    speeds = {}
+    for spec in ("", "ngram-mod"):
+        config.update({"spec_type": spec})
+        pool.unload("coder")
+        r = pool.chat("coder", ask, max_tokens=900, temperature=0)
+        speeds[spec or "none"] = round(r["tps"], 1)
+    keep = "ngram-mod" if speeds["ngram-mod"] > speeds["none"] * 1.1 else ""
+    config.update({"spec_type": keep})
+    pool.unload("coder")
+    return {"speeds": speeds, "chosen": keep or "none"}
 
 
 def open_path(path):
@@ -352,6 +385,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json(tasks.apply(body.get("id", "")))
             if act == "discard":
                 return self._json(tasks.discard(body.get("id", "")))
+            if act == "publish":
+                return self._json(tasks.publish(body.get("id", "")))
             if act == "diff":
                 return self._json(tasks.diff_of(body.get("id", "")))
             return self._json(tasks.listing())

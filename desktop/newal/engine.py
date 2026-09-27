@@ -109,7 +109,25 @@ def explain_exit(code):
 reset_dll_search()
 
 
+SPEC_TYPES = ("ngram-mod",)  # drafts from text already seen: helps when a fix rewrites a long program
 MIN_CONTEXT = 16384        # tokens; goal mode with tool lists and results needs room (RAM cost ~1 GB per model)
+
+
+def with_images(messages, can_see):
+    """Messages as the server wants them: a message's "_images" (data URLs) become image parts when the model
+    can see, and are dropped otherwise."""
+    out = []
+    for m in messages:
+        if "_images" not in m:
+            out.append(m)
+            continue
+        m = dict(m)
+        images = m.pop("_images") or []
+        if can_see and images:
+            m["content"] = [{"type": "text", "text": m.get("content") or ""}] + [
+                {"type": "image_url", "image_url": {"url": u}} for u in images]
+        out.append(m)
+    return out
 
 
 class Server:
@@ -128,8 +146,13 @@ class Server:
     def context(self):
         return max(int(config.get("context") or 0), MIN_CONTEXT)
 
+    def vision(self):
+        v = catalog.MODELS.get("vision", {})
+        return self.model["kind"] == "chat" and v.get("for") == self.role and catalog.available("vision")
+
     def ram_gb(self):
-        return self.model["size"] / 1e9 * 1.1 + 0.3 + (self.context() / 16384 if self.model["kind"] == "chat" else 0)
+        extra = catalog.MODELS["vision"]["size"] / 1e9 if self.vision() else 0
+        return self.model["size"] / 1e9 * 1.1 + 0.3 + extra + (self.context() / 16384 if self.model["kind"] == "chat" else 0)
 
     def start(self, timeout=900):
         exe = config.find_tool("llama-server")
@@ -147,6 +170,11 @@ class Server:
             args += ["--embedding", "--pooling", "last", "-c", "8192", "-b", "8192", "-ub", "8192"]
         elif kind == "rerank":
             args += ["--reranking", "-c", "8192", "-b", "8192", "-ub", "8192"]
+        if self.vision():
+            args += ["--mmproj", catalog.path("vision")]       # the brain reads screenshots
+        spec = config.get("spec_type")
+        if kind == "chat" and self.role == "coder" and spec in SPEC_TYPES:
+            args += ["--spec-type", spec]                      # chosen by the speed test on this computer
         adapter = os.path.join(config.ADAPTERS, self.role + ".gguf")
         if kind == "chat" and os.path.exists(adapter):
             args += ["--lora", adapter]          # produced by "تحديث"
@@ -259,6 +287,7 @@ class Pool:
         """Streams one completion. on_delta(kind, text) gets "content" and "reasoning" pieces.
         Returns {"content", "reasoning", "tool_calls", "tps", "role"}."""
         s = self.get(role)
+        messages = with_images(messages, s.vision())
         body = {"messages": messages, "stream": True, "max_tokens": max_tokens, "temperature": temperature,
                 "top_p": 0.95, "min_p": 0.05, "repeat_penalty": 1.05, "timings_per_token": False}
         if tools:
@@ -321,7 +350,7 @@ class Pool:
     def complete_json(self, role, messages, schema, max_tokens=60):
         """A short answer constrained to a JSON schema (used by the router and the judge)."""
         s = self.get(role)
-        body = {"messages": messages, "max_tokens": max_tokens, "temperature": 0,
+        body = {"messages": with_images(messages, s.vision()), "max_tokens": max_tokens, "temperature": 0,
                 "chat_template_kwargs": {"enable_thinking": False},
                 "response_format": {"type": "json_schema", "json_schema": {"name": "answer", "schema": schema}}}
         if s.model["file"].lower().startswith("qwen3"):

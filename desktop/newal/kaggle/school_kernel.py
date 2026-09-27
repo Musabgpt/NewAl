@@ -97,15 +97,26 @@ def model_file():
 
 def start_engine():
     exe, model = llama_server(), model_file()
-    args = [exe, "-m", model, "--port", str(PORT), "-c", str(CONFIG.get("context", 32768)), "-np", "1", "--jinja",
+    base = [exe, "-m", model, "--port", str(PORT), "-c", str(CONFIG.get("context", 32768)), "-np", "1", "--jinja",
             "-ngl", "999", "--no-webui"]
-    log("starting engine")
+    # MTP (the model's own multi-token prediction heads): ~1.5-2x faster on GPU, so more attempts per GPU hour.
+    # A model file without MTP heads refuses to start with it: then run without.
+    for extra in ([CONFIG["spec"]] if CONFIG.get("spec") else []) + [[]]:
+        proc = _start(base + extra)
+        if proc:
+            return proc
+        log("engine did not start with %s: trying without" % (" ".join(extra) or "defaults"))
+    raise SystemExit("engine stopped")
+
+
+def _start(args):
+    log("starting engine:", " ".join(args[3:]))
     proc = subprocess.Popen(args, stdout=open(os.path.join(WORK, "engine.log"), "w"), stderr=subprocess.STDOUT)
     for _ in range(600):
         time.sleep(1)
         if proc.poll() is not None:
-            print(open(os.path.join(WORK, "engine.log")).read()[-4000:])
-            raise SystemExit("engine stopped")
+            print(open(os.path.join(WORK, "engine.log")).read()[-3000:])
+            return None
         try:
             with urllib.request.urlopen("http://127.0.0.1:%d/health" % PORT, timeout=2) as r:
                 if r.status == 200:

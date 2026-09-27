@@ -5,6 +5,7 @@ the project (undoable) or discard. One task runs at a time: the model uses the w
 
 import json
 import os
+import re
 import shutil
 import threading
 import time
@@ -232,6 +233,52 @@ def apply(task_id):
     _update(task_id, status="applied", checkpoint=proj.id, applied=time.time())
     cleanup(t)
     return {"ok": True, "message": "طُبّقت %d ملف على المشروع" % len(t.get("files") or []), "checkpoint": proj.id}
+
+
+def github_repo_of(folder):
+    """owner/name of the project's GitHub remote (origin), or ''."""
+    code, url = _git(["remote", "get-url", "origin"], folder)
+    m = re.search(r"github\.com[:/]([\w.-]+/[\w.-]+?)(?:\.git)?/?$", url.strip()) if code == 0 else None
+    return m.group(1) if m else ""
+
+
+def publish(task_id):
+    """Like Codex: the task's branch is committed, pushed to GitHub and opened as a pull request for review."""
+    t = get(task_id)
+    if not t or t["status"] != "done":
+        return {"ok": False, "message": "المهمة غير جاهزة"}
+    if t.get("kind") != "git":
+        return {"ok": False, "message": "المشروع مش مستودع git: استخدم «طبّق»"}
+    repo = github_repo_of(t["project"])
+    if not repo:
+        return {"ok": False, "message": "المشروع ما إلو remote على GitHub (origin)"}
+    if not config.get("github_token"):
+        return {"ok": False, "message": "اربط GitHub أولاً من 🔗 الربط"}
+    tree = os.path.join(TREES, task_id)
+    branch = "newal/" + task_id
+    title = t["prompt"].strip().splitlines()[0][:72]
+    tested = {True: "✅ اختبارات المشروع نجحت", False: "⚠️ اختبارات المشروع ما نجحت"}.get(t.get("verified"), "ما في اختبارات")
+    body = "%s\n\n%s\n\n---\n_عملها NewAl (مهمة بالخلفية)_" % (t.get("summary", "")[:6000], tested)
+    who = []
+    if _git(["config", "user.email"], tree)[0] != 0:
+        who = ["-c", "user.name=NewAl", "-c", "user.email=newal@users.noreply.github.com"]
+    _git(["add", "-A"], tree)
+    code, out = _git(who + ["commit", "-q", "-m", title, "-m", t.get("summary", "")[:2000]], tree)
+    if code != 0 and "nothing to commit" not in out:
+        return {"ok": False, "message": "commit: " + connectors.clip(out, 400)}
+    code, out = _git(connectors._git_auth("github") + ["push", "-u", "origin", branch], tree, timeout=300)
+    if code != 0:
+        return {"ok": False, "message": "push: " + connectors.clip(out, 400)}
+    try:
+        base = connectors._api("https://api.github.com/repos/%s" % repo, connectors._gh()).get("default_branch", "main")
+        pr = connectors._api("https://api.github.com/repos/%s/pulls" % repo, connectors._gh(), "POST",
+                             {"title": title, "head": branch, "base": base, "body": body})
+    except Exception as e:  # noqa: BLE001
+        return {"ok": False, "message": "الفرع انرفع (%s) بس فتح الـ PR فشل: %s" % (branch, e)}
+    _update(task_id, status="pr", pr_url=pr.get("html_url", ""), published=time.time())
+    cleanup(dict(t, kind="copy"))          # the branch now lives on GitHub; the local worktree can go
+    _git(["worktree", "prune"], t["project"])
+    return {"ok": True, "message": "انفتح Pull Request", "url": pr.get("html_url", "")}
 
 
 def discard(task_id):

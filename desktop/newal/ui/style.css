@@ -151,3 +151,4 @@ table.stats td, table.stats th { border-bottom: 1px solid var(--line); padding: 
 .diff .inner .hunk { color: #8b949e; }
 .actions button.undo { width: auto; padding: 0 10px; font-size: 12.5px; }
 .tkDiff .box.diff { margin-top: 8px; max-height: 420px; overflow: auto; border-radius: 8px; padding: 8px; background: rgba(0,0,0,.25); }
+.att img.thumb { height: 34px; max-width: 60px; object-fit: cover; border-radius: 6px; vertical-align: middle; margin-inline-end: 6px; }

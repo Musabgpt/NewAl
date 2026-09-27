@@ -57,12 +57,30 @@ LESSON_PROMPT = ("A program failed and was then fixed. Write ONE general rule (E
 JUDGE = ("You are an analyst and reviewer. Think carefully, find root causes, compare options honestly, and turn vague "
          "ideas or errors into precise, actionable instructions. Answer in the user's language, using Markdown.")
 
+IMAGE_EXT = (".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp")
+LOOK_PROMPT = ("Write out this image for a programmer who cannot see it. If it shows text (an error, a traceback, code, a "
+               "terminal, a message box), copy that text exactly, line by line, keeping file paths, line numbers and "
+               "error names. Then describe in one or two sentences what else is visible (window, program, layout). "
+               "Do not explain or suggest fixes.")
+
+
+def data_url(path, limit=8_000_000):
+    import base64
+    import mimetypes
+    with open(path, "rb") as f:
+        raw = f.read(limit)
+    mime = mimetypes.guess_type(path)[0] or "image/png"
+    return "data:%s;base64,%s" % (mime, base64.b64encode(raw).decode("ascii"))
+
+
 RUNNABLE = {"python": "python", "py": "python", "powershell": "powershell", "ps1": "powershell", "pwsh": "powershell",
             "javascript": "node", "js": "node", "node": "node"}
 
 
 def _system(route):
-    now = datetime.datetime.now().strftime("%A %Y-%m-%d %H:%M")
+    # The date only: the system prompt must stay the same all day so llama.cpp can reuse what it already read
+    # (a clock in it made every new message re-read the whole conversation).
+    now = datetime.datetime.now().strftime("%A %Y-%m-%d")
     base = {"code": CODER, "analyze": JUDGE, "goal": GOAL, "project": PROJECT}.get(route, PERSONA)
     if route == "goal":
         from . import mcp
@@ -94,6 +112,7 @@ class Turn:
 
     def run(self):
         started = time.time()
+        self._look()
         route = self.mode if self.mode in router.ROUTES + ("goal", "project") else router.route(self.text)
         if route == "code" and self.mode == "auto" and MULTI_STEP.search(self.text):
             # "write X, build an exe, push it to GitHub" is a task, not one program: a single script cannot
@@ -126,6 +145,38 @@ class Turn:
                                            run=info.get("run_output"), judge=info.get("judge"), tools=self.tools_used)
         return answer, meta
 
+    # -------------------------------------------------------------- images: look first
+
+    def _look(self):
+        """Attached pictures (screenshots of an error, a design...) are read once by the brain and written out as
+        text, verbatim where they show text. The rest of the turn works on that text: every model can use it,
+        and it keeps the conversation cache-friendly (llama.cpp does not checkpoint after an image)."""
+        pics = [p for p in self.attachments if p.lower().endswith(IMAGE_EXT)]
+        if not pics:
+            return
+        self.attachments = [p for p in self.attachments if p not in pics]
+        if not catalog.sees("coder"):
+            names = ", ".join(os.path.basename(p) for p in pics)
+            self.text += ("\n\n[أرفق المستخدم صورة (%s) لكن نموذج الصور غير منزّل: قل له ينزّل «👁 العيون» من النماذج "
+                          "أو ينسخ النص.]" % names)
+            return
+        for path in pics:
+            name = os.path.basename(path)
+            self.emit({"type": "tool", "name": "look", "args": name, "state": "start"})
+            self.emit({"type": "status", "text": "👁 يقرأ الصورة…"})
+            try:
+                r = pool.chat("coder", [{"role": "user", "content": LOOK_PROMPT, "_images": [data_url(path)]}],
+                              cancel=self.cancel, max_tokens=1200, temperature=0,
+                              extra={"chat_template_kwargs": {"enable_thinking": False}})
+                seen = r["content"].strip()
+            except Cancelled:
+                raise
+            except Exception as e:  # noqa: BLE001 - a picture that cannot be read must not end the turn
+                seen = "(تعذرت قراءة الصورة: %s)" % e
+            self.emit({"type": "tool", "name": "look", "state": "done", "result": seen})
+            self.tools_used.append({"name": "look", "args": name, "result": seen[:500]})
+            self.text += "\n\n[ما في الصورة %s]:\n%s" % (name, seen)
+
     # -------------------------------------------------------------- context
 
     def _context(self, route, role):
@@ -143,8 +194,12 @@ class Turn:
                 "[%s]\n%s" % (os.path.basename(n["source"]) if n["kind"] == "chunk" else "memory", n["text"][:1200])
                 for n in notes) + "\n\n"
         msgs = [{"role": "system", "content": system}]
-        for ask, ans in training.examples(role, self.text):
-            msgs += [{"role": "user", "content": ask}, {"role": "assistant", "content": ans[:3000]}]
+        # Answers that worked for similar requests go into this message, not in front of the history: anything
+        # that changes near the start makes llama.cpp re-read the whole conversation.
+        shown = training.examples(role, self.text)
+        if shown:
+            notes_text = "Answers that worked for similar requests before:\n" + "\n\n".join(
+                "Request: %s\nAnswer:\n%s" % (ask[:600], ans[:1800]) for ask, ans in shown) + "\n\n" + notes_text
         history = [m for m in memory.messages(self.conv) if m["role"] in ("user", "assistant")]
         budget = HISTORY_CHARS
         kept = []
@@ -336,14 +391,16 @@ class Turn:
         docs = self._docs(self.text)
         if docs:
             notes.append(docs)
-        head = ("Project folder: %s\nTest command: %s\nFiles:\n%s\n\n%s\n\nTask:\n"
+        symbols = workspace.repo_map(root)
+        head = ("Project folder: %s\nTest command: %s\nFiles:\n%s\n%s\n%s\n\nTask:\n"
                 % (root, proj.test_cmd or "(none found: run the program itself to check)", tree,
+                   ("\nFunctions and classes by file:\n" + symbols + "\n") if symbols else "",
                    "\n\n".join(n for n in notes if n)))
         messages[-1] = dict(messages[-1], content=head + messages[-1]["content"])
         from . import mcp
         web_defs = tools.definitions(["web_search", "read_url"]) if config.get("web") else []
         defs = proj.definitions() + web_defs + (mcp.manager.definitions(only=["docs"]) if "docs" in mcp.manager.enabled() else [])
-        steps, checks, failures, verified, answer, tps = 0, 0, [], None, "", 0
+        steps, checks, reviews, failures, verified, answer, tps = 0, 0, 0, [], None, "", 0
         while steps < MAX_PROJECT_STEPS:
             self.emit({"type": "status", "text": "🧑‍💻 خطوة %d…" % (steps + 1)})
             compact(messages, keep=8, budget_chars=36000)
@@ -363,26 +420,43 @@ class Turn:
                 self.emit({"type": "draft_reset"})
                 continue
             answer = r["content"].strip()
-            if not proj.changed() or not proj.test_cmd or checks >= MAX_PROJECT_CHECKS:
+            if not proj.changed():
                 break
-            # The agent says it is done: the project's own tests decide.
-            checks += 1
-            self.emit({"type": "status", "text": "🧪 يشغّل اختبارات المشروع…"})
-            out = proj.run(proj.test_cmd, timeout=600)
-            if "No module named pytest" in out and install_package("pytest"):
+            if proj.test_cmd and checks < MAX_PROJECT_CHECKS:
+                # The agent says it is done: the project's own tests decide.
+                checks += 1
+                self.emit({"type": "status", "text": "🧪 يشغّل اختبارات المشروع…"})
                 out = proj.run(proj.test_cmd, timeout=600)
-            ok = out.rstrip().endswith("(exit code 0)")
-            self.emit({"type": "run", "lang": proj.test_cmd, "ok": ok, "attempt": checks, "output": out[-3000:]})
-            if ok:
+                if "No module named pytest" in out and install_package("pytest"):
+                    out = proj.run(proj.test_cmd, timeout=600)
+                ok = out.rstrip().endswith("(exit code 0)")
+                self.emit({"type": "run", "lang": proj.test_cmd, "ok": ok, "attempt": checks, "output": out[-3000:]})
+                if not ok:
+                    verified = False
+                    failures.append("check %d: %s" % (checks, error_line(out)))
+                    messages.append({"role": "assistant", "content": answer})
+                    messages.append({"role": "user", "content": "The project's tests fail:\n%s\n\nFix the code (change "
+                                                                "a test only if the test itself is wrong), then run the "
+                                                                "tests again." % out[-3000:]})
+                    self.emit({"type": "draft_reset"})
+                    continue
                 verified = True
-                break
-            verified = False
-            failures.append("check %d: %s" % (checks, error_line(out)))
-            messages.append({"role": "assistant", "content": answer})
-            messages.append({"role": "user", "content": "The project's tests fail:\n%s\n\nFix the code (change a test "
-                                                        "only if the test itself is wrong), then run the tests again."
-                                                        % out[-3000:]})
-            self.emit({"type": "draft_reset"})
+            if config.get("review_changes") and reviews < MAX_REVIEWS:
+                # Tests pass (or there are none): a second look at the diff against the task catches what tests
+                # do not cover - a part of the task left out, a half-finished change, a debug leftover.
+                reviews += 1
+                v = self._review(self.text, proj.diff(), verified)
+                self.emit({"type": "verdict", "ok": bool(v.get("ok", True)),
+                           "reason": "🔍 مراجعة التغييرات: " + ("سليمة" if v.get("ok", True) else "؛ ".join(v.get("problems") or []))})
+                if not v.get("ok", True) and v.get("problems"):
+                    failures.append("review %d: %s" % (reviews, "; ".join(v["problems"])[:300]))
+                    messages.append({"role": "assistant", "content": answer})
+                    messages.append({"role": "user", "content": "A review of your change against the task found:\n- %s\n"
+                                                                "Fix these, check again, then give the summary."
+                                                                % "\n- ".join(v["problems"][:6])})
+                    self.emit({"type": "draft_reset"})
+                    continue
+            break
         changed = proj.changed()
         diff = proj.diff()
         if changed:
@@ -397,6 +471,25 @@ class Turn:
         return answer or "ما قدرت كمّل خلال %d خطوة." % steps, {
             "tps": tps, "verified": verified, "steps": steps, "attempts": checks or 1,
             "checkpoint": proj.id if changed else None, "files": changed, "project": root}
+
+    def _review(self, task, diff, tested):
+        brain = catalog.pick("judge")
+        if not brain or not diff.strip():
+            return {"ok": True, "problems": []}
+        self.emit({"type": "status", "text": "🔍 يراجع التغييرات…"})
+        schema = {"type": "object", "properties": {"ok": {"type": "boolean"},
+                                                   "problems": {"type": "array", "items": {"type": "string"}}},
+                  "required": ["ok", "problems"]}
+        try:
+            return pool.complete_json(brain, [
+                {"role": "system", "content": REVIEW_PROMPT},
+                {"role": "user", "content": "Task:\n%s\n\nTests: %s\n\nThe change (unified diff):\n%s"
+                                            % (task[:3000], "passed" if tested else "none in this project",
+                                               diff[:14000])}], schema, max_tokens=400)
+        except Cancelled:
+            raise
+        except Exception:  # noqa: BLE001 - a failed review never blocks the result
+            return {"ok": True, "problems": []}
 
     def _project_tool(self, proj, name, arguments):
         self.emit({"type": "tool", "name": name, "args": arguments, "state": "start"})
@@ -768,6 +861,11 @@ GOAL_THINKING = 160            # tokens of thinking before each goal step (~6 s)
 MAX_GOAL_STEPS = 25
 MAX_PROJECT_STEPS = 60
 MAX_PROJECT_CHECKS = 5
+MAX_REVIEWS = 2
+REVIEW_PROMPT = ("You review a code change before it is handed to the user. Compare it with the task: is every part of the "
+                 "task done, is anything broken, half-finished, or left over (debug prints, commented-out code, TODOs)? "
+                 "Report only real problems, not style or taste. JSON: ok (true when it can be handed over) and "
+                 "problems (short, concrete fixes; empty when ok).")
 MAX_GOAL_CHECKS = 4
 CODE_TASK_TOOL = {"type": "function", "function": {
     "name": "code_task",
@@ -1088,16 +1186,32 @@ def writes_program(arguments):
 
 
 def compact(messages, keep=6, budget_chars=24000):
-    """Keeps a long goal within the model's context: the newest `keep` tool results stay whole, older ones
-    are cut to their first lines (the model has already acted on them)."""
-    tool_idx = [i for i, m in enumerate(messages) if m["role"] == "tool"]
-    for i in tool_idx[:-keep]:
-        c = messages[i].get("content") or ""
-        if len(c) > 400:
-            messages[i] = dict(messages[i], content=c[:400] + "\n…[اختُصر]")
+    """Keeps a long goal or project within the model's context. Nothing is touched while it fits: llama.cpp re-reads
+    everything after the first changed message, and for Qwen3.6 on a laptop CPU that is ~20 s per 1000 tokens
+    (measured with a hybrid Qwen: an append-only step re-read 67 tokens, trimming one old message 1062). So instead of
+    trimming a little at every step, it cuts hard once when over budget (to about half), which leaves room for many
+    more steps before the next cut."""
     total = sum(len(m.get("content") or "") for m in messages)
+    if total <= budget_chars:
+        return messages
+    target = budget_chars // 2
+    tool_idx = [i for i, m in enumerate(messages) if m["role"] == "tool"]
+    for i in tool_idx[:-keep] if keep else tool_idx:
+        c = messages[i].get("content") or ""
+        if len(c) > 300:
+            messages[i] = dict(messages[i], content=c[:300] + "\n…[اختُصر]")
+            total -= len(c) - 300
     for i in tool_idx:
-        if total <= budget_chars:
+        if total <= target:
+            break
+        c = messages[i].get("content") or ""
+        if len(c) > 1500:
+            messages[i] = dict(messages[i], content=c[:1500] + "\n…[اختُصر]")
+            total -= len(c) - 1500
+    # Still too long (long code written by the model itself): older assistant messages keep their start.
+    asst = [i for i, m in enumerate(messages) if m["role"] == "assistant"][:-2]
+    for i in asst:
+        if total <= target:
             break
         c = messages[i].get("content") or ""
         if len(c) > 1500:

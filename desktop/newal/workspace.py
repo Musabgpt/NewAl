@@ -80,6 +80,53 @@ def test_command(root):
     return ""
 
 
+_JS_SYMBOL = re.compile(r"^\s*(?:export\s+)?(?:default\s+)?(?:async\s+)?(?:function\*?\s+(\w+)|class\s+(\w+)|"
+                        r"(?:const|let|var)\s+(\w+)\s*=\s*(?:async\s*)?(?:\([^)]*\)|\w+)\s*=>)", re.M)
+
+
+def _py_symbols(text):
+    import ast
+    try:
+        tree = ast.parse(text)
+    except (SyntaxError, ValueError):
+        return []
+    out = []
+    for node in tree.body:
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            out.append("def %s(%s)" % (node.name, ", ".join(a.arg for a in node.args.args)))
+        elif isinstance(node, ast.ClassDef):
+            methods = [n.name for n in node.body if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))]
+            out.append("class %s%s" % (node.name, (": " + ", ".join(methods[:12])) if methods else ""))
+    return out
+
+
+def repo_map(root, limit=6000):
+    """The project's functions and classes, file by file (like a table of contents): the agent sees where things
+    are without reading every file."""
+    lines, used = [], 0
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = sorted(d for d in dirnames if d not in IGNORED and not d.startswith("."))
+        for n in sorted(filenames):
+            full = os.path.join(dirpath, n)
+            ext = os.path.splitext(n)[1].lower()
+            if ext not in (".py", ".js", ".jsx", ".ts", ".tsx", ".mjs") or os.path.getsize(full) > 400_000:
+                continue
+            text = _read(full)
+            if ext == ".py":
+                syms = _py_symbols(text)
+            else:
+                syms = [next(g for g in m.groups() if g) for m in _JS_SYMBOL.finditer(text)]
+            if not syms:
+                continue
+            line = "%s: %s" % (os.path.relpath(full, root).replace("\\", "/"), "; ".join(syms[:25]))
+            if used + len(line) > limit:
+                lines.append("… (more files)")
+                return "\n".join(lines)
+            lines.append(line)
+            used += len(line)
+    return "\n".join(lines)
+
+
 def instructions(root):
     """The project's own instructions for coding agents (AGENTS.md, as Codex reads it), else the README top."""
     for name in ("AGENTS.md", "agents.md", "CLAUDE.md", ".github/copilot-instructions.md"):

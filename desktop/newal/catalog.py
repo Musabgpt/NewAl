@@ -35,6 +35,12 @@ MODELS = {
         "url": HF + "unsloth/Qwen3.5-4B-GGUF/resolve/main/Qwen3.5-4B-Q4_K_M.gguf",
         "about": "غير لازم: العقل Qwen3.6 يحكم بنفسه. يُستخدم فقط إذا لم يُنزّل العقل بعد.",
     },
+    "vision": {
+        "title": "عيون Qwen3.6", "label": "👁 العيون", "kind": "mmproj", "for": "coder",
+        "file": "Qwen3.6-35B-A3B-mmproj-F16.gguf", "size": 899283680,
+        "url": HF + "unsloth/Qwen3.6-35B-A3B-GGUF/resolve/main/mmproj-F16.gguf",
+        "about": "يخلي العقل يشوف الصور: الصق لقطة شاشة الخطأ أو التصميم بالمحادثة (Ctrl+V) وبيقرأها حرفياً",
+    },
     "embed": {
         "title": "Qwen3 Embedding 0.6B", "label": "🔎 الفهرسة", "kind": "embed",
         "file": "Qwen3-Embedding-0.6B-Q8_0.gguf", "size": 639150592,
@@ -55,6 +61,7 @@ FALLBACK = {
     "agent": ["agent", "judge", "router"],
     "judge": ["coder", "judge", "agent", "router"],       # the brain judges its own work
     "router": ["router", "agent"],
+    "vision": ["vision"],
     "embed": ["embed"],
     "rerank": ["rerank"],
 }
@@ -72,6 +79,12 @@ def available(role):
             return f.read(4) == b"GGUF"
     except OSError:
         return False
+
+
+def sees(role):
+    """Whether the model serving `role` can read images (its vision file is downloaded)."""
+    actual = pick(role)
+    return bool(actual) and MODELS["vision"]["for"] == actual and available("vision")
 
 
 def pick(role):

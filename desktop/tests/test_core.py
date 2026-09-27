@@ -306,6 +306,27 @@ class WinToolsTest(unittest.TestCase):
         self.assertLessEqual(len(msgs[3]["content"]), 420)
         self.assertLessEqual(sum(len(m["content"]) for m in msgs), 26000)
 
+    def test_compact_leaves_the_prefix_alone_while_it_fits(self):
+        # llama.cpp re-reads everything after the first changed message: no trimming while there is room,
+        # and one hard cut leaves room for several more steps without touching the prefix again.
+        msgs = [{"role": "system", "content": "s"}, {"role": "user", "content": "goal"}]
+        for i in range(4):
+            msgs += [{"role": "assistant", "content": "step"}, {"role": "tool", "content": "x" * 4000}]
+        before = [dict(m) for m in msgs]
+        agent.compact(msgs, keep=2, budget_chars=24000)
+        self.assertEqual(msgs, before)
+        for i in range(4):
+            msgs += [{"role": "assistant", "content": "step"}, {"role": "tool", "content": "x" * 4000}]
+        agent.compact(msgs, keep=2, budget_chars=24000)
+        cut = [dict(m) for m in msgs]
+        self.assertLessEqual(sum(len(m["content"]) for m in msgs), 12500)
+        msgs += [{"role": "assistant", "content": "step"}, {"role": "tool", "content": "x" * 4000}]
+        agent.compact(msgs, keep=2, budget_chars=24000)
+        self.assertEqual(msgs[:len(cut)], cut)                 # the next step only appends
+
+    def test_system_prompt_is_stable(self):
+        self.assertNotRegex(agent._system("code"), r"\d\d:\d\d")
+
     def test_goal_tools_follow_connections(self):
         config.update({"github_token": ""})
         self.assertNotIn("github_repos", tools.goal_names())
@@ -552,6 +573,48 @@ class ProjectModeTest(unittest.TestCase):
                     "from shop import total\n\nclass T(unittest.TestCase):\n    def test_total(self):\n"
                     "        self.assertEqual(total([2, 3]), 5)\n")
         return root
+
+    def test_review_sends_it_back(self):
+        from newal import workspace
+        root = self.make()
+        config.update({"project_path": root, "review_changes": True})
+        call = lambda n, a: {"id": "", "name": n, "arguments": json.dumps(a)}
+        replies = [
+            {"content": "", "tool_calls": [call("edit_file", {"path": "shop.py", "old": "sum(prices) - 1",
+                                                                "new": "sum(prices)  # print(prices)"})]},
+            {"content": "Done.", "tool_calls": []},                                  # review: a debug leftover
+            {"content": "", "tool_calls": [call("edit_file", {"path": "shop.py", "old": "  # print(prices)", "new": ""})]},
+            {"content": "Removed the leftover.", "tool_calls": []},
+        ]
+        verdicts = [{"ok": False, "problems": ["remove the commented-out print"]}, {"ok": True, "problems": []}]
+        old = (agent.pool.chat, agent.pool.complete_json, catalog.pick, workspace.test_command)
+        agent.pool.chat = lambda role, messages, **kw: dict(replies.pop(0), tps=1)
+        agent.pool.complete_json = lambda role, messages, schema, **kw: verdicts.pop(0)
+        catalog.pick = lambda role: "coder"
+        workspace.test_command = lambda r: "python -m unittest discover -s tests -q"
+        events = []
+        try:
+            t = agent.Turn(None, "fix the total", emit=events.append, mode="project")
+            answer, info = t._project([{"role": "user", "content": "fix the total"}], "coder")
+        finally:
+            agent.pool.chat, agent.pool.complete_json, catalog.pick, workspace.test_command = old
+        self.assertEqual(replies, [])
+        self.assertEqual(verdicts, [])
+        self.assertTrue(info["verified"])
+        with open(os.path.join(root, "shop.py")) as f:
+            self.assertEqual(f.read(), "def total(prices):\n    return sum(prices)\n")
+        reviews = [e for e in events if e["type"] == "verdict"]
+        self.assertEqual([e["ok"] for e in reviews], [False, True])
+
+    def test_repo_map(self):
+        from newal import workspace
+        root = self.make()
+        with open(os.path.join(root, "app.js"), "w") as f:
+            f.write("export function start(port) {}\nconst stop = async () => {}\nclass Server {}\n")
+        m = workspace.repo_map(root)
+        self.assertIn("shop.py: def total(prices)", m)
+        self.assertIn("tests/test_shop.py: class T: test_total", m)
+        self.assertIn("app.js: start; stop; Server", m)
 
     def test_tools_and_undo(self):
         from newal import workspace
@@ -819,6 +882,83 @@ class BackgroundTaskTest(unittest.TestCase):
 
     def test_task_in_copy(self):
         self.check(git=False)
+
+    def test_publish_pull_request(self):
+        import shutil
+        import subprocess
+        if not shutil.which("git"):
+            self.skipTest("git not installed")
+        from newal import connectors, tasks
+        root, t = self.run_task(git=True)
+        remote = tempfile.mkdtemp(prefix="remote-")
+        subprocess.run(["git", "init", "-q", "--bare", remote], check=True)
+        subprocess.run(["git", "-C", root, "remote", "add", "origin", remote], check=True)
+        calls = []
+
+        def fake_api(url, headers=None, method="GET", body=None, **kw):
+            calls.append((method, url, body))
+            return {"default_branch": "master"} if method == "GET" else {"html_url": "https://github.com/me/shop/pull/1"}
+        old = (tasks.github_repo_of, connectors._api)
+        tasks.github_repo_of = lambda folder: "me/shop"
+        connectors._api = fake_api
+        config.update({"github_token": "t"})
+        try:
+            r = tasks.publish(t["id"])
+        finally:
+            tasks.github_repo_of, connectors._api = old
+            config.update({"github_token": ""})
+        self.assertTrue(r["ok"], r)
+        self.assertEqual(r["url"], "https://github.com/me/shop/pull/1")
+        post = next(c for c in calls if c[0] == "POST")
+        self.assertEqual(post[2]["head"], "newal/" + t["id"])
+        self.assertEqual(post[2]["base"], "master")
+        self.assertIn("اختبارات المشروع نجحت", post[2]["body"])
+        shown = subprocess.run(["git", "--git-dir", remote, "show", "newal/%s:shop.py" % t["id"]],
+                               capture_output=True, text=True).stdout
+        self.assertIn("return sum(prices)\n", shown)                 # the fix is on the pushed branch
+        self.assertEqual(tasks.get(t["id"])["status"], "pr")
+        with open(os.path.join(root, "shop.py")) as f:
+            self.assertIn("- 1", f.read())                               # the user's copy is untouched
+
+
+class VisionTest(unittest.TestCase):
+    def test_with_images(self):
+        from newal.engine import with_images
+        msgs = [{"role": "system", "content": "s"}, {"role": "user", "content": "look", "_images": ["data:image/png;base64,AA"]}]
+        seen = with_images(msgs, True)
+        self.assertEqual(seen[1]["content"][0], {"type": "text", "text": "look"})
+        self.assertEqual(seen[1]["content"][1]["image_url"]["url"], "data:image/png;base64,AA")
+        self.assertNotIn("_images", seen[1])
+        blind = with_images(msgs, False)
+        self.assertEqual(blind[1], {"role": "user", "content": "look"})
+        self.assertIn("_images", msgs[1])                      # the caller's messages are not changed
+
+    def test_look_first(self):
+        png = os.path.join(HOME, "shot.png")
+        with open(png, "wb") as f:
+            f.write(b"\x89PNG\r\n\x1a\nfake")
+        old = (catalog.sees, agent.pool.chat)
+        sent = []
+        agent.pool.chat = lambda role, messages, **kw: (sent.append((role, messages)), {"content": "ZeroDivisionError: division by zero", "tps": 1})[1]
+        try:
+            catalog.sees = lambda role: False
+            t = agent.Turn(None, "fix it", attachments=[png])
+            t._look()
+            self.assertIn("العيون", t.text)                    # tells the user what to download
+            self.assertEqual(sent, [])
+            catalog.sees = lambda role: True
+            events = []
+            t = agent.Turn(None, "fix it", attachments=[png], emit=events.append)
+            t._look()
+        finally:
+            catalog.sees, agent.pool.chat = old
+        self.assertIn("ZeroDivisionError: division by zero", t.text)
+        self.assertEqual(t.attachments, [])                    # the picture is not also read as a text file
+        role, msgs = sent[0]
+        self.assertEqual(role, "coder")
+        self.assertTrue(msgs[0]["_images"][0].startswith("data:image/png;base64,"))
+        self.assertTrue(any(e.get("name") == "look" and e.get("state") == "done" for e in events))
+        self.assertEqual(router.route(t.text), "code")        # a traceback in the picture goes to the programmer
 
 
 class ServerTest(unittest.TestCase):

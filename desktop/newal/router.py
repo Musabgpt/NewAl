@@ -44,7 +44,9 @@ PREFIX = "Instruct: Classify what kind of help the user asks for\nQuery: "
 LEARNED = os.path.join(config.DATA, "router_learned.json")
 CACHE = os.path.join(config.DATA, "router_vectors.json")
 
-_CODE = re.compile(r"```|Traceback \(most recent call last\)|^\s*(def|class|import|function|const|public)\s", re.M)
+_CODE = re.compile(r"```|Traceback \(most recent call last\)|^\s*(def|class|import|function|const|public)\s|"
+                   r"\b[A-Z]\w*(?:Error|Exception)\b:|\bnpm ERR!|\berror (?:TS|CS)\d+|Uncaught \w+Error|"
+                   r"^\s+at .+\(.+:\d+:\d+\)", re.M)
 
 SYSTEM = """Pick the route for the user's request. Reply with JSON only.
 code = write/fix/explain code. tools = act on the computer or internet (search, files, terminal, GitHub, Drive, Kaggle, VS Code, memory).

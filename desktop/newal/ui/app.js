@@ -9,7 +9,7 @@ const ROUTE_LABEL = {code: "💻 برمجة", tools: "🛠 أدوات", analyze:
 const TOOL_LABEL = {
   web_search: "🔎 بحث بالنت", read_url: "🌐 قراءة صفحة", weather: "⛅ الطقس", currency: "💱 عملات",
   current_time: "🕒 الوقت", library_docs: "📚 توثيق المكتبة", list_files: "📁 ملفات المشروع", search: "🔎 بحث بالكود",
-  edit_file: "✏️ تعديل", run: "▶ تشغيل", diff: "± التغييرات", run_command: "⌨ الطرفية", write_file: "📝 إنشاء ملف", read_file: "📄 قراءة ملف",
+  edit_file: "✏️ تعديل", run: "▶ تشغيل", diff: "± التغييرات", look: "👁 قراءة الصورة", run_command: "⌨ الطرفية", write_file: "📝 إنشاء ملف", read_file: "📄 قراءة ملف",
   list_dir: "📁 مجلد", search_memory: "🗂 الذاكرة", remember: "🗂 حفظ بالذاكرة", github_repos: "GitHub",
   github_read: "GitHub", github_issues: "GitHub", github_create_issue: "GitHub", github_create_repo: "GitHub",
   git_clone: "git clone", git_push: "git push", gitlab_projects: "GitLab", gitlab_read: "GitLab",
@@ -404,10 +404,17 @@ async function upload(file) {
   const tag = document.createElement("span");
   tag.className = "att"; tag.textContent = "⏳ " + file.name;
   $("#attachments").appendChild(tag);
+  let thumb = null;
+  if ((file.type || "").startsWith("image/")) {
+    // A pasted screenshot shows as a small picture: the brain reads it before answering.
+    thumb = document.createElement("img");
+    thumb.src = URL.createObjectURL(file); thumb.className = "thumb";
+  }
   const r = await fetch("/api/upload", {method: "POST", headers: {"X-NewAl": "1", "X-Filename": encodeURIComponent(file.name)}, body: file});
   const j = await r.json();
   attachments.push(j.path);
-  tag.textContent = "📎 " + j.name + " ";
+  tag.textContent = (thumb ? "👁 " : "📎 ") + j.name + " ";
+  if (thumb) tag.prepend(thumb);
   const x = document.createElement("button");
   x.textContent = "✕";
   x.onclick = () => { attachments = attachments.filter(p => p !== j.path); tag.remove(); };
@@ -694,7 +701,7 @@ const panels = {
   async tasks(body) {
     const [list, pj] = await Promise.all([api("/api/tasks"), api("/api/project")]);
     const LABEL = {queued: "⏳ بالدور", running: "⚙ شغالة", done: "✅ جاهزة للمراجعة", no_changes: "— ما في تغييرات",
-      failed: "❌ فشلت", applied: "✔ طُبّقت", discarded: "🗑 انرمت", cancelled: "⛔ أُلغيت"};
+      failed: "❌ فشلت", applied: "✔ طُبّقت", discarded: "🗑 انرمت", cancelled: "⛔ أُلغيت", pr: "📤 Pull Request"};
     const name = p => (p || "").split(/[\\/]/).filter(Boolean).pop();
     body.innerHTML = `<h2>🗂 مهام بالخلفية (متل Codex Cloud)</h2>
       <p class="hint">حط كذا مهمة ورا بعض وروح اشتغل شي تاني، حتى من الهاتف. كل مهمة بتشتغل على <b>نسخة منفصلة</b> من المشروع
@@ -739,7 +746,13 @@ const panels = {
           const holder = c.querySelector(".tkDiff"); holder.innerHTML = ""; holder.appendChild(pre);
         });
         b("✅ طبّق على المشروع", async x => { const r = await api("/api/tasks", {action: "apply", id: t.id}); x.textContent = r.message; setTimeout(() => panels.tasks(body), 900); }, "primary");
+        if (t.kind === "git") b("📤 افتح Pull Request", async x => {
+          x.disabled = true; x.textContent = "يرفع…";
+          const r = await api("/api/tasks", {action: "publish", id: t.id});
+          x.textContent = r.message; if (r.ok) setTimeout(() => panels.tasks(body), 1200); else x.disabled = false;
+        });
       }
+      if (t.status === "pr" && t.pr_url) b("🔗 افتح الـ PR", () => api("/api/open", {path: t.pr_url}));
       if (["done", "queued", "running", "no_changes", "failed"].includes(t.status))
         b(t.status === "running" ? "⛔ أوقف" : "🗑 ارمِ", async () => { await api("/api/tasks", {action: "discard", id: t.id}); panels.tasks(body); });
       if (t.conv) b("💬 المحادثة", () => { $("#closePanel").click(); openConv(t.conv); });
@@ -812,6 +825,7 @@ const panels = {
       <div class="field"><label><input type="checkbox" id="auto_run" ${s.auto_run ? "checked" : ""}> تشغيل الأوامر وإنشاء الملفات بدون سؤال</label>
         <span class="hint">بدونه يطلب NewAl موافقتك قبل أي أمر في الطرفية أو ملف أو رفع.</span></div>
       <div class="field"><label><input type="checkbox" id="verify_code" ${s.verify_code ? "checked" : ""}> تجربة الكود بالخلفية وإصلاحه حتى يشتغل، ثم إعطائي النسخة الصحيحة فقط</label></div>
+      <div class="field"><label><input type="checkbox" id="review_changes" ${s.review_changes ? "checked" : ""}> 🔍 وضع المشروع: يراجع تغييراته مقابل المهمة قبل ما يسلّمك (أدق، وأبطأ شوي)</label></div>
       <div class="field"><label>أقصى عدد محاولات إصلاح</label><input type="number" id="max_fix_attempts" min="1" max="15" value="${s.max_fix_attempts}"></div>
       <div class="field"><label>عدد الأنوية (0 = تلقائي)</label><input type="number" id="threads" min="0" max="64" value="${s.threads}"></div>
       <div class="field"><label>ميزانية الذاكرة للنماذج (GB)</label><input type="number" id="ram_budget_gb" min="2" max="256" value="${s.ram_budget_gb}"></div>
@@ -824,6 +838,7 @@ const panels = {
     body.querySelector("#saveSettings").onclick = async () => {
       await api("/api/settings", {
         auto_run: body.querySelector("#auto_run").checked, verify_code: body.querySelector("#verify_code").checked,
+        review_changes: body.querySelector("#review_changes").checked,
         max_fix_attempts: +body.querySelector("#max_fix_attempts").value,
         threads: +body.querySelector("#threads").value, ram_budget_gb: +body.querySelector("#ram_budget_gb").value,
         context: +body.querySelector("#context").value,
@@ -834,10 +849,11 @@ const panels = {
       $("#closePanel").click();
     };
     body.querySelector("#speed").onclick = async () => {
-      body.querySelector("#speedOut").textContent = "يقيس… (دقيقة تقريباً)";
+      body.querySelector("#speedOut").textContent = "يقيس على جهازك… (دقيقة، ومع العقل Qwen3.6 حتى 5 دقائق)";
       const r = await api("/api/speed", {});
       body.querySelector("#speedOut").textContent = r.error ? r.error :
-        "الأسرع: " + r.best + " أنوية — " + Object.entries(r.results).map(([t, v]) => `${t}: ${v} كلمة/ث`).join("، ");
+        "الأسرع: " + r.best + " أنوية — " + Object.entries(r.results).map(([t, v]) => `${t}: ${v} كلمة/ث`).join("، ") +
+        (r.spec ? ` · التصليح: بدون تسريع ${r.spec.speeds.none}، مع ngram ${r.spec.speeds["ngram-mod"]} كلمة/ث ← ${r.spec.chosen === "none" ? "بدون" : "مع تسريع"}` : "");
       body.querySelector("#threads").value = r.best || 0;
     };
     body.querySelector("#openHome").onclick = e => { e.preventDefault(); api("/api/open", {path: state.home}); };

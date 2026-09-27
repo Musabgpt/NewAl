@@ -76,6 +76,8 @@ DEFAULTS = {
     "context7_key": "",           # optional free key for the library-docs add-on (a higher daily limit)
     "drive_remote": "gdrive",
     "api_port": 8766,
+    "review_changes": True,       # project mode: review the diff against the task before handing it over
+    "spec_type": "",              # speculative decoding for the brain ("ngram-mod"), kept only when measured faster
     "school_enabled": False,      # Kaggle School: hard tasks go to Kaggle's GPUs every week
     "school_hours": 30,           # GPU hours per week it may use (Kaggle gives ~30)
     "project_path": "",           # the folder project mode (🧑‍💻) works in

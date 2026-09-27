@@ -24,7 +24,10 @@ TEMPLATE = os.path.join(config.BUNDLE, "kaggle", "school_kernel.py")
 SLUG = "newal-school"
 ACCELERATOR = "NvidiaTeslaT4"          # Kaggle's "GPU T4 x2" (2 x 16 GB)
 # On 2 x 16 GB the brain runs in a larger, more accurate quantization than on the laptop.
-MODEL_URL = "https://huggingface.co/unsloth/Qwen3.6-35B-A3B-GGUF/resolve/main/Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf"
+# The MTP build of the same file: on GPUs its multi-token prediction heads make generation ~1.5-2x faster (on the
+# laptop's CPU it measured no gain, so the laptop keeps the plain file).
+MODEL_URL = "https://huggingface.co/unsloth/Qwen3.6-35B-A3B-MTP-GGUF/resolve/main/Qwen3.6-35B-A3B-UD-Q4_K_XL.gguf"
+SPEC = ["--spec-type", "draft-mtp", "--spec-draft-n-max", "2"]
 SESSION_MAX_HOURS = 8.5
 MIN_TASKS = 3
 MAX_TASKS = 150
@@ -168,7 +171,7 @@ def kernel_source(tasks, hours):
     from . import agent
     with open(TEMPLATE, encoding="utf-8") as f:
         src = f.read()
-    cfg = {"hours": round(hours, 2), "model_url": MODEL_URL, "model_gb": 23,
+    cfg = {"hours": round(hours, 2), "model_url": MODEL_URL, "model_gb": 23, "spec": SPEC,
            "model_url_small": catalog.MODELS["coder"]["url"], "context": 32768, "cuda_arch": "75",
            "attempts": 6, "restarts": 3, "coder_prompt": agent.CODER,
            "judge_prompt": agent.VERDICT_PROMPT, "lesson_prompt": agent.LESSON_PROMPT}
