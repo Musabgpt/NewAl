@@ -70,6 +70,7 @@ def main():
     httpd = server.serve(port)
     from newal import school, speed, tasks, updater
     speed.warm_up()                  # the brain loads and reads its instructions while the window opens
+    memory.purge_temp()              # temporary chats (🕶) do not outlive the session
     school.start_scheduler()
     tasks.start_worker()
     updater.start_checker()

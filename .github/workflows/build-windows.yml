@@ -123,6 +123,9 @@ jobs:
           Pop-Location
           if (-not (Test-Path assets/newal-agent.vsix)) { throw "the extension was not packaged" }
 
+      - name: Download the UI libraries (math, diagrams, live previews)
+        run: python tools/fetch_vendor.py
+
       - name: Stamp the build number
         run: |
           Set-Content newal/version.py "`"`"`"This build's number: the GitHub Actions run that built it.`"`"`"`n`nBUILD = ${{ github.run_number }}`nCOMMIT = `"${{ github.sha }}`"`n"

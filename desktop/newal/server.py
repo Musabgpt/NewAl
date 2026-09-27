@@ -50,7 +50,7 @@ def _title(text):
 
 
 def run_chat(job, body):
-    conv = body.get("conv") or memory.new_conversation()
+    conv = body.get("conv") or memory.new_conversation(temp=bool(body.get("temp")))
     text = (body.get("text") or "").strip()
     attachments = [p for p in body.get("attachments", []) if os.path.exists(p)]
     try:
@@ -296,7 +296,8 @@ class Handler(BaseHTTPRequestHandler):
         if p == "/api/state":
             return self._json(state())
         if p == "/api/conversations":
-            return self._json(memory.conversations())
+            q = qs.get("q", [""])[0]
+            return self._json(memory.search_conversations(q) if q.strip() else memory.conversations())
         m = re.fullmatch(r"/api/conversations/(\d+)/messages", p)
         if m:
             out = memory.messages(int(m.group(1)))
@@ -365,7 +366,10 @@ class Handler(BaseHTTPRequestHandler):
                 job.pending[body["id"]][0].set()
             return self._json({"ok": True})
         if p == "/api/conversations":
-            return self._json({"id": memory.new_conversation()})
+            if body.get("leave_temp"):
+                memory.purge_temp()                  # the user left a temporary chat
+                return self._json({"ok": True})
+            return self._json({"id": memory.new_conversation(temp=bool(body.get("temp")))})
         m = re.fullmatch(r"/api/conversations/(\d+)/(rename|delete)", p)
         if m:
             if m.group(2) == "rename":

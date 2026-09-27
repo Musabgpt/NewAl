@@ -24,15 +24,23 @@ const TOOL_LABEL = {
 
 // ------------------------------------------------------------------ conversations
 
+let tempMode = false;          // 🕶 temporary chat: not listed, not used for training, deleted when left
+
 async function loadConvs() {
-  const list = await api("/api/conversations");
+  const q = ($("#convSearch") || {}).value || "";
+  const list = await api("/api/conversations" + (q.trim() ? "?q=" + encodeURIComponent(q.trim()) : ""));
   const box = $("#convs");
   box.innerHTML = "";
+  if (q.trim() && !list.length) box.innerHTML = '<div class="hint" style="padding:8px">ما في محادثات فيها هالكلمات</div>';
   for (const c of list) {
     const d = document.createElement("div");
     d.className = "conv" + (c.id === conv ? " active" : "");
     d.innerHTML = '<span dir="auto"></span><button class="x" title="إعادة تسمية">✎</button><button class="x" title="حذف">🗑</button>';
     d.querySelector("span").textContent = c.title;
+    if (c.snippet) {
+      const sn = document.createElement("small"); sn.className = "snippet"; sn.dir = "auto"; sn.textContent = c.snippet;
+      d.querySelector("span").appendChild(document.createElement("br")); d.querySelector("span").appendChild(sn);
+    }
     d.onclick = () => openConv(c.id);
     const [ren, del] = d.querySelectorAll(".x");
     ren.onclick = async e => {
@@ -51,16 +59,64 @@ async function loadConvs() {
   }
 }
 
-function newChat() {
+function leaveTemp() {
+  if (conv && tempMode) api("/api/conversations", {leave_temp: true});
+}
+
+function newChat(temp) {
+  leaveTemp();
+  tempMode = temp === true;
   conv = null;
   $("#messages").innerHTML = "";
   $("#welcome").hidden = false;
-  $("#title").textContent = "NewAl";
+  $("#title").textContent = tempMode ? "🕶 محادثة مؤقتة: ما بتنحفظ ولا بتدخل بالتدريب" : "NewAl";
+  document.body.classList.toggle("temp-chat", tempMode);
+  $("#tempChat").classList.toggle("on", tempMode);
   loadConvs();
   $("#input").focus();
 }
 
+// The open conversation as a file in the workspace: Markdown, or a web page that looks like the chat.
+async function exportChat(fmt) {
+  if (!conv) return;
+  const msgs = await api(`/api/conversations/${conv}/messages`);
+  const title = $("#title").textContent || "NewAl";
+  const md = "# " + title + "\n\n" + msgs.filter(m => m.role !== "system").map(m =>
+    (m.role === "user" ? "**🧑 أنت:**\n\n" : "**🤖 NewAl:**\n\n") + m.content).join("\n\n---\n\n");
+  const body = fmt === "md" ? md : `<!doctype html><html lang="ar" dir="rtl"><head><meta charset="utf-8"><title>${escapeHtml(title)}</title>
+<style>body{font:16px/1.7 "Segoe UI",Tahoma,sans-serif;max-width:860px;margin:30px auto;padding:0 16px;color:#1d2126}
+.u{background:#dcecfa;padding:10px 14px;border-radius:14px;margin:14px 0;white-space:pre-wrap}.b{margin:14px 0}
+pre{background:#f1f3f5;padding:10px;border-radius:8px;overflow:auto;direction:ltr;text-align:left}
+code{font-family:Consolas,monospace}table{border-collapse:collapse}td,th{border:1px solid #ccc;padding:4px 8px}
+.codeblock .bar{display:none}</style></head><body><h1>${escapeHtml(title)}</h1>` +
+    msgs.map(m => m.role === "user" ? `<div class="u" dir="auto">${escapeHtml(m.content)}</div>` : `<div class="b">${renderMarkdown(m.content)}</div>`).join("") +
+    "</body></html>";
+  const name = (title.replace(/[\\/:*?"<>|]+/g, " ").trim().slice(0, 60) || "chat") + (fmt === "md" ? ".md" : ".html");
+  const r = await fetch("/api/upload", {method: "POST", headers: {"X-NewAl": "1", "X-Target": "workspace", "X-Filename": encodeURIComponent(name)}, body});
+  const j = await r.json();
+  api("/api/open", {path: j.path});
+}
+
+// 🔊 An answer read aloud with the Windows voices (an Arabic one when the answer is Arabic and one is installed).
+function speak(text, btn) {
+  const synth = window.speechSynthesis;
+  if (!synth) return;
+  if (synth.speaking) { synth.cancel(); btn.textContent = "🔊"; return; }
+  const plain = text.replace(/```[\s\S]*?```/g, " (كود) ").replace(/[#*_`>|]/g, " ").replace(/\[(\d+)\]/g, "").replace(/\s+/g, " ");
+  const u = new SpeechSynthesisUtterance(plain.slice(0, 6000));
+  const arabic = /[\u0600-\u06FF]/.test(plain);
+  const voices = synth.getVoices();
+  const v = voices.find(v => arabic ? v.lang.startsWith("ar") : v.lang.startsWith("en"));
+  if (v) u.voice = v;
+  u.lang = v ? v.lang : (arabic ? "ar-SA" : "en-US");
+  u.onend = u.onerror = () => { btn.textContent = "🔊"; };
+  btn.textContent = "⏹";
+  synth.speak(u);
+}
+
 async function openConv(id) {
+  if (id !== conv) leaveTemp();
+  if (tempMode) { tempMode = false; document.body.classList.remove("temp-chat"); $("#tempChat").classList.remove("on"); }
   conv = id;
   const msgs = await api(`/api/conversations/${id}/messages`);
   $("#messages").innerHTML = "";
@@ -234,10 +290,12 @@ function addBot() {
       p.textContent = "⚠ " + t;
       d.appendChild(p);
     },
-    finish(finalText, meta, id) {
+    finish(finalText, meta, id, live) {
       if (status) { status.remove(); status = null; }
       text = finalText;
       paint();
+      enhance(content);
+      if (live) canvasFollow(text);
       meta = meta || {};
       if (!route.textContent && meta.route) route.textContent = `${ROUTE_LABEL[meta.route] || meta.route} · ${meta.model || ""}`;
       if (draft) draft.querySelector("summary").textContent = "⚙ مسودات الكود";
@@ -277,6 +335,7 @@ function actions(el, text, meta, id) {
     return b;
   };
   btn("⧉", "نسخ", b => { navigator.clipboard.writeText(text); b.textContent = "✓"; setTimeout(() => b.textContent = "⧉", 1200); });
+  btn("🔊", "اقرأ الجواب بصوت عالي", b => speak(text, b));
   const up = btn("👍", "جواب صحيح (يُحفظ للتدريب)", () => feedback(true));
   const down = btn("👎", "جواب خاطئ", () => feedback(false));
   if (meta.feedback === true) up.classList.add("picked");
@@ -326,7 +385,9 @@ function wireCode(root) {
   root.querySelectorAll(".codeblock").forEach(cb => {
     const code = cb.querySelector("code").textContent;
     cb.querySelectorAll("button").forEach(b => b.onclick = async () => {
-      if (b.dataset.act === "copy") {
+      if (b.dataset.act === "preview") {
+        openCanvas(cb.dataset.lang, code, cb.dataset.file);
+      } else if (b.dataset.act === "copy") {
         navigator.clipboard.writeText(code);
         b.textContent = "✓"; setTimeout(() => b.textContent = "نسخ", 1200);
       } else {
@@ -342,6 +403,166 @@ function wireCode(root) {
       }
     });
   });
+}
+
+// ------------------------------------------------------------------ math, diagrams, canvas
+
+const loaded_ = {};
+function loadScript(src) {
+  return loaded_[src] || (loaded_[src] = new Promise((ok, fail) => {
+    const s = document.createElement("script");
+    s.src = src; s.onload = ok; s.onerror = () => { delete loaded_[src]; fail(new Error(src)); };
+    document.head.appendChild(s);
+  }));
+}
+function loadCss(href) {
+  if (document.querySelector(`link[href="${href}"]`)) return;
+  const l = document.createElement("link"); l.rel = "stylesheet"; l.href = href; document.head.appendChild(l);
+}
+
+// After an answer is written: equations by KaTeX, ```mermaid blocks as diagrams (both from ui/vendor, offline).
+async function enhance(root) {
+  const maths = root.querySelectorAll(".math:not(.done)");
+  if (maths.length) {
+    try {
+      loadCss("/ui/vendor/katex/katex.min.css");
+      await loadScript("/ui/vendor/katex/katex.min.js");
+      maths.forEach(el => {
+        try { katex.render(el.dataset.tex, el, {displayMode: el.classList.contains("block"), throwOnError: false}); } catch (_) {}
+        el.classList.add("done");
+      });
+    } catch (_) { /* no vendor files (a development copy): the TeX stays as text */ }
+  }
+  const charts = root.querySelectorAll('.codeblock[data-lang="mermaid"]:not(.done)');
+  if (charts.length) {
+    try {
+      await loadScript("/ui/vendor/mermaid/mermaid.min.js");
+      mermaid.initialize({startOnLoad: false, theme: "default"});      // drawn on a white card in both themes
+      for (const cb of charts) {
+        cb.classList.add("done");
+        try {
+          const {svg} = await mermaid.render("m" + Math.random().toString(36).slice(2), cb.querySelector("code").textContent);
+          const d = document.createElement("div"); d.className = "diagram"; d.innerHTML = svg;
+          cb.insertBefore(d, cb.querySelector("pre"));
+          cb.querySelector("pre").hidden = true;
+          const t = document.createElement("button"); t.textContent = "‹/›"; t.title = "الكود / المخطط";
+          t.onclick = () => { const pre = cb.querySelector("pre"); pre.hidden = !pre.hidden; d.hidden = !d.hidden; };
+          cb.querySelector(".bar span:last-child").prepend(t);
+        } catch (_) { /* not a valid diagram: the code stays */ }
+      }
+    } catch (_) {}
+  }
+}
+
+// The canvas: a live preview beside the chat (like Claude's artifacts / ChatGPT's canvas). Web pages, SVG, Mermaid,
+// React components (with Tailwind) and Markdown, from the vendor files only: nothing is fetched from the internet.
+// The preview runs in a sandboxed frame without the app's origin, so a page cannot reach NewAl's API.
+const canvas = {lang: "", code: "", file: "", original: ""};
+
+function canvasDoc(lang, code) {
+  lang = (lang || "").toLowerCase();
+  const v = p => location.origin + "/ui/vendor/" + p;
+  if (/^(jsx|tsx|react)$/.test(lang)) {
+    let src = code.replace(/^\s*import\s[^;\n]*(;|$)/gm, "")                 // modules cannot load here: React is global
+                  .replace(/export\s+default\s+function\s+(\w+)/, "window.__App = function $1")
+                  .replace(/export\s+default\s+(?=\w)/, "window.__App = ")
+                  .replace(/^\s*export\s+(?=(const|function|class)\b)/gm, "");
+    return `<!doctype html><html><head><meta charset="utf-8"><script src="${v("react/react.production.min.js")}"></script>
+<script src="${v("react/react-dom.production.min.js")}"></script><script src="${v("babel/babel.min.js")}"></script>
+<script src="${v("tailwind/tailwind.js")}"></script></head><body><div id="root"></div>
+<script type="text/babel" data-presets="${lang === "tsx" ? "typescript,react" : "react"}" data-filename="App.${lang === "tsx" ? "tsx" : "jsx"}">
+const {useState, useEffect, useRef, useMemo, useCallback, useReducer, useContext, createContext, Fragment} = React;
+${src}
+;(() => { const C = window.__App || (typeof App !== "undefined" ? App : null);
+  if (C) ReactDOM.createRoot(document.getElementById("root")).render(React.createElement(C)); })();
+</script></body></html>`;
+  }
+  if (lang === "mermaid") {
+    return `<!doctype html><html><head><meta charset="utf-8"><script src="${v("mermaid/mermaid.min.js")}"></script></head>
+<body style="margin:0;padding:16px;background:#fff"><pre class="mermaid">${escapeHtml(code)}</pre>
+<script>mermaid.initialize({startOnLoad: true});</script></body></html>`;
+  }
+  if (/^(markdown|md)$/.test(lang)) {
+    return `<!doctype html><html dir="auto"><head><meta charset="utf-8"><style>body{font:16px/1.7 "Segoe UI",Tahoma,sans-serif;
+max-width:760px;margin:24px auto;padding:0 16px;color:#1d2126}pre{background:#f1f3f5;padding:10px;overflow:auto}
+table{border-collapse:collapse}td,th{border:1px solid #ccc;padding:4px 8px}</style></head><body>${renderMarkdown(code)}</body></html>`;
+  }
+  if (lang === "svg" || /^\s*<svg\b/i.test(code)) {
+    return `<!doctype html><html><head><meta charset="utf-8"></head><body style="margin:0;min-height:100vh;display:grid;place-items:center;background:#fff">${code}</body></html>`;
+  }
+  return /<html[\s>]/i.test(code) ? code : `<!doctype html><html><head><meta charset="utf-8"></head><body>${code}</body></html>`;
+}
+
+function openCanvas(lang, code, file) {
+  Object.assign(canvas, {lang: lang || (/^\s*<svg\b/i.test(code) ? "svg" : "html"), code, file: file || "", original: code});
+  const el = $("#canvas");
+  el.hidden = false;
+  document.body.classList.add("with-canvas");
+  $("#canvasTitle").textContent = (file ? "📄 " + file : ({mermaid: "📊 مخطط", svg: "🖼 SVG", jsx: "⚛ React", tsx: "⚛ React",
+    react: "⚛ React", markdown: "📝 مستند", md: "📝 مستند"}[canvas.lang.toLowerCase()] || "🌐 صفحة"));
+  $("#canvasCode").value = code;
+  canvasTab("preview");
+}
+
+function canvasTab(tab) {
+  document.querySelectorAll("#canvas .tabs button").forEach(b => b.classList.toggle("on", b.dataset.tab === tab));
+  const code = $("#canvasCode");
+  let frame = $("#canvasFrame");
+  if (tab === "preview") {
+    canvas.code = code.value;
+    // A new frame for every preview: reusing one kept the old page's layout (a component showed 0x0 in Chromium).
+    const fresh = frame.cloneNode(false);
+    fresh.removeAttribute("srcdoc");
+    fresh.hidden = false;
+    frame.replaceWith(fresh);
+    frame = fresh;
+    frame.srcdoc = canvasDoc(canvas.lang, canvas.code);
+  }
+  frame.hidden = tab !== "preview";
+  code.hidden = tab !== "code";
+}
+
+// A new answer with a previewable block updates an open canvas (or opens it for a page, a component or a diagram).
+function canvasFollow(text) {
+  const blocks = [...text.matchAll(/```([\w+#.-]*)[^\n]*\n([\s\S]*?)```/g)]
+    .map(m => ({lang: m[1], code: m[2]})).filter(b => previewable(b.lang) || /^\s*<(!doctype html|html|svg)\b/i.test(b.code));
+  if (!blocks.length) return;
+  const b = blocks[blocks.length - 1];
+  const big = /^(html?|jsx|tsx|react|svg|mermaid)$/i.test(b.lang || "html") && b.code.split("\n").length >= 5;
+  if (!$("#canvas").hidden || big) openCanvas(b.lang, b.code);
+}
+
+function canvasAsk() {
+  const ask = $("#canvasAsk").value.trim();
+  if (!ask || job) return;
+  canvas.code = $("#canvasCode").value;
+  const what = {mermaid: "المخطط", svg: "الصورة", jsx: "المكوّن", tsx: "المكوّن", react: "المكوّن", markdown: "المستند", md: "المستند"}[canvas.lang.toLowerCase()] || "الصفحة";
+  const text = canvas.code === canvas.original
+    ? `عدّل ${what} اللي بالمعاينة: ${ask}\nارجع الكود كامل بكتلة واحدة.`
+    : `هاد كود ${what} بعد تعديلاتي:\n\`\`\`${canvas.lang}\n${canvas.code}\n\`\`\`\nعدّل: ${ask}\nارجع الكود كامل بكتلة واحدة.`;
+  $("#canvasAsk").value = "";
+  send(text, []);
+}
+
+function wireCanvas() {
+  document.querySelectorAll("#canvas .tabs button").forEach(b => b.onclick = () => canvasTab(b.dataset.tab));
+  $("#canvasClose").onclick = () => { $("#canvas").hidden = true; document.body.classList.remove("with-canvas"); $("#canvasFrame").srcdoc = ""; };
+  $("#canvasCopy").onclick = () => { navigator.clipboard.writeText($("#canvasCode").value); $("#canvasCopy").textContent = "✓"; setTimeout(() => $("#canvasCopy").textContent = "نسخ", 1200); };
+  const saveAs = async (open) => {
+    const ext = {mermaid: "mmd", svg: "svg", jsx: "html", tsx: "html", react: "html", markdown: "md", md: "md"}[canvas.lang.toLowerCase()] || "html";
+    const body = ext === "html" && /^(jsx|tsx|react)$/i.test(canvas.lang) ? canvasDoc(canvas.lang, $("#canvasCode").value) : $("#canvasCode").value;
+    const name = open ? "preview-" + Date.now() + "." + (ext === "mmd" || ext === "md" ? "html" : ext) :
+      prompt("اسم الملف (في مجلد العمل)", (canvas.file || "").split(/[\\/]/).pop() || "canvas." + ext);
+    if (!name) return;
+    const data = open && (ext === "mmd" || ext === "md") ? canvasDoc(canvas.lang, $("#canvasCode").value) : body;
+    const r = await fetch("/api/upload", {method: "POST", headers: {"X-NewAl": "1", "X-Target": "workspace", "X-Filename": encodeURIComponent(name)}, body: data});
+    const j = await r.json();
+    api("/api/open", {path: open ? j.path : j.path.replace(/[\\/][^\\/]+$/, "")});
+  };
+  $("#canvasSave").onclick = () => saveAs(false);
+  $("#canvasOpen").onclick = () => saveAs(true);
+  $("#canvasSend").onclick = canvasAsk;
+  $("#canvasAsk").onkeydown = e => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); canvasAsk(); } };
 }
 
 // ------------------------------------------------------------------ sending
@@ -363,14 +584,15 @@ async function send(text, files, editId) {
   bot.status("يوجّه الطلب…");
   const mode = document.querySelector("input[name=mode]:checked").value;
   const plan = mode === "project" && $("#planFirst").checked;
-  const r = await api("/api/chat", {conv, text, attachments: files, mode, think: $("#think").checked, plan, edit_from: editId || null});
+  const r = await api("/api/chat", {conv, text, attachments: files, mode, think: $("#think").checked, plan, edit_from: editId || null,
+                                   temp: tempMode});
   job = r.job;
   setBusy(true);
   const es = new EventSource("/api/chat/stream?job=" + job);
   es.onmessage = ev => {
     const e = JSON.parse(ev.data);
     switch (e.type) {
-      case "start": if (!conv) { conv = e.conv; loadConvs(); } $("#messages").querySelector("[data-pending]").dataset.id = e.user_id; break;
+      case "start": if (!conv) { conv = e.conv; if (!tempMode) loadConvs(); } $("#messages").querySelector("[data-pending]").dataset.id = e.user_id; break;
       case "route": bot.route(e); break;
       case "status": bot.status(e.text); break;
       case "delta": bot.delta(e.kind, e.text); break;
@@ -386,7 +608,7 @@ async function send(text, files, editId) {
       case "goal_check": bot.verdict({ok: e.done, reason: (e.done ? "🎯 تحقق الهدف. " : "🎯 لم يكتمل بعد، يكمل: ") + (e.missing || "")}); break;
       case "memory": bot.memory(e); break;
       case "approve": askApproval(e); break;
-      case "done": bot.finish(e.content, e.meta, e.message_id); bot.el.dataset.id = e.message_id; end(); break;
+      case "done": bot.finish(e.content, e.meta, e.message_id, true); bot.el.dataset.id = e.message_id; end(); break;
       case "cancelled": bot.error("أُوقف"); end(); break;
       case "error": bot.error(e.text); end(); break;
     }
@@ -1099,7 +1321,18 @@ function autosize() {
 
 document.addEventListener("DOMContentLoaded", () => {
   try { document.documentElement.dataset.theme = localStorage.getItem("theme") || "dark"; } catch (_) {}
-  $("#newChat").onclick = newChat;
+  $("#newChat").onclick = () => newChat(false);
+  $("#tempChat").onclick = () => newChat(!tempMode);
+  let searchTimer = null;
+  $("#convSearch").oninput = () => { clearTimeout(searchTimer); searchTimer = setTimeout(loadConvs, 250); };
+  $("#exportChat").onclick = () => {
+    if (!conv) return;
+    const menu = $("#exportMenu");
+    menu.hidden = !menu.hidden;
+  };
+  document.querySelectorAll("#exportMenu button").forEach(b => b.onclick = () => { $("#exportMenu").hidden = true; exportChat(b.dataset.fmt); });
+  window.addEventListener("beforeunload", leaveTemp);
+  wireCanvas();
   $("#toggleSide").onclick = () => document.body.classList.toggle("side-hidden");
   $("#projectBtn").onclick = () => showPanel("project");
   showProject();

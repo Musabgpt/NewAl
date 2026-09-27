@@ -40,25 +40,68 @@ def db():
         CREATE INDEX IF NOT EXISTS chunks_source ON chunks(source);
         CREATE TABLE IF NOT EXISTS sources(path TEXT PRIMARY KEY, mtime REAL, kind TEXT);
         """)
+        if "temp" not in [r[1] for r in c.execute("PRAGMA table_info(conversations)")]:
+            with _write:
+                try:
+                    c.execute("ALTER TABLE conversations ADD COLUMN temp INTEGER DEFAULT 0")
+                    c.commit()
+                except sqlite3.OperationalError:
+                    pass                      # another thread added it first
         _local.conn = c
     return c
 
 
 # ------------------------------------------------------------------ conversations
 
-def new_conversation(title="محادثة جديدة"):
+def new_conversation(title="محادثة جديدة", temp=False):
+    """temp: a temporary chat (🕶), like ChatGPT's: not listed, not used for training, deleted when left."""
+    db()
     with _write:
-        cur = db().execute("INSERT INTO conversations(title, created, updated) VALUES(?,?,?)",
-                           (title, time.time(), time.time()))
+        cur = db().execute("INSERT INTO conversations(title, created, updated, temp) VALUES(?,?,?,?)",
+                           (title, time.time(), time.time(), 1 if temp else 0))
         db().commit()
         return cur.lastrowid
 
 
 def conversations():
-    # Conversations nobody wrote in (e.g. "new chat" pressed twice) are not listed.
+    # Conversations nobody wrote in (e.g. "new chat" pressed twice) are not listed, nor temporary ones.
     return [dict(r) for r in db().execute(
-        "SELECT * FROM conversations c WHERE EXISTS (SELECT 1 FROM messages m WHERE m.conv = c.id) "
+        "SELECT * FROM conversations c WHERE EXISTS (SELECT 1 FROM messages m WHERE m.conv = c.id) AND NOT c.temp "
         "ORDER BY updated DESC LIMIT 300")]
+
+
+def is_temp(conv):
+    if not conv:
+        return False
+    r = db().execute("SELECT temp FROM conversations WHERE id=?", (conv,)).fetchone()
+    return bool(r and r["temp"])
+
+
+def purge_temp(keep=None):
+    """Deletes the temporary chats (at start-up, and when the user leaves one)."""
+    for r in db().execute("SELECT id FROM conversations WHERE temp").fetchall():
+        if r["id"] != keep:
+            delete_conversation(r["id"])
+
+
+def search_conversations(query, limit=40):
+    """Conversations whose title or messages contain the words (all of them), newest first, with a snippet."""
+    words = [w for w in re.split(r"\s+", (query or "").strip()) if w][:6]
+    if not words:
+        return conversations()
+    out = []
+    for c in db().execute("SELECT * FROM conversations c WHERE NOT c.temp AND EXISTS (SELECT 1 FROM messages m "
+                          "WHERE m.conv = c.id) ORDER BY updated DESC LIMIT 2000"):
+        text = c["title"] + "\n" + "\n".join(r["content"] for r in db().execute(
+            "SELECT content FROM messages WHERE conv=? ORDER BY id", (c["id"],)))
+        low = text.lower()
+        if all(w.lower() in low for w in words):
+            i = low.find(words[0].lower())
+            snippet = re.sub(r"\s+", " ", text[max(0, i - 40):i + 100]).strip()
+            out.append(dict(c, snippet=snippet))
+            if len(out) >= limit:
+                break
+    return out
 
 
 def rename(conv, title):

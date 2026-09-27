@@ -8,6 +8,8 @@ desktop/dist/
 desktop/build/
 desktop/llama/
 desktop/rclone/
+# fetched by desktop/tools/fetch_vendor.py at build time
+desktop/newal/ui/vendor/
 desktop/*.zip
 desktop/*.spec
 __pycache__/

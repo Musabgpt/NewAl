@@ -9,7 +9,9 @@
 </head>
 <body>
 <aside id="side">
-  <button id="newChat" class="wide">✎ محادثة جديدة</button>
+  <div class="row-tight"><button id="newChat" class="wide">✎ محادثة جديدة</button>
+    <button id="tempChat" title="محادثة مؤقتة: ما بتنحفظ ولا بتدخل بالتدريب، وبتنمسح لما تطلع منها">🕶</button></div>
+  <input id="convSearch" type="search" dir="auto" placeholder="🔎 ابحث بالمحادثات…">
   <div class="side-title">المحادثات</div>
   <div id="convs"></div>
   <nav>
@@ -32,6 +34,8 @@
     <div id="title">NewAl</div>
     <button id="projectBtn" class="project-chip" title="مجلد المشروع لوضع 🧑‍💻">📂 <span>افتح مشروع</span></button>
     <div id="loaded"></div>
+    <span class="menu-wrap"><button id="exportChat" title="تصدير المحادثة">📤</button>
+      <span id="exportMenu" class="menu" hidden><button data-fmt="md">📝 Markdown</button><button data-fmt="html">🌐 صفحة ويب</button></span></span>
   </header>
   <div id="updateBar" hidden></div>
   <div id="notice" hidden></div>
@@ -70,6 +74,19 @@
     <input type="file" id="fileInput" multiple hidden>
   </footer>
 </main>
+
+<aside id="canvas" hidden>
+  <div class="canvas-bar">
+    <span id="canvasTitle"></span>
+    <span class="tabs"><button data-tab="preview" class="on">👁 معاينة</button><button data-tab="code">‹/› الكود</button></span>
+    <span class="grow"></span>
+    <button id="canvasCopy">نسخ</button><button id="canvasSave" title="حفظ بمجلد العمل">حفظ</button>
+    <button id="canvasOpen" title="فتح بالمتصفح">↗</button><button id="canvasClose" title="إغلاق">✕</button>
+  </div>
+  <iframe id="canvasFrame" sandbox="allow-scripts allow-forms allow-modals allow-popups allow-downloads" title="معاينة"></iframe>
+  <textarea id="canvasCode" hidden spellcheck="false" dir="ltr"></textarea>
+  <div class="canvas-ask"><input id="canvasAsk" dir="auto" placeholder="اطلب تعديل… (مثلاً: خلي الأزرار زرقا وزيد وضع ليلي)"><button id="canvasSend">↑</button></div>
+</aside>
 
 <div id="panel" hidden>
   <div class="panel-box">

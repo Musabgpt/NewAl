@@ -209,6 +209,9 @@ class Turn:
         meta.update(info)
         meta["tools"] = self.tools_used
         meta["seconds"] = round(time.time() - started, 1)
+        if memory.is_temp(self.conv):
+            meta["temp"] = True              # a temporary chat (🕶) is not kept for training
+            return answer, meta
         user_msgs = [m for m in messages if m["role"] != "system"][-6:]
         meta["training_id"] = training.log(role, route, user_msgs, answer, verified=info.get("verified"),
                                            attempts=info.get("attempts"),

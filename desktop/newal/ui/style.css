@@ -160,3 +160,33 @@ table.stats td, table.stats th { border-bottom: 1px solid var(--line); padding: 
 .box .inner img.shot { max-width: 100%; max-height: 360px; border-radius: 8px; border: 1px solid var(--line, #333); cursor: zoom-in; display: block; }
 #updateBar { padding: 8px 16px; background: rgba(46, 160, 67, .15); border-bottom: 1px solid rgba(46, 160, 67, .4); display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
 #updateBar button { width: auto; }
+
+/* canvas: live preview beside the chat */
+#canvas { width: 46vw; min-width: 380px; display: flex; flex-direction: column; border-inline-start: 1px solid var(--line);
+  background: var(--panel); }
+#canvas[hidden] { display: none; }
+.canvas-bar { display: flex; align-items: center; gap: 6px; padding: 6px 10px; border-bottom: 1px solid var(--line); }
+.canvas-bar .grow { flex: 1; }
+.canvas-bar .tabs button { border-radius: 0; margin: 0; }
+.canvas-bar .tabs button.on { border-color: var(--accent); color: var(--accent); }
+#canvasTitle { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 30%; }
+#canvasFrame { flex: 1; border: 0; background: #fff; width: 100%; }
+#canvasCode { flex: 1; resize: none; border: 0; border-radius: 0; font: 13px/1.5 Consolas, "Cascadia Code", monospace;
+  background: var(--code); padding: 12px; white-space: pre; }
+.canvas-ask { display: flex; gap: 6px; padding: 8px; border-top: 1px solid var(--line); }
+.canvas-ask input { flex: 1; }
+@media (max-width: 900px) { #canvas { position: fixed; inset: 0; width: auto; min-width: 0; z-index: 20; } }
+.mathblock { overflow-x: auto; margin: 8px 0; text-align: center; }
+.math, .katex { direction: ltr; unicode-bidi: isolate; }          /* equations read left to right in Arabic text */
+.codeblock .diagram { background: #fff; padding: 10px; overflow: auto; text-align: center; }
+
+/* conversations: search, temporary chat, export */
+.row-tight { display: flex; gap: 6px; }
+#tempChat.on { border-color: var(--warn); color: var(--warn); }
+body.temp-chat #title { color: var(--warn); }
+#convSearch { width: 100%; }
+.conv .snippet { color: var(--muted); font-size: 11px; white-space: normal; }
+.menu-wrap { position: relative; }
+.menu { position: absolute; top: 100%; inset-inline-end: 0; z-index: 10; display: flex; flex-direction: column; gap: 4px;
+  background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 6px; min-width: 150px; }
+.menu[hidden] { display: none; }
