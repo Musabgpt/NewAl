@@ -248,11 +248,13 @@ class Handler(BaseHTTPRequestHandler):
             name, _, value = part.strip().partition("=")
             if name == "newal_key":
                 cookie = value
-        ok = phone.valid(cookie)
+        auth = self.headers.get("Authorization") or ""
+        bearer = auth[7:].strip() if auth.lower().startswith("bearer ") else ""
+        ok = phone.valid(cookie) or phone.valid(bearer)          # the phone app sends the key as a bearer token
         origin = self.headers.get("Origin")
         if origin and origin != "http://" + (self.headers.get("Host") or ""):
             ok = False
-        if self.command == "POST" and not self.path.startswith("/v1/"):
+        if self.command == "POST" and not self.path.startswith("/v1/") and not bearer:
             ok &= self.headers.get("X-NewAl") == "1"
         if not ok:
             data = ("<!doctype html><meta charset=utf-8><meta name=viewport content='width=device-width'>"

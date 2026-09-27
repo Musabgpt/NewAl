@@ -550,6 +550,11 @@ class PhoneTest(unittest.TestCase):
         self.assertEqual(self.req("/api/lessons", "POST", {}, ok)[0], 200)
         self.assertEqual(self.req("/api/lessons", "POST", {}, {"Cookie": cookie})[0], 403)
         self.assertEqual(self.req("/api/lessons", "POST", {}, dict(ok, Origin="http://evil.example"))[0], 403)
+        # the phone app sends the key as a bearer token (no cookie, no page header)
+        bearer = {"Authorization": "Bearer " + phone.key(), "Content-Type": "application/json"}
+        self.assertEqual(self.req("/api/state", headers=bearer)[0], 200)
+        self.assertEqual(self.req("/api/lessons", "POST", {}, bearer)[0], 200)
+        self.assertEqual(self.req("/api/state", headers={"Authorization": "Bearer wrong"})[0], 403)
         # a new key logs the old phone out
         phone.configure(True, new_key=True)
         self.assertEqual(self.req("/api/state", headers={"Cookie": cookie})[0], 403)

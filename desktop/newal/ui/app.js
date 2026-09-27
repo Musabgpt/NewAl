@@ -828,9 +828,11 @@ const panels = {
       const c = document.createElement("div");
       c.className = "card";
       c.innerHTML = `<h4><span></span></h4><div class="qr" style="width:220px;background:#fff;padding:6px;border-radius:8px">${u.svg}</div>
-        <div class="about" dir="ltr" style="word-break:break-all"></div>`;
+        <div class="about" dir="ltr" style="word-break:break-all"></div>
+        <div class="row"><button data-copy>📋 نسخ الرابط لتطبيق NewAl بالهاتف</button><span class="hint">بالتطبيق: النماذج ← 🖥 عقل الكمبيوتر ← الصق</span></div>`;
       c.querySelector("h4 span").textContent = u.kind + " — " + u.ip;
       c.querySelector(".about").textContent = u.svg ? u.url.replace(/k=.*/, "k=…") : u.url;
+      c.querySelector("[data-copy]").onclick = e => { navigator.clipboard.writeText(u.url); e.target.textContent = "✓ انسخ"; };
       list.appendChild(c);
     }
     if (s.enabled && !s.urls.length) list.innerHTML = '<p class="bad">ما لقيت وصلة مع أي جهاز: وصّل الهاتف بطريقة من فوق.</p>';
