@@ -54,7 +54,10 @@ Each step is shipped only with tests, and with a measurement where it claims spe
    same conversation (llama.cpp continues instead of re-reading), shorter tool results.
 2. **Procedural memory, tool log, live command output** (done).
 3. **Built-in benchmark (#11)** (first version done): the gate for everything below, and the way to pick the brain's
-   file on the user's own laptop by speed *and* Arabic/tool accuracy.
+   file on the user's own laptop by speed *and* Arabic/tool accuracy. On the laptop (2026-09-27), four rounds of
+   test → fix → test took it from 10/12 in 1391 s to 12/12 in 327 s: a refused delete that «run without asking» let
+   through, helper models pushing the brain out of RAM, goals re-reading their own prompt, a project skill that turned
+   a function into a package, and made-up package names sent to PyPI (details in the commit log).
 4. **The brain's file**: CPU speed depends on the quantization types inside the file, not its label (Unsloth's
    UD-IQ3_S keeps most experts as IQ2_S + IQ4_XS; UD-Q3_K_M uses IQ3_XXS + IQ4_XS). On a small model of the same
    architecture (4 threads, AVX2 only, not the user's laptop) K-quant expert mixes read and wrote faster than the IQ
