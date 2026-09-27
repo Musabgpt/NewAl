@@ -156,10 +156,12 @@ class Manager:
             self.servers[name] = s
             return s
 
-    def definitions(self):
-        """OpenAI-style tool definitions for every enabled server (started on first use)."""
+    def definitions(self, only=None):
+        """OpenAI-style tool definitions for the enabled servers (all, or those named in `only`)."""
         out = []
         for name in self.enabled():
+            if only is not None and name not in only:
+                continue
             try:
                 tools = self.get(name).tools
             except Exception:  # noqa: BLE001 - a broken add-on must not break the chat
@@ -167,7 +169,7 @@ class Manager:
             for t in tools:
                 out.append({"type": "function", "function": {
                     "name": "mcp__%s__%s" % (name, t["name"]),
-                    "description": (t.get("description") or t["name"])[:600],
+                    "description": (t.get("description") or t["name"])[:300],
                     "parameters": t.get("inputSchema") or {"type": "object", "properties": {}}}})
         return out
 

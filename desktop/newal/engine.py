@@ -109,6 +109,9 @@ def explain_exit(code):
 reset_dll_search()
 
 
+MIN_CONTEXT = 16384        # tokens; goal mode with tool lists and results needs room (RAM cost ~1 GB per model)
+
+
 class Server:
     def __init__(self, role):
         self.role = role
@@ -122,8 +125,11 @@ class Server:
     def url(self):
         return "http://127.0.0.1:%d" % self.port
 
+    def context(self):
+        return max(int(config.get("context") or 0), MIN_CONTEXT)
+
     def ram_gb(self):
-        return self.model["size"] / 1e9 * 1.1 + 0.3
+        return self.model["size"] / 1e9 * 1.1 + 0.3 + (self.context() / 16384 if self.model["kind"] == "chat" else 0)
 
     def start(self, timeout=900):
         exe = config.find_tool("llama-server")
@@ -133,7 +139,9 @@ class Server:
         args = [exe, "-m", catalog.path(self.role), "--host", "127.0.0.1", "--port", str(self.port),
                 "-t", str(config.threads()), "--no-webui"]
         if kind == "chat":
-            args += ["-c", str(config.get("context")), "--jinja", "-tb", str(os.cpu_count() or config.threads())]
+            # One slot with the whole context: with automatic slots llama-server splits -c between them
+            # (a 10.9k-token goal request hit a 4096-token slot on the laptop).
+            args += ["-c", str(self.context()), "-np", "1", "--jinja", "-tb", str(os.cpu_count() or config.threads())]
 
         elif kind == "embed":
             args += ["--embedding", "--pooling", "last", "-c", "8192", "-b", "8192", "-ub", "8192"]

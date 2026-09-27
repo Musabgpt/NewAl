@@ -209,13 +209,36 @@ def connected():
     return out
 
 
-def goal_names():
-    names = []
+def goal_names(text=""):
+    """Goal-mode tools: the everyday ones, plus a connected service's tools when the goal mentions it.
+    (Every tool description costs prompt tokens: all of them at once were ~9k tokens.)"""
+    import re
+    names = list(GROUPS["base"][1]) + [n for n in GROUPS["desktop"][1]]
     for key in connected():
-        for n in GROUPS[key][1]:
-            if n not in names:
-                names.append(n)
+        pattern, group = GROUPS[key]
+        if key in ("base", "desktop") or (pattern and not re.search(pattern, text, re.I)):
+            continue
+        names += [n for n in group if n not in names]
     return names
+
+
+MCP_WORDS = {
+    "browser": r"موقع|متصفح|browser|website|web ?page|صفحة|سجل دخول|login|اضغط|click|form|نموذج|احجز|اشتري|edge|chrome",
+    "files": r"ابحث بالملفات|عدّل الملف|edit file|search files",
+    "thinking": r"خطة|خطط|plan|خطوة بخطوة|step by step|معقد|complex",
+}
+
+
+def mcp_for(text):
+    """Add-ons whose tools fit this request (custom add-ons: when their name is mentioned)."""
+    import re
+    from . import mcp
+    out = []
+    for name in mcp.manager.enabled():
+        pattern = MCP_WORDS.get(name, re.escape(name))
+        if re.search(pattern, text, re.I):
+            out.append(name)
+    return out
 
 
 def definitions(names=None, with_mcp=False):
@@ -226,7 +249,7 @@ def definitions(names=None, with_mcp=False):
         out.append({"type": "function", "function": {"name": name, "description": desc, "parameters": params}})
     if with_mcp:
         from . import mcp
-        out += mcp.manager.definitions()
+        out += mcp.manager.definitions(only=None if with_mcp is True else with_mcp)
     return out
 
 

@@ -58,7 +58,7 @@ def find_python():
 DEFAULTS = {
     "threads": 0,                 # 0 = physical cores
     "ram_budget_gb": 18,          # models stay loaded while they fit, the oldest unloads first
-    "context": 8192,
+    "context": 16384,
     "auto_run": False,            # run commands and code without asking
     "verify_code": True,          # run generated code and let the judge check it
     "max_fix_attempts": 5,        # run -> judge -> fix rounds before giving the best attempt

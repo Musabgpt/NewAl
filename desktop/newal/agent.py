@@ -189,7 +189,7 @@ class Turn:
             # About this computer: only the tools that can see it (a free choice sent LFM2.5 to the web 12 times
             # for "what is my computer's name").
             names = [n for n in names if n not in WEB_TOOLS]
-        defs = tools.definitions(names, with_mcp=bool(BROWSER_WORDS.search(self.text)))
+        defs = tools.definitions(names, with_mcp=tools.mcp_for(self.text) or [])
         seen = set()
         r = None
         if web.is_arabic(self.text):
@@ -222,13 +222,21 @@ class Turn:
     def _goal(self, messages, role):
         """Works toward a goal with every tool: after the executor says it is done, the judge checks the goal
         against what the tools actually returned; if something is missing the executor continues with that."""
-        defs = tools.definitions(tools.goal_names(), with_mcp=True) + [CODE_TASK_TOOL]
+        defs = tools.definitions(tools.goal_names(self.text), with_mcp=tools.mcp_for(self.text) or []) + [CODE_TASK_TOOL]
         steps, checks, seen = 0, 0, {}
         answer, tps = "", 0
         while steps < MAX_GOAL_STEPS:
             self.emit({"type": "status", "text": "🎯 خطوة %d…" % (steps + 1)})
-            r = pool.chat(role, messages, tools=defs, on_delta=self._delta, cancel=self.cancel,
-                          extra=self._extra(role, budget=GOAL_THINKING), max_tokens=2048)
+            compact(messages)
+            try:
+                r = pool.chat(role, messages, tools=defs, on_delta=self._delta, cancel=self.cancel,
+                              extra=self._extra(role, budget=GOAL_THINKING), max_tokens=2048)
+            except RuntimeError as e:
+                if "exceed" not in str(e):
+                    raise
+                compact(messages, keep=2, budget_chars=10000)      # still too long: squeeze harder once
+                r = pool.chat(role, messages, tools=defs, on_delta=self._delta, cancel=self.cancel,
+                              extra=self._extra(role, budget=GOAL_THINKING), max_tokens=2048)
             tps = r["tps"] or tps
             if r["tool_calls"]:
                 messages.append({"role": "assistant", "content": r["content"] or "",
@@ -617,6 +625,25 @@ def install_package(module):
         return False
     code_, _ = connectors.run([exe, "-m", "pip", "install", "--disable-pip-version-check", "-q", name], timeout=300)
     return code_ == 0
+
+
+def compact(messages, keep=6, budget_chars=24000):
+    """Keeps a long goal within the model's context: the newest `keep` tool results stay whole, older ones
+    are cut to their first lines (the model has already acted on them)."""
+    tool_idx = [i for i, m in enumerate(messages) if m["role"] == "tool"]
+    for i in tool_idx[:-keep]:
+        c = messages[i].get("content") or ""
+        if len(c) > 400:
+            messages[i] = dict(messages[i], content=c[:400] + "\n…[اختُصر]")
+    total = sum(len(m.get("content") or "") for m in messages)
+    for i in tool_idx:
+        if total <= budget_chars:
+            break
+        c = messages[i].get("content") or ""
+        if len(c) > 1500:
+            messages[i] = dict(messages[i], content=c[:1500] + "\n…[اختُصر]")
+            total -= len(c) - 1500
+    return messages
 
 
 def error_line(output):

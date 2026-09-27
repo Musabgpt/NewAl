@@ -270,6 +270,19 @@ class WinToolsTest(unittest.TestCase):
             z.writestr("../evil.txt", "x")
         self.assertIn("غير آمن", wintools.unzip_path(bad))
 
+    def test_goal_prompt_stays_small(self):
+        defs = tools.definitions(tools.goal_names("create a calculator exe")) + [agent.CODE_TASK_TOOL]
+        size = len(json.dumps(defs, ensure_ascii=False))
+        self.assertLess(size, 12000, "tool list too large for a CPU prompt: %d chars" % size)
+
+    def test_compact_keeps_recent_results(self):
+        msgs = [{"role": "system", "content": "s"}, {"role": "user", "content": "goal"}]
+        for i in range(12):
+            msgs += [{"role": "assistant", "content": "step"}, {"role": "tool", "content": "x" * 5000}]
+        agent.compact(msgs)
+        self.assertLessEqual(len(msgs[3]["content"]), 420)
+        self.assertLessEqual(sum(len(m["content"]) for m in msgs), 26000)
+
     def test_goal_tools_follow_connections(self):
         config.update({"github_token": ""})
         self.assertNotIn("github_repos", tools.goal_names())
