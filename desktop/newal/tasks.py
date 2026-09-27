@@ -55,6 +55,9 @@ def listing():
         t.pop("diff", None)
         if t["id"] == _current["id"]:
             t["live"] = _current["status"]
+        tree = os.path.join(TREES, t["id"])
+        if os.path.isdir(tree):
+            t["tree"] = tree                   # the task's own copy: VS Code shows its files next to the originals
         out.append(t)
     return out
 

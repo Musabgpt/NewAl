@@ -1,0 +1,63 @@
+{
+  "name": "newal-agent",
+  "displayName": "NewAl",
+  "description": "NewAl inside VS Code: a local coding agent (Qwen3.6 on your own computer) that works on this project, runs its tests, and shows the changes in the editor's diff view.",
+  "version": "0.1.0",
+  "publisher": "newal",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Musabgpt/NewAl"
+  },
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "Machine Learning",
+    "Programming Languages"
+  ],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "main": "./extension.js",
+  "contributes": {
+    "commands": [
+      { "command": "newal.task", "title": "مهمة جديدة بالخلفية على هالمشروع", "category": "NewAl", "icon": "$(add)" },
+      { "command": "newal.runHere", "title": "اشتغل هلق على هالمشروع", "category": "NewAl", "icon": "$(play)" },
+      { "command": "newal.refresh", "title": "تحديث المهام", "category": "NewAl", "icon": "$(refresh)" },
+      { "command": "newal.showFile", "title": "شوف التغيير", "category": "NewAl" },
+      { "command": "newal.apply", "title": "✅ طبّق على المشروع", "category": "NewAl" },
+      { "command": "newal.discard", "title": "🗑 ارمِ", "category": "NewAl" },
+      { "command": "newal.publish", "title": "📤 افتح Pull Request", "category": "NewAl" },
+      { "command": "newal.openApp", "title": "افتح NewAl", "category": "NewAl" }
+    ],
+    "viewsContainers": {
+      "activitybar": [
+        { "id": "newal", "title": "NewAl", "icon": "media/icon.svg" }
+      ]
+    },
+    "views": {
+      "newal": [
+        { "id": "newal.tasks", "name": "المهام" }
+      ]
+    },
+    "menus": {
+      "view/title": [
+        { "command": "newal.runHere", "when": "view == newal.tasks", "group": "navigation@1" },
+        { "command": "newal.task", "when": "view == newal.tasks", "group": "navigation@2" },
+        { "command": "newal.refresh", "when": "view == newal.tasks", "group": "navigation@3" }
+      ],
+      "view/item/context": [
+        { "command": "newal.apply", "when": "view == newal.tasks && viewItem == done", "group": "1@1" },
+        { "command": "newal.publish", "when": "view == newal.tasks && viewItem == done", "group": "1@2" },
+        { "command": "newal.discard", "when": "view == newal.tasks && viewItem =~ /^(done|queued|running|failed|no_changes)$/", "group": "2@1" }
+      ]
+    },
+    "configuration": {
+      "title": "NewAl",
+      "properties": {
+        "newal.port": { "type": "number", "default": 8766, "description": "The port NewAl listens on (Settings in NewAl)." }
+      }
+    }
+  }
+}

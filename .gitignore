@@ -11,3 +11,5 @@ desktop/rclone/
 desktop/*.zip
 desktop/*.spec
 __pycache__/
+desktop/vscode-extension/*.vsix
+desktop/assets/*.vsix

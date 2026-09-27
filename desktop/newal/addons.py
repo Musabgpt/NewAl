@@ -256,6 +256,12 @@ def _vscode():
             return r
     code_exe = connectors.vscode_path()
     code, out = connectors.run([code_exe, "--install-extension", "Continue.continue", "--force"], timeout=600)
+    from . import diagnose
+    vsix = diagnose.asset("newal-agent.vsix")          # NewAl's own extension: tasks, diffs, project mode in VS Code
+    if vsix:
+        c2, o2 = connectors.run([code_exe, "--install-extension", vsix, "--force"], timeout=300)
+        if c2 != 0:
+            out += "\n" + o2
     path = continue_config_path()
     os.makedirs(os.path.dirname(path), exist_ok=True)
     if os.path.exists(path) and not continue_configured():
@@ -263,7 +269,8 @@ def _vscode():
     with open(path, "w", encoding="utf-8") as f:
         f.write(CONTINUE_CONFIG.format(api=api_url()))
     ok = continue_configured()
-    msg = "Continue جاهز: افتح VS Code واختر «NewAl» من قائمة النماذج (أبقِ NewAl مفتوحاً)."
+    msg = ("جاهز: بـ VS Code رح تلاقي أيقونة NewAl بالشريط الجانبي (مهام بالخلفية، «اشتغل هلق على هالمشروع»، والتغييرات "
+           "بعارض الفروقات)، وContinue للمحادثة: اختر «NewAl» من قائمة النماذج. أبقِ NewAl مفتوحاً.")
     if code != 0:
         msg += " (تثبيت الإضافة: %s)" % connectors.clip(out, 300)
     return {"ok": ok, "message": msg}

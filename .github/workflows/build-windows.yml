@@ -113,6 +113,16 @@ jobs:
           Stop-Process -Id $p.Id -Force
           if (-not $ok -or -not $r.content) { throw "llama-server did not answer" }
 
+      - name: Build and test the VS Code extension
+        run: |
+          $ErrorActionPreference = "Stop"
+          node --check vscode-extension/extension.js
+          node vscode-extension/test/run.js
+          Push-Location vscode-extension
+          npx --yes @vscode/vsce@latest package --no-dependencies -o ../assets/newal-agent.vsix
+          Pop-Location
+          if (-not (Test-Path assets/newal-agent.vsix)) { throw "the extension was not packaged" }
+
       - name: Stamp the build number
         run: |
           Set-Content newal/version.py "`"`"`"This build's number: the GitHub Actions run that built it.`"`"`"`n`nBUILD = ${{ github.run_number }}`nCOMMIT = `"${{ github.sha }}`"`n"
