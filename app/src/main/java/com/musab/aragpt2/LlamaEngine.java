@@ -1,9 +1,13 @@
 package com.musab.aragpt2;
 
 import android.content.Context;
+import java.io.IOException;
 import java.util.List;
 
-/** Thin Java wrapper around the native llama.cpp JNI bridge. */
+/**
+ * Thin Java wrapper around the native llama.cpp JNI bridge, or, made from a {@link RemoteBrain}, the computer's
+ * brain (NewAl on the user's computer) behind the same methods.
+ */
 public final class LlamaEngine implements AutoCloseable {
     private static final char FIELD_SEP = '\u001F';
     private static final char RECORD_SEP = '\u001E';
@@ -15,8 +19,16 @@ public final class LlamaEngine implements AutoCloseable {
     /** Small model with the same tokenizer that drafts tokens for this one (speculative decoding). */
     private volatile LlamaEngine draft;
     private volatile int draftTokens = 6;
+    /** Set when NewAl on the computer answers instead of a model on the phone. */
+    private final RemoteBrain remote;
+
+    /** The computer's brain: nothing is loaded on the phone. */
+    LlamaEngine(RemoteBrain remote) {
+        this.remote = remote;
+    }
 
     public LlamaEngine(Context context, String modelPath, int contextTokens, int threads) {
+        remote = null;
         String nativeLibDir = context.getApplicationInfo().nativeLibraryDir;
         int effectiveThreads = ThreadingConfig.recommendedThreads(Runtime.getRuntime().availableProcessors());
         handle = nativeLoadModel(modelPath, nativeLibDir, contextTokens, effectiveThreads);
@@ -40,6 +52,14 @@ public final class LlamaEngine implements AutoCloseable {
     /** As above; {@code grammar} (GBNF, root rule "root") constrains what the model may output. */
     public GenerationResult generate(List<ChatMessage> turns, int maxNewTokens, float temperature,
                                     int topK, int flags, String grammar, TextListener listener) {
+        RemoteBrain r = remote;
+        if (r != null) {
+            try {
+                return r.chat(turns, maxNewTokens, temperature, topK, flags, grammar, listener);
+            } catch (IOException e) {
+                throw new IllegalStateException(e.getMessage(), e);
+            }
+        }
         if (handle == 0) throw new IllegalStateException("المحرك مغلق");
         StringBuilder encoded = new StringBuilder();
         for (ChatMessage m : turns) {
@@ -117,17 +137,25 @@ public final class LlamaEngine implements AutoCloseable {
 
     public LlamaEngine draft() { return draft; }
 
+    /** True for the computer's brain (see {@link RemoteBrain}). */
+    public boolean isRemote() { return remote != null; }
+
     /** Actual context window (the native side may fall back to a smaller one on low RAM). */
-    public int contextTokens() { long h = handle; return h != 0 ? nativeContextSize(h) : 0; }
+    public int contextTokens() {
+        if (remote != null) return remote.contextTokens;
+        long h = handle;
+        return h != 0 ? nativeContextSize(h) : 0;
+    }
 
     /** The model's Jinja chat template ("" when the GGUF has none). */
     public String chatTemplate() { long h = handle; return h != 0 ? nativeChatTemplate(h) : ""; }
 
     /** Qwen3.5 / Qwen3-Coder templates call tools in XML; Qwen2.5 / Qwen3 in JSON. */
-    public boolean xmlToolCalls() { return chatTemplate().contains("<function="); }
+    public boolean xmlToolCalls() { return toolStyle().equals("xml"); }
 
     /** How this model calls tools, read from its template: "xml" (Qwen3.5), "lfm" (LFM2 / LFM2.5) or "json". */
     public String toolStyle() {
+        if (remote != null) return "xml";                  // Qwen3.6, the same family as Qwen3.5
         String t = chatTemplate();
         return t.contains("<function=") ? "xml" : t.contains("<|tool_call_start|>") ? "lfm" : "json";
     }
@@ -136,9 +164,15 @@ public final class LlamaEngine implements AutoCloseable {
     public void setThreads(int generation, int prompt) { long h = handle; if (h != 0) nativeSetThreads(h, generation, prompt); }
 
     public void resetContext() { long h = handle; if (h != 0) nativeReset(h); }
-    public void cancel() { long h = handle; if (h != 0) nativeCancel(h); }
+    public void cancel() {
+        RemoteBrain r = remote;
+        if (r != null) r.cancel();
+        long h = handle;
+        if (h != 0) nativeCancel(h);
+    }
 
     @Override public synchronized void close() {
+        if (remote != null) remote.cancel();
         if (handle != 0) {
             nativeFree(handle);
             handle = 0;

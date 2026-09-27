@@ -36,3 +36,25 @@ Downloads made from the app go to the phone's **Download/NewAl** folder.
 ## Speed on the phone
 
 The first time a model loads, the app measures generation speed with 2, 3, 4, 6 and all cores and keeps the fastest (☰ → ⚡ to measure again). Prompt reading always uses every core.
+
+## 🖥 The computer's brain
+
+When NewAl runs on the user's computer, the phone can use its brain (Qwen3.6-35B-A3B) instead of a model on the phone. It is much stronger than any model that fits a phone, and the phone does not heat up or drain its battery.
+
+To connect:
+1. On the computer, open NewAl and turn on «📱 الهاتف».
+2. On the phone, open the model menu at the top and choose «🖥 عقل الكمبيوتر».
+3. Tap «📷 امسح QR» and scan the code on the computer. You can also paste the link that «📋 نسخ الرابط» copies on the computer.
+
+The phone and the computer must reach each other. That works over the same Wi-Fi, over the phone's hotspot with the computer joined to it, or over a USB cable with USB tethering.
+
+How it works:
+- The app checks NewAl first: the key, the llama.cpp engine, and the Qwen3.6 model. It then has the computer load the brain right away, because the first load takes a minute or more.
+- Every role uses the computer's brain: chat, screen control, and coding with Termux. The phone's models are unloaded to free RAM.
+- The key travels as a bearer token over the local network, like the QR link itself.
+- At start-up the app reconnects to the computer. When the computer can't be reached, the app uses the phone's model and says why.
+- Choosing a model on the phone switches back to it. «افصل» in the same dialog does too.
+
+Tested:
+- `RemoteBrainTest` runs against a fake NewAl.
+- The same client ran live against the real desktop server and llama.cpp, with Qwen3.5 0.8B standing in for Qwen3.6. That covered Arabic streaming, thinking, the manager's grammar, a tool round, stopping mid-answer (the computer stops at once), and a wrong key.

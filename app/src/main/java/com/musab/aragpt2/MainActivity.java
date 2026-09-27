@@ -23,6 +23,9 @@ import androidx.core.view.WindowCompat;
 import androidx.core.view.WindowInsetsCompat;
 import androidx.recyclerview.widget.LinearLayoutManager;
 import androidx.recyclerview.widget.RecyclerView;
+import com.google.mlkit.vision.barcode.common.Barcode;
+import com.google.mlkit.vision.codescanner.GmsBarcodeScannerOptions;
+import com.google.mlkit.vision.codescanner.GmsBarcodeScanning;
 import java.io.BufferedInputStream;
 import java.io.ByteArrayOutputStream;
 import java.io.BufferedOutputStream;
@@ -43,7 +46,8 @@ public class MainActivity extends AppCompatActivity {
             PREF_ROLE="role_path_", PREF_ORCHESTRATE="orchestrate", PREF_LANG_SUMMARY="lang_summary",
             PREF_SPECULATIVE="speculative", PREF_DRAFT="draft_path",
             PREF_ASSISTANT="assistant_mode", PREF_CONFIRM_SENDS="confirm_sends", PREF_SPEAK="speak_replies",
-            PREF_WEB="web_search", PREF_THINK="think", PREF_ONLINE="online_tools", PREF_CONTEXT="context_tokens";
+            PREF_WEB="web_search", PREF_THINK="think", PREF_ONLINE="online_tools", PREF_CONTEXT="context_tokens",
+            PREF_REMOTE_LINK="remote_brain_link", PREF_REMOTE_ON="remote_brain_on";
     /** Draft tokens per step; measured best on CPU for a 3B model with a 0.5B draft. */
     private static final int DRAFT_TOKENS=3;
     /** Model roles: each may use its own GGUF; models are loaded one at a time (sequentially). */
@@ -78,6 +82,8 @@ public class MainActivity extends AppCompatActivity {
     private com.google.android.material.chip.ChipGroup agentChips;
     private android.widget.LinearLayout examples;
     private volatile LlamaEngine engine;
+    /** 🖥 NewAl on the user's computer answering for every role instead of the phone's models (null: not connected). */
+    private volatile LlamaEngine remoteEngine;
     private volatile boolean generating=false;
     private ChatHistoryStore historyStore;
     private MemoryManager memoryManager;
@@ -250,13 +256,17 @@ public class MainActivity extends AppCompatActivity {
         // Models already on the phone first: one tap switches.
         final File[] files=modelFiles().toArray(new File[0]);
         List<String> items=new java.util.ArrayList<>();
-        for(File f:files)items.add((f.getAbsolutePath().equals(loadedPath)?"✅ ":"📦 ")+modelTitle(f.getName()).replace(" ▾","")+String.format(java.util.Locale.US,"  • %.1f GB",f.length()/1e9));
+        boolean remote=remoteEngine!=null;
+        items.add((remote?"✅ ":"🖥 ")+"عقل الكمبيوتر — Qwen3.6 من NewAl على الكمبيوتر");
+        for(File f:files)items.add((!remote&&f.getAbsolutePath().equals(loadedPath)?"✅ ":"📦 ")+modelTitle(f.getName()).replace(" ▾","")+String.format(java.util.Locale.US,"  • %.1f GB",f.length()/1e9));
         items.add("📂 اختيار ملف GGUF من الهاتف");
         for(Object[] m:MODEL_CATALOG){
             boolean fits=ramGb<=0||ramGb>=((Number)m[2]).doubleValue();
             items.add((fits?"📥 ":"⚠️ ")+m[0]+String.format(java.util.Locale.US," • %.1f GB",((Number)m[1]).doubleValue())+(fits?"":" (يحتاج RAM أكبر)"));
         }
         new AlertDialog.Builder(this).setTitle(String.format(java.util.Locale.US,"النموذج (ذاكرة الهاتف %.1f GB)",ramGb)).setItems(items.toArray(new String[0]),(d,which)->{
+            if(which==0){computerBrainDialog();return;}
+            which--;
             if(which<files.length){loadModelFromLocalFile(files[which],files[which].getName());return;}
             which-=files.length;
             if(which==0)pickModelLauncher.launch(new String[]{"*/*"});
@@ -357,6 +367,11 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private void restoreSavedModel(){
+        if(prefs.getBoolean(PREF_REMOTE_ON,false)){connectComputerBrain(prefs.getString(PREF_REMOTE_LINK,""),true);return;}
+        restoreLocalModel();
+    }
+
+    private void restoreLocalModel(){
         String savedName=prefs.getString(PREF_MODEL_NAME,"النموذج");
         String localPath=prefs.getString(PREF_MODEL_LOCAL_PATH,null);
         if(localPath!=null){
@@ -440,6 +455,9 @@ public class MainActivity extends AppCompatActivity {
         try{
             if(!isValidGgufFile(file))throw new IllegalStateException("ملف GGUF غير صالح أو تالف");
             LlamaEngine loaded=pool.get(file.getAbsolutePath(),java.util.Collections.emptyList());
+            // A model on the phone chosen while the computer's brain was on: the phone's model answers from now on.
+            LlamaEngine wasRemote=remoteEngine;
+            if(wasRemote!=null){wasRemote.cancel();remoteEngine=null;prefs.edit().putBoolean(PREF_REMOTE_ON,false).apply();}
             engine=loaded;
             loadedPath=file.getAbsolutePath();
             prefs.edit().putString(PREF_MODEL_LOCAL_PATH,file.getAbsolutePath()).putString(PREF_MODEL_NAME,displayName).putString(PREF_MODEL_URI,sourceUri).putLong(PREF_MODEL_SIZE,file.length()>0?file.length():expectedSize).apply();
@@ -478,7 +496,7 @@ public class MainActivity extends AppCompatActivity {
     }
 
     private void onSendOrStopClicked(){
-        if(generating){AgentLoop loop=agentLoop;if(loop!=null)loop.cancel();assistant.cancel();ChatSession cs=chatSession;if(cs!=null)cs.cancel();for(LlamaEngine e:pool.engines())e.cancel();return;}
+        if(generating){AgentLoop loop=agentLoop;if(loop!=null)loop.cancel();assistant.cancel();ChatSession cs=chatSession;if(cs!=null)cs.cancel();for(LlamaEngine e:allEngines())e.cancel();return;}
         String question=inputBox.getText().toString().trim();
         if(question.isEmpty())return;
         if(assistantMode){inputBox.setText("");startAssistant(question,false);return;}
@@ -694,7 +712,7 @@ public class MainActivity extends AppCompatActivity {
         ScreenControlService s=ScreenControlService.instance;
         if(s==null)return PhoneAssistant.needScreenControl();
         AgentService.start(this,AgentLoop.tail(goal,200));
-        s.showStatus(AgentLoop.tail(goal,80),()->{assistant.cancel();for(LlamaEngine e:pool.engines())e.cancel();});
+        s.showStatus(AgentLoop.tail(goal,80),()->{assistant.cancel();for(LlamaEngine e:allEngines())e.cancel();});
         live.start("",ChatMessage.ROLE_TERMINAL);
         PhoneAgent.Result res;
         try{
@@ -886,7 +904,8 @@ public class MainActivity extends AppCompatActivity {
                 +(draft.isEmpty()?"تلقائي (ملف 0.5B)":new File(draft).getName())+" — يعمل مع نموذج 3B أو أكبر";
         StringBuilder live=new StringBuilder("🗂 محمّل الآن معاً: ");
         for(String p:pool.loadedPaths())live.append(new File(p).getName()).append("  ");
-        labels[6]=pool.loadedPaths().isEmpty()?"🗂 لا يوجد نموذج محمّل":live.toString();
+        labels[6]=remoteEngine!=null?"🖥 كل الأدوار هلق على عقل الكمبيوتر (Qwen3.6) — غيّرها من زر النموذج بالأعلى"
+                :pool.loadedPaths().isEmpty()?"🗂 لا يوجد نموذج محمّل":live.toString();
         new AlertDialog.Builder(this).setTitle("🧠 نماذج الفريق (تبقى محمّلة معاً حسب الذاكرة)").setItems(labels,(d,which)->{
             if(which==3){prefs.edit().putBoolean(PREF_ORCHESTRATE,!on).apply();buildAgentChips();showModelRoles();return;}
             if(which==4){prefs.edit().putBoolean(PREF_LANG_SUMMARY,!prefs.getBoolean(PREF_LANG_SUMMARY,true)).apply();showModelRoles();return;}
@@ -1603,6 +1622,8 @@ public class MainActivity extends AppCompatActivity {
      * roles run one after another, never in parallel. Called on the worker thread.
      */
     private LlamaEngine engineForRole(String role){
+        LlamaEngine remote=remoteEngine;
+        if(remote!=null)return remote;                     // 🖥 the computer's brain answers for every role
         String path=prefs.getString(PREF_ROLE+role,"");
         if((path.isEmpty()||!new File(path).isFile())&&ROLE_MANAGER.equals(role)){
             // Screen control works best with Qwen3.5 (measured); use one if it is on the phone.
@@ -1638,6 +1659,126 @@ public class MainActivity extends AppCompatActivity {
         }
     }
 
+    /** Every engine that may be answering now: the phone's models and the computer's brain. */
+    private List<LlamaEngine> allEngines(){
+        List<LlamaEngine> all=pool.engines();
+        LlamaEngine r=remoteEngine;
+        if(r!=null)all.add(r);
+        return all;
+    }
+
+    /**
+     * 🖥 The computer's brain: NewAl on the user's computer (Qwen3.6, far stronger than a phone model) answers
+     * instead. Connected by scanning the QR code NewAl shows under «📱 الهاتف», or by pasting its link.
+     */
+    private void computerBrainDialog(){
+        EditText field=new EditText(this);
+        field.setHint("http://192.168.1.5:8767/?k=…");
+        field.setSingleLine(true);
+        field.setTextDirection(View.TEXT_DIRECTION_LTR);
+        String saved=prefs.getString(PREF_REMOTE_LINK,"");
+        if(saved.isEmpty()){String clip=clipboardText();if(RemoteBrain.parse(clip)!=null)saved=clip.trim();}
+        field.setText(saved);
+        TextView help=new TextView(this);
+        help.setText("شغّل NewAl على الكمبيوتر وافتح «📱 الهاتف» هناك، بعدين امسح رمز QR اللي بيطلع أو الصق الرابط.\n\n"
+                +"الهاتف والكمبيوتر لازم يكونوا على نفس الشبكة: نفس الـWi-Fi، أو الكمبيوتر متصل بنقطة اتصال الهاتف، "
+                +"أو كابل USB مع «مشاركة الإنترنت عبر USB».\n\n"
+                +"العقل Qwen3.6 أقوى بكثير من نماذج الهاتف، والهاتف ما بيسخن ولا بيخلص شحنه.");
+        android.widget.LinearLayout box=new android.widget.LinearLayout(this);
+        box.setOrientation(android.widget.LinearLayout.VERTICAL);
+        box.setPadding(48,16,48,0);
+        box.addView(help);
+        box.addView(field);
+        AlertDialog.Builder b=new AlertDialog.Builder(this).setTitle("🖥 عقل الكمبيوتر").setView(box)
+                .setPositiveButton("اتصال",(d,w)->connectComputerBrain(field.getText().toString(),false))
+                .setNeutralButton("📷 امسح QR",(d,w)->scanComputerQr());
+        if(remoteEngine!=null)b.setNegativeButton("افصل",(d,w)->{dropComputerBrain();restoreLocalModel();});
+        else b.setNegativeButton("إلغاء",null);
+        b.show();
+    }
+
+    /** Google's QR scanner (Play services, no camera permission needed): one tap from the dialog to connected. */
+    private void scanComputerQr(){
+        try{
+            GmsBarcodeScanning.getClient(this,new GmsBarcodeScannerOptions.Builder().setBarcodeFormats(Barcode.FORMAT_QR_CODE).build())
+                    .startScan()
+                    .addOnSuccessListener(code->connectComputerBrain(code.getRawValue(),false))
+                    .addOnFailureListener(e->setWorking(false,"تعذّر فتح ماسح QR ("+safeMessage(e)+") — الصق الرابط بدلاً منه"));
+        }catch(Exception e){
+            setWorking(false,"ماسح QR مش متاح على هالهاتف — الصق الرابط بدلاً منه");
+        }
+    }
+
+    private String clipboardText(){
+        try{
+            android.content.ClipboardManager cm=(android.content.ClipboardManager)getSystemService(CLIPBOARD_SERVICE);
+            android.content.ClipData c=cm==null?null:cm.getPrimaryClip();
+            CharSequence t=c==null||c.getItemCount()==0?null:c.getItemAt(0).getText();
+            return t==null?"":t.toString();
+        }catch(Exception e){return "";}
+    }
+
+    /**
+     * Checks NewAl on the computer, then has it load the brain so the first question does not wait for it.
+     * {@code restoring}: at start-up, when the computer is not reachable the phone's own model is used instead.
+     */
+    private void connectComputerBrain(String link,boolean restoring){
+        RemoteBrain rb=RemoteBrain.parse(link);
+        if(rb==null){
+            if(restoring){restoreLocalModel();return;}
+            setWorking(false,"هاد مش رابط NewAl: امسح رمز QR من «📱 الهاتف» على الكمبيوتر");
+            return;
+        }
+        loadModelButton.setEnabled(false);
+        setWorking(true,"🖥 عم يتصل بالكمبيوتر "+rb.describe()+"…");
+        executor.execute(()->{
+            String problem=rb.check();
+            if(problem!=null){
+                runOnUiThread(()->{
+                    loadModelButton.setEnabled(true);
+                    if(restoring){
+                        android.widget.Toast.makeText(this,"🖥 الكمبيوتر مش متاح، رجعت لنموذج الهاتف: "+problem,android.widget.Toast.LENGTH_LONG).show();
+                        restoreLocalModel();
+                    }else setWorking(false,"❌ "+problem);
+                });
+                return;
+            }
+            LlamaEngine old=remoteEngine;
+            LlamaEngine remote=new LlamaEngine(rb);
+            remoteEngine=remote;
+            engine=remote;
+            if(old!=null)old.cancel();
+            pool.closeAll();                                   // the phone's models are not needed: free the RAM
+            loadedPath=null;
+            prefs.edit().putString(PREF_REMOTE_LINK,rb.link()).putBoolean(PREF_REMOTE_ON,true).apply();
+            runOnUiThread(()->{
+                loadModelButton.setText("🖥 عقل الكمبيوتر ▾");
+                setWorking(true,"🔄 الكمبيوتر عم يجهّز العقل Qwen3.6… (أول مرة ممكن ياخد دقيقة أو أكتر)");
+            });
+            String warm=null;
+            try{rb.warmUp();}catch(Exception e){warm=safeMessage(e);}
+            final String failed=warm;
+            runOnUiThread(()->{
+                loadModelButton.setEnabled(true);
+                setWorking(false,failed==null?"جاهز — 🖥 Qwen3.6 على الكمبيوتر ("+rb.describe()+")":"🖥 متصل، بس العقل ما جاوب: "+failed);
+                updateEmptyState();
+                if(failed==null)resumeInterruptedAgentTask();
+            });
+        });
+    }
+
+    /** Back to the phone's own models (the saved link stays for next time). */
+    private void dropComputerBrain(){
+        LlamaEngine r=remoteEngine;
+        remoteEngine=null;
+        if(r!=null){
+            r.cancel();
+            if(engine==r)engine=null;
+            loadModelButton.setText("NewAl ▾");
+        }
+        prefs.edit().putBoolean(PREF_REMOTE_ON,false).apply();
+    }
+
     private LlamaEngine newEngine(String path){
         int cores=Runtime.getRuntime().availableProcessors();
         int threads=Math.max(2,Math.min(6,cores));
@@ -1655,6 +1796,7 @@ public class MainActivity extends AppCompatActivity {
     private void tuneSpeed(boolean manual){
         LlamaEngine e=engine;
         if(e==null){if(manual)setWorking(false,"حمّل نموذجاً أولاً");return;}
+        if(e.isRemote()){if(manual)setWorking(false,"⚡ ضبط السرعة لنماذج الهاتف — العقل هلق على الكمبيوتر");return;}
         if(generating)return;
         setGenerating(true);
         setWorking(true,"⚡ أقيس أسرع إعداد لهاتفك…");
@@ -1737,7 +1879,7 @@ public class MainActivity extends AppCompatActivity {
                 String grammar=codeGrammar&&prefs.getBoolean(PREF_GRAMMAR,true)?AgentLoop.OUTPUT_GRAMMAR:null;
                 return engineForRole(role.get()).generate(turns,0,0f,1,LlamaEngine.FLAG_RAW,grammar,l);
             }
-            @Override public void cancel(){for(LlamaEngine e:pool.engines())e.cancel();}
+            @Override public void cancel(){for(LlamaEngine e:allEngines())e.cancel();}
             @Override public int contextTokens(){LlamaEngine e=engine;return e==null?CONTEXT_TOKENS:e.contextTokens();}
         };
     }
@@ -1848,7 +1990,7 @@ public class MainActivity extends AppCompatActivity {
 
     private void clearChat(){
         AgentLoop loop=agentLoop;if(loop!=null)loop.cancel();
-        if(generating)for(LlamaEngine e:pool.engines())e.cancel();
+        if(generating)for(LlamaEngine e:allEngines())e.cancel();
         setGenerating(true);
         executor.execute(()->{
             historyStore.clear();for(LlamaEngine e:pool.engines())e.resetContext();
@@ -2025,7 +2167,7 @@ public class MainActivity extends AppCompatActivity {
         AgentLoop loop=agentLoop;if(loop!=null)loop.cancel();
         TermuxBridge b=bridge;if(b!=null)b.close();
         engine=null;
-        for(LlamaEngine e:pool.engines())e.cancel();
+        for(LlamaEngine e:allEngines())e.cancel();
         executor.execute(pool::closeAll);
         executor.shutdown();super.onDestroy();
     }

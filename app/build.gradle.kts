@@ -49,6 +49,8 @@ dependencies {
     implementation("com.google.android.material:material:1.13.0")
     implementation("androidx.recyclerview:recyclerview:1.4.0")
     implementation("androidx.drawerlayout:drawerlayout:1.2.0")
+    // Google's QR scanner (Play services, free, no camera permission): links the phone to NewAl on the computer.
+    implementation("com.google.android.gms:play-services-code-scanner:16.1.0")
     testImplementation("junit:junit:4.13.2")
     // Real org.json for JVM unit tests (android.jar only ships throwing stubs).
     testImplementation("org.json:json:20240303")
