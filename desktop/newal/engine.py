@@ -263,6 +263,8 @@ class Pool:
                 "top_p": 0.95, "min_p": 0.05, "repeat_penalty": 1.05, "timings_per_token": False}
         if tools:
             body["tools"] = tools
+        if s.model["file"].lower().startswith("qwen3"):
+            body["chat_template_kwargs"] = {"enable_thinking": False}     # thinking only when asked for
         if s.model["file"].startswith("LFM"):
             # LFM2.5 thinks before every answer and every tool call (5-15 s each on a laptop CPU). Off unless the
             # caller asks: the router already decides when tools are needed. (Per request, llama.cpp >= b9982.)
@@ -322,6 +324,8 @@ class Pool:
         body = {"messages": messages, "max_tokens": max_tokens, "temperature": 0,
                 "chat_template_kwargs": {"enable_thinking": False},
                 "response_format": {"type": "json_schema", "json_schema": {"name": "answer", "schema": schema}}}
+        if s.model["file"].lower().startswith("qwen3"):
+            body["chat_template_kwargs"] = {"enable_thinking": False}     # thinking only when asked for
         if s.model["file"].startswith("LFM"):
             body["reasoning_format"] = "none"
         out = self._post(s, "/v1/chat/completions", body)

@@ -402,7 +402,7 @@ async function refreshState() {
     p.className = "pill on"; p.textContent = m.label.split(" ")[0] + " " + m.title;
     loaded.appendChild(p);
   }
-  const missing = state.models.filter(m => !m.ready && ["router", "agent", "embed"].includes(m.role));
+  const missing = state.models.filter(m => !m.ready && ["router", "agent", "coder", "embed"].includes(m.role));
   const n = $("#notice");
   if (!state.connectors.engine) {
     n.hidden = false; n.textContent = "⚠ المحرك (llama-server) غير موجود. أعد تثبيت NewAl.";
@@ -419,11 +419,11 @@ async function refreshState() {
 const panels = {
   async models(body) {
     const s = await refreshState();
-    const total = s.models.reduce((a, m) => a + m.size, 0);
+    const total = s.models.filter(m => !m.optional).reduce((a, m) => a + m.size, 0);
     body.innerHTML = `<h2>🧠 النماذج</h2><p class="hint">كلها مجانية وتعمل على جهازك. المجموع ${gb(total)}.
       تُحفظ في <code dir="ltr">${escapeHtml(s.home)}\\models</code>. تبقى النماذج محمّلة ما دامت ضمن ميزانية الذاكرة
       (${s.settings.ram_budget_gb} GB) ويُفرَّغ الأقدم عند الحاجة.</p>
-      <div class="row"><button class="primary" id="dlAll">⬇ تنزيل الكل</button><button id="dlBase">⬇ الأساسية فقط (بدون نموذج البرمجة)</button></div>
+      <div class="row"><button class="primary" id="dlAll">⬇ تنزيل الكل</button><button id="dlBase">⬇ الأساسية الخفيفة فقط (بدون العقل)</button></div>
       <div id="modelList"></div>`;
     const list = body.querySelector("#modelList");
     for (const m of s.models) {
@@ -449,8 +449,8 @@ const panels = {
       if (un) un.onclick = async () => { await api("/api/models/unload", {role: m.role}); panels.models(body); };
       list.appendChild(c);
     }
-    body.querySelector("#dlAll").onclick = async () => { await api("/api/models/download", {roles: s.models.map(m => m.role)}); panels.models(body); };
-    body.querySelector("#dlBase").onclick = async () => { await api("/api/models/download", {roles: ["router", "agent", "judge", "embed", "rerank"]}); panels.models(body); };
+    body.querySelector("#dlAll").onclick = async () => { await api("/api/models/download", {roles: s.models.filter(m => !m.optional).map(m => m.role)}); panels.models(body); };
+    body.querySelector("#dlBase").onclick = async () => { await api("/api/models/download", {roles: ["router", "agent", "embed", "rerank"]}); panels.models(body); };
     if (s.models.some(m => m.state === "downloading")) setTimeout(() => { if (!$("#panel").hidden && body.dataset.panel === "models") panels.models(body); }, 1500);
   },
 
