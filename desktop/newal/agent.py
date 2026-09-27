@@ -120,6 +120,8 @@ class Turn:
             route = "goal"
         role = catalog.pick(config.get("goal_model") if route == "goal" else "coder" if route == "project"
                             else router.ROLE_OF[route])
+        if config.get("one_brain") and catalog.available("coder"):
+            role = "coder"          # one brain: Qwen3.6 answers every kind of request
         if not role:
             raise RuntimeError("لا يوجد نموذج منزّل. افتح «النماذج» ونزّل الموجّه ونموذج الأدوات على الأقل.")
         self.emit({"type": "route", "route": route, "role": role, "model": catalog.MODELS[role]["title"]})
@@ -317,14 +319,14 @@ class Turn:
         answer, tps = "", 0
         while steps < MAX_GOAL_STEPS:
             self.emit({"type": "status", "text": "🎯 خطوة %d…" % (steps + 1)})
-            compact(messages)
+            compact(messages, budget_chars=context_chars(role))
             try:
                 r = pool.chat(role, messages, tools=defs, on_delta=self._delta, cancel=self.cancel,
                               extra=self._extra(role, budget=GOAL_THINKING), max_tokens=2048)
             except RuntimeError as e:
                 if "exceed" not in str(e):
                     raise
-                compact(messages, keep=2, budget_chars=10000)      # still too long: squeeze harder once
+                compact(messages, keep=2, budget_chars=context_chars(role) // 3)      # squeeze harder once
                 r = pool.chat(role, messages, tools=defs, on_delta=self._delta, cancel=self.cancel,
                               extra=self._extra(role, budget=GOAL_THINKING), max_tokens=2048)
             tps = r["tps"] or tps
@@ -403,9 +405,16 @@ class Turn:
         steps, checks, reviews, failures, verified, answer, tps = 0, 0, 0, [], None, "", 0
         while steps < MAX_PROJECT_STEPS:
             self.emit({"type": "status", "text": "🧑‍💻 خطوة %d…" % (steps + 1)})
-            compact(messages, keep=8, budget_chars=36000)
-            r = pool.chat(role, messages, tools=defs, on_delta=self._delta, cancel=self.cancel,
-                          extra=self._extra(role, budget=GOAL_THINKING), max_tokens=4096)
+            compact(messages, keep=8, budget_chars=context_chars(role))
+            try:
+                r = pool.chat(role, messages, tools=defs, on_delta=self._delta, cancel=self.cancel,
+                              extra=self._extra(role, budget=GOAL_THINKING), max_tokens=4096)
+            except RuntimeError as e:
+                if "exceed" not in str(e):
+                    raise
+                compact(messages, keep=2, budget_chars=context_chars(role) // 3)     # squeeze harder once
+                r = pool.chat(role, messages, tools=defs, on_delta=self._delta, cancel=self.cancel,
+                              extra=self._extra(role, budget=GOAL_THINKING), max_tokens=4096)
             tps = r["tps"] or tps
             if r["tool_calls"]:
                 messages.append({"role": "assistant", "content": r["content"] or "",
@@ -838,14 +847,15 @@ def search_queries(question):
     dialect questions like «شو آخر أخبار ... هالأسبوع؟». Written by the always-loaded router (~2 s)."""
     import json
     fallback = [re.sub(r"[؟?!.]|\b(شو|ايش|إيش|قديش|كيف|مين)\b", " ", question).strip()]
-    if not catalog.pick("router"):
+    writer = catalog.pick("router") or (catalog.pick("coder") if config.get("one_brain") else None)
+    if not writer:
         return fallback
     msgs = [{"role": "system", "content": QUERY_SYSTEM}]
     for a, b in QUERY_SHOTS:
         msgs += [{"role": "user", "content": a}, {"role": "assistant", "content": json.dumps(b, ensure_ascii=False)}]
     msgs.append({"role": "user", "content": question[:500]})
     try:
-        qs = pool.complete_json("router", msgs, {"type": "array", "items": {"type": "string"}, "minItems": 1,
+        qs = pool.complete_json(writer, msgs, {"type": "array", "items": {"type": "string"}, "minItems": 1,
                                                  "maxItems": 2}, max_tokens=60)
         qs = [q.strip() for q in qs if isinstance(q, str) and q.strip()]
         return qs or fallback
@@ -1183,6 +1193,17 @@ def writes_program(arguments):
     except ValueError:
         return False
     return str(a.get("path", "")).lower().endswith(CODE_EXT) and len(a.get("content", "")) > 200
+
+
+def context_chars(role):
+    """How much conversation (in characters) fits the model's context, leaving room for the answer and the tool
+    list (~2.5 characters per token for mixed Arabic, English and code)."""
+    from .engine import Server
+    try:
+        tokens = Server(catalog.pick(role) or role).context()
+    except Exception:  # noqa: BLE001
+        tokens = 16384
+    return max(12000, int((tokens - 8000) * 2.5))
 
 
 def compact(messages, keep=6, budget_chars=24000):

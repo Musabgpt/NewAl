@@ -144,7 +144,10 @@ class Server:
         return "http://127.0.0.1:%d" % self.port
 
     def context(self):
-        return max(int(config.get("context") or 0), MIN_CONTEXT)
+        base = max(int(config.get("context") or 0), MIN_CONTEXT)
+        if self.role == "coder":
+            return max(base, int(config.get("brain_context") or 0))
+        return base
 
     def vision(self):
         v = catalog.MODELS.get("vision", {})
@@ -152,7 +155,8 @@ class Server:
 
     def ram_gb(self):
         extra = catalog.MODELS["vision"]["size"] / 1e9 if self.vision() else 0
-        return self.model["size"] / 1e9 * 1.1 + 0.3 + extra + (self.context() / 16384 if self.model["kind"] == "chat" else 0)
+        kv = self.context() * self.model.get("kv_bytes_per_token", 65536) / 1e9 if self.model["kind"] == "chat" else 0
+        return self.model["size"] / 1e9 * 1.1 + 0.3 + extra + kv
 
     def start(self, timeout=900):
         exe = config.find_tool("llama-server")

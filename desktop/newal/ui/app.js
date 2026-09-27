@@ -434,7 +434,7 @@ async function refreshState() {
     p.className = "pill on"; p.textContent = m.label.split(" ")[0] + " " + m.title;
     loaded.appendChild(p);
   }
-  const missing = state.models.filter(m => !m.ready && ["router", "agent", "coder", "embed"].includes(m.role));
+  const missing = state.models.filter(m => !m.ready && m.required);
   const n = $("#notice");
   if (!state.connectors.engine) {
     n.hidden = false; n.textContent = "⚠ المحرك (llama-server) غير موجود. أعد تثبيت NewAl.";
@@ -455,7 +455,7 @@ const panels = {
     body.innerHTML = `<h2>🧠 النماذج</h2><p class="hint">كلها مجانية وتعمل على جهازك. المجموع ${gb(total)}.
       تُحفظ في <code dir="ltr">${escapeHtml(s.home)}\\models</code>. تبقى النماذج محمّلة ما دامت ضمن ميزانية الذاكرة
       (${s.settings.ram_budget_gb} GB) ويُفرَّغ الأقدم عند الحاجة.</p>
-      <div class="row"><button class="primary" id="dlAll">⬇ تنزيل الكل</button><button id="dlBase">⬇ الأساسية الخفيفة فقط (بدون العقل)</button></div>
+      <div class="row"><button class="primary" id="dlAll">⬇ تنزيل الكل</button><button id="dlBase">⬇ المساعدين الخفاف فقط (بدون العقل)</button></div>
       <div id="modelList"></div>`;
     const list = body.querySelector("#modelList");
     for (const m of s.models) {
@@ -825,6 +825,9 @@ const panels = {
       <div class="field"><label><input type="checkbox" id="auto_run" ${s.auto_run ? "checked" : ""}> تشغيل الأوامر وإنشاء الملفات بدون سؤال</label>
         <span class="hint">بدونه يطلب NewAl موافقتك قبل أي أمر في الطرفية أو ملف أو رفع.</span></div>
       <div class="field"><label><input type="checkbox" id="verify_code" ${s.verify_code ? "checked" : ""}> تجربة الكود بالخلفية وإصلاحه حتى يشتغل، ثم إعطائي النسخة الصحيحة فقط</label></div>
+      <div class="field"><label><input type="checkbox" id="one_brain" ${s.one_brain ? "checked" : ""}> 🧠 عقل واحد لكل شي: Qwen3.6 بيجاوب كل الطلبات (أذكى، وما بيتبدّل النموذج بالرام؛ المحادثة العادية أبطأ شوي)</label></div>
+      <div class="field"><label>ذاكرة محادثة العقل (tokens)</label><select id="brain_context">${[16384, 32768, 65536].map(n => `<option value="${n}" ${n == s.brain_context ? "selected" : ""}>${n / 1024}k${n == 32768 ? " (مستحسن، ~0.7GB)" : n == 65536 ? " (~1.3GB)" : ""}</option>`).join("")}</select>
+        <span class="hint">أكبر = مشاريع وملفات أطول بدون اختصار. رام إضافية قليلة لأن Qwen3.6 هجين.</span></div>
       <div class="field"><label><input type="checkbox" id="review_changes" ${s.review_changes ? "checked" : ""}> 🔍 وضع المشروع: يراجع تغييراته مقابل المهمة قبل ما يسلّمك (أدق، وأبطأ شوي)</label></div>
       <div class="field"><label>أقصى عدد محاولات إصلاح</label><input type="number" id="max_fix_attempts" min="1" max="15" value="${s.max_fix_attempts}"></div>
       <div class="field"><label>عدد الأنوية (0 = تلقائي)</label><input type="number" id="threads" min="0" max="64" value="${s.threads}"></div>
@@ -839,6 +842,7 @@ const panels = {
       await api("/api/settings", {
         auto_run: body.querySelector("#auto_run").checked, verify_code: body.querySelector("#verify_code").checked,
         review_changes: body.querySelector("#review_changes").checked,
+        one_brain: body.querySelector("#one_brain").checked, brain_context: +body.querySelector("#brain_context").value,
         max_fix_attempts: +body.querySelector("#max_fix_attempts").value,
         threads: +body.querySelector("#threads").value, ram_budget_gb: +body.querySelector("#ram_budget_gb").value,
         context: +body.querySelector("#context").value,

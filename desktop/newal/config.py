@@ -59,6 +59,8 @@ DEFAULTS = {
     "threads": 0,                 # 0 = physical cores
     "ram_budget_gb": 19,          # models stay loaded while they fit, the oldest unloads first
     "context": 16384,
+    "one_brain": True,            # Qwen3.6 answers everything; the small models only help (search index, routing)
+    "brain_context": 32768,       # the brain's context: ~20 KB per token on Qwen3.6, so 32k tokens is ~0.7 GB
     "auto_run": False,            # run commands and code without asking
     "verify_code": True,          # run generated code and let the judge check it
     "max_fix_attempts": 5,        # run -> judge -> fix rounds before giving the best attempt

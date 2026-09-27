@@ -22,6 +22,8 @@ MODELS = {
         "file": "Qwen3.6-35B-A3B-UD-IQ3_S.gguf", "size": 13676723168,
         "url": HF + "unsloth/Qwen3.6-35B-A3B-GGUF/resolve/main/Qwen3.6-35B-A3B-UD-IQ3_S.gguf",
         "about": "العقل: يخطط ويبرمج ويجرّب ويصلح ويحكم (MoE: 3B نشط من 35B، 73% في SWE-bench)",
+        # KV cache per token of context: only 10 of its 40 layers use attention, with 2 KV heads of 256 (f16).
+        "kv_bytes_per_token": 10 * 2 * 256 * 2 * 2,
     },
     "agent": {
         "title": "LFM2.5 2.6B", "label": "🛠 الأدوات", "kind": "chat",
@@ -101,8 +103,17 @@ _progress = {}          # role -> {"done": bytes, "total": bytes, "state": ..., 
 _lock = threading.Lock()
 
 
+def needed():
+    """The roles NewAl needs to start. With one brain, Qwen3.6 answers everything and the small chat models are
+    optional helpers."""
+    if config.get("one_brain"):
+        return ["coder", "embed"]
+    return ["router", "agent", "coder", "embed"]
+
+
 def status():
     out = []
+    need = needed()
     for role, m in MODELS.items():
         p = _progress.get(role, {})
         have = os.path.getsize(path(role)) if os.path.exists(path(role)) else 0
@@ -111,7 +122,8 @@ def status():
             have = max(have, os.path.getsize(part))
         out.append({
             "role": role, "title": m["title"], "label": m["label"], "about": m["about"],
-            "size": m["size"], "have": have, "ready": available(role), "optional": bool(m.get("optional")),
+            "size": m["size"], "have": have, "ready": available(role), "required": role in need,
+            "optional": bool(m.get("optional")) or (bool(config.get("one_brain")) and role in ("agent", "router")),
             "state": p.get("state", "ready" if available(role) else "missing"),
             "error": p.get("error", ""), "speed": p.get("speed", 0), "url": m["url"], "file": m["file"],
         })

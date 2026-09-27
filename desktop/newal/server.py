@@ -359,7 +359,10 @@ class Handler(BaseHTTPRequestHandler):
             pool.unload(body.get("role"))
             return self._json({"ok": True})
         if p == "/api/settings":
+            before = (config.get("brain_context"), config.get("context"))
             config.update(body)
+            if (config.get("brain_context"), config.get("context")) != before:
+                pool.stop_all()              # a new context size needs the engines restarted
             return self._json(config.all_settings())
         if p == "/api/memories":
             if body.get("delete"):

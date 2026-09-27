@@ -961,6 +961,45 @@ class VisionTest(unittest.TestCase):
         self.assertEqual(router.route(t.text), "code")        # a traceback in the picture goes to the programmer
 
 
+class OneBrainTest(unittest.TestCase):
+    def test_context_and_ram(self):
+        from newal.engine import Server
+        config.update({"brain_context": 32768, "context": 16384})
+        self.assertEqual(Server("coder").context(), 32768)
+        self.assertEqual(Server("agent").context(), 16384)
+        # Qwen3.6 keeps ~20 KB per token of context: 32k tokens cost ~0.7 GB, not 2 GB
+        ram = Server("coder").ram_gb() - catalog.MODELS["coder"]["size"] / 1e9 * 1.1 - 0.3
+        self.assertLess(ram, 0.7 + (catalog.MODELS["vision"]["size"] / 1e9 if Server("coder").vision() else 0) + 0.01)
+        self.assertGreater(agent.context_chars("coder"), agent.context_chars("agent"))
+
+    def test_needed_models(self):
+        config.update({"one_brain": True})
+        st = {m["role"]: m for m in catalog.status()}
+        self.assertTrue(st["coder"]["required"] and st["embed"]["required"])
+        self.assertFalse(st["agent"]["required"])
+        self.assertTrue(st["agent"]["optional"])
+        config.update({"one_brain": False})
+        st = {m["role"]: m for m in catalog.status()}
+        self.assertTrue(st["agent"]["required"])
+        config.update({"one_brain": True})
+
+    def test_every_route_uses_the_brain(self):
+        seen = []
+        old = (catalog.available, catalog.pick, agent.Turn._agent, agent.Turn._plain)
+        catalog.available = lambda role: role == "coder"
+        catalog.pick = lambda role: "coder" if role in ("coder", "judge") else None
+        agent.Turn._agent = lambda self, messages, role, route="tools": (seen.append((route, role)), ("ok", {}))[1]
+        agent.Turn._plain = lambda self, messages, role: (seen.append(("analyze", role)), ("ok", {}))[1]
+        try:
+            for mode in ("chat", "tools", "analyze"):
+                conv = memory.new_conversation()
+                memory.add_message(conv, "user", "hello")
+                agent.Turn(conv, "hello", mode=mode).run()
+        finally:
+            catalog.available, catalog.pick, agent.Turn._agent, agent.Turn._plain = old
+        self.assertEqual([r for _, r in seen], ["coder", "coder", "coder"])
+
+
 class ServerTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
