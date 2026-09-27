@@ -229,6 +229,10 @@ def run_program(prog, timeout=90):
                     "bs4": "beautifulsoup4", "docx": "python-docx"}.get(missing.group(1), missing.group(1))
             if subprocess.run([sys.executable, "-m", "pip", "install", "-q", name], capture_output=True).returncode == 0:
                 continue
+        if code == 5 and "pytest" in cmd and "-X utf8" not in cmd:
+            # pytest found no test functions (asserts at the top of a file): run the program files instead.
+            cmd = " && ".join("%s -X utf8 %s" % (sys.executable, n) for n in names if n.endswith(".py"))
+            continue
         return code == 0, "$ %s\n%s\n(exit code %d)" % (cmd.replace(sys.executable, "python"), out, code)
     return False, out
 
@@ -281,9 +285,11 @@ def solve(task):
                     return {"solved": True, "tries": tries, "errors": errors, "answer": answer, "output": out,
                             "program": prog}
                 problem = "The program ran but the result is wrong: %s\nOutput:\n%s" % (v.get("reason", ""), out[-1500:])
+                errors.append("try %d: wrong result: %s" % (tries, (v.get("reason") or "?")[:250]))
             else:
                 problem = "Running it failed:\n" + out[-2500:]
-            errors.append("try %d: %s" % (tries, error_line(problem) or problem[:200]))
+                errors.append("try %d: %s" % (tries, error_line(out) or out[-200:]))
+            log("   try %d: %s" % (tries, errors[-1][:160]))
             messages = messages + [{"role": "assistant", "content": answer},
                                    {"role": "user", "content": "Fix the code. %s\nEarlier failed attempts:\n%s\n"
                                                                "Return the full corrected program." % (problem, "\n".join(errors[-5:]))}]

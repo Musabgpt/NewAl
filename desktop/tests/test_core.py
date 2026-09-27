@@ -722,6 +722,38 @@ class SchoolTest(unittest.TestCase):
         self.assertNotIn(st["tasks"][0], ids)             # learned: not sent again
         self.assertIn(st["tasks"][1], ids)                # failed once: tried again next session
 
+    def kernel(self):
+        from newal import school
+        os.environ["SCHOOL_OUT"] = tempfile.mkdtemp()
+        os.environ["SCHOOL_WORK"] = tempfile.mkdtemp()
+        ns = {"__name__": "school_kernel"}
+        exec(compile(school.kernel_source([], 1), "school_kernel.py", "exec"), ns)
+        return ns
+
+    def test_kernel_programs(self):
+        k = self.kernel()
+        split = "```python\ndef is_prime(n):\n    return n > 1 and all(n % d for d in range(2, n))\n```\n" \
+                "```python\nassert is_prime(7)\nprint('ok')\n```"
+        ok, out = k["run_program"](k["program"](split))
+        self.assertTrue(ok, out)
+        bad = k["run_program"](k["program"]("```python\nraise ValueError('x')\n```"))
+        self.assertFalse(bad[0])
+        self.assertIn("ValueError", k["error_line"](bad[1]))
+
+    def test_kernel_no_test_functions(self):
+        import importlib.util
+        if not importlib.util.find_spec("pytest"):
+            self.skipTest("pytest not installed")
+        k = self.kernel()
+        ans = ("```python fib.py\ndef fib(n):\n    return n if n < 2 else fib(n-1) + fib(n-2)\n```\n"
+               "```python test_fib.py\nfrom fib import fib\nassert fib(10) == 55\nprint('fine')\n```")
+        ok, out = k["run_program"](k["program"](ans))
+        self.assertTrue(ok, out)
+        self.assertIn("fine", out)
+        prog = agent.program(ans + "\n```python main.py\nfrom fib import fib\nprint(fib(6))\n```")
+        ok, out, _, _ = agent.run_program(prog)
+        self.assertTrue(ok, out)
+
     def test_week_starts_saturday(self):
         import datetime
         from newal import school

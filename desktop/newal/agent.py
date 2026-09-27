@@ -592,7 +592,8 @@ class Turn:
             info["verified"] = False
             if attempt == limit:
                 break
-            history.append("attempt %d: %s" % (attempt, error_line(problem) or _last_line(problem)))
+            history.append("attempt %d: %s" % (attempt, ("wrong result: " + (verdict.get("reason") or "?")[:250]) if ok
+                                                else (error_line(output) or _last_line(output))))
             fix = self._fix_prompt(request, code, problem, history)
             if not docs and API_ERROR.search(problem):
                 # Wrong use of a library (a renamed function, a missing argument): its current documentation
@@ -1016,6 +1017,12 @@ def run_program(prog, timeout=90):
     if not argv:
         return False, "%s غير مثبت على الجهاز، أو لا يوجد ملف تشغيل (main.py / tests)" % prog["lang"], False, folder
     code_, out = connectors.run(argv, cwd=folder, timeout=timeout)
+    if code_ == 5 and "pytest" in argv:
+        # pytest found no test functions (asserts at the top of a file): run the program itself instead.
+        entry = _entry_command(dict(prog, run="", tests=False), py)
+        if entry:
+            argv = entry
+            code_, out = connectors.run(argv, cwd=folder, timeout=timeout)
     timed_out = code_ == -1 and "انتهت المهلة" in out
     shown = " ".join(os.path.basename(a) if i == 0 else a for i, a in enumerate(argv))
     return code_ == 0, "$ %s\n%s\n(exit code %d)" % (shown, connectors.clip(out, 4000), code_), timed_out, folder
