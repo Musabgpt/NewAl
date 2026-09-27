@@ -2255,3 +2255,37 @@ class LaptopFindingsTest(unittest.TestCase):
         self.assertTrue(agent.own_module("palindrome", "save it as palindrome.py", prog))
         self.assertTrue(agent.own_module("main", "", prog))
         self.assertFalse(agent.own_module("requests", answer, prog))
+
+    def test_files_named_in_their_docstring_are_a_project(self):
+        # Round 2 on the laptop: three files named only in their first docstring line ran as one program and failed on
+        # «from src import palindrome»; NewAl then went to PyPI for «src».
+        answer = ('```python\n"""src/palindrome.py – the function."""\n\n\ndef is_palindrome(s):\n'
+                  '    s = s.replace(" ", "").lower()\n    return s == s[::-1]\n```\n'
+                  '```python\n"""tests/test_palindrome.py – its tests."""\n\nfrom src import palindrome\n\n\n'
+                  'def test_spaces():\n    assert palindrome.is_palindrome("race car")\n```\n'
+                  '```python\n"""main.py – entry point."""\nimport sys\n\nfrom src import palindrome\n\n'
+                  'print(palindrome.is_palindrome(sys.argv[1] if len(sys.argv) > 1 else "abba"))\n```')
+        prog = agent.program(answer)
+        self.assertTrue(prog["project"])
+        self.assertEqual(set(prog["files"]), {"src/palindrome.py", "tests/test_palindrome.py", "main.py"})
+        ok, out, _, _ = agent.run_program(prog)
+        self.assertTrue(ok, out)
+        self.assertTrue(agent.own_module("src", answer, prog))
+        # An import of a name that an earlier block only imports (not defines) stays.
+        code = agent.join_python(["from src import palindrome\n", "from src import palindrome\nprint(palindrome)\n"])
+        self.assertIn("from src import palindrome\nprint", code)
+
+    def test_only_well_known_packages_are_installed_by_themselves(self):
+        from newal import connectors
+        ran = []
+        old = connectors.run
+        connectors.run = lambda argv, **kw: (ran.append(argv), (0, ""))[1]
+        try:
+            self.assertFalse(agent.install_package("src"))
+            self.assertFalse(agent.install_package("palindrome"))
+            self.assertEqual(ran, [])                                       # PyPI was not asked for them
+            self.assertTrue(agent.install_package("pandas"))
+            self.assertTrue(agent.install_package("cv2.data"))
+        finally:
+            connectors.run = old
+        self.assertEqual([a[-1] for a in ran], ["pandas", "opencv-python"])

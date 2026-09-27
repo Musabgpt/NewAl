@@ -1141,8 +1141,16 @@ class Turn:
             self.emit({"type": "status", "text": ("🛡 تجربة %d بصندوق ويندوز المعزول…" if boxed else "▶ تجربة %d…") % attempt})
             ok, output, timed_out, folder = run_boxed(prog) if boxed else run_program(prog)
             missing = re.search(r"No module named '?([\w.]+)'?", output) if lang == "python" else None
+            hint = ""
             if missing and own_module(missing.group(1), answer, prog):
-                missing = None               # the answer's own module: fixed in the code, never taken from PyPI
+                # The answer's own module or folder: fixed in the code, never looked up on PyPI.
+                hint = ("\n(%s is part of your answer, not a package: put the program in one code block, or give every "
+                        "file its path on the fence line, e.g. ```python src/app.py)" % missing.group(1))
+                missing = None
+            elif missing and not known_package(missing.group(1)):
+                hint = ("\n(%s is not installed, and NewAl installs only well-known packages by itself: use the standard "
+                        "library or a well-known package)" % missing.group(1))
+                missing = None
             if missing and install_package(missing.group(1)):
                 self.emit({"type": "run", "lang": lang, "ok": False, "attempt": attempt,
                            "output": output[-1500:] + "\n\n📦 تم تثبيت " + missing.group(1)})
@@ -1192,7 +1200,7 @@ class Turn:
                 info["rejected"] = True
             else:
                 self.emit({"type": "run", "lang": lang, "ok": False, "attempt": attempt, "output": output[-2000:]})
-                problem = "Running it failed:\n" + output[-2000:]
+                problem = "Running it failed:\n" + output[-2000:] + hint
                 info["rejected"] = False
             info["verified"] = False
             if attempt == limit:
@@ -1664,11 +1672,11 @@ def _safe_read(url, question, max_chars=1500):
         return ""
 
 
-def _defined(code):
-    """Names a Python block defines at its top level: functions, classes, imports, assignments."""
+def _defined(code, imports=True):
+    """Names a Python block defines at its top level: functions, classes, assignments, and (imports) imports."""
     names = set(re.findall(r"^(?:async\s+)?(?:def|class)\s+(\w+)", code, re.M))
     names |= set(re.findall(r"^(\w+)\s*(?::[^=\n]+)?=(?!=)", code, re.M))
-    for m in re.finditer(r"^(?:from\s+[\w.]+\s+)?import\s+(.+)$", code, re.M):
+    for m in re.finditer(r"^(?:from\s+[\w.]+\s+)?import\s+(.+)$", code, re.M) if imports else ():
         for part in m.group(1).replace("(", "").replace(")", "").split(","):
             bits = part.split()
             if bits:
@@ -1686,13 +1694,14 @@ def join_python(blocks):
     Tests that import the function from its module («from palindrome import is_palindrome», the module being an
     earlier block of the answer) lose that import: run alone they failed on the laptop, and NewAl went to PyPI for a
     package called «palindrome»."""
-    earlier = set()
+    earlier, made = set(), set()
     for c in blocks[:-1]:
         earlier |= _defined(c)
+        made |= _defined(c, imports=False)
     last = blocks[-1]
     for m in list(_FROM_IMPORT.finditer(last)):
         names = [n.strip() for n in m.group(1).split(",") if n.strip()]
-        if names and all(re.fullmatch(r"\w+", n) and n in earlier for n in names):
+        if names and all(re.fullmatch(r"\w+", n) and n in made for n in names):
             last = last.replace(m.group(0), "", 1)
     blocks = blocks[:-1] + [last]
     needed = {n for n in earlier - _defined(last) if re.search(r"\b%s\b" % re.escape(n), last)}
@@ -1793,11 +1802,15 @@ _PATH_ABOVE = re.compile(r"^[\s#>*`_-]*(?:\d+[.)]\s*)?(?:file|الملف|ملف)
                          re.I)
 _PATH_COMMENT = re.compile(r"^\s*(?:#|//|<!--|/\*)\s*(?:file(?:name)?\s*:\s*)?([\w\-./\\]+\.[A-Za-z][A-Za-z0-9]{0,5})\s*(?:-->|\*/)?\s*$",
                            re.I)
+# A path as the first words of a module docstring: «"""src/palindrome.py – the function."""» (the laptop's quality test
+# got three files named only like this, ran them as one program and failed on «from src import palindrome»).
+_PATH_DOCSTRING = re.compile(r"^\s*[rRuU]?(?:\"\"\"|''')\s*([\w\-./\\]+\.(?:pyw?|m?js|tsx?|jsx|json|html?|css|md|txt|"
+                             r"toml|cfg|ini|ya?ml|csv|ps1|sql|xml|svg))(?![\w.])", re.I)
 
 
 def project_files(text):
     """{path: code} for the fenced blocks that name a file (on the fence line, on the line just above the block,
-    or in a first-line comment), and the RUN command if one is given."""
+    or in a first-line comment or docstring), and the RUN command if one is given."""
     text = text or ""
     files = {}
     for m in _FENCE.finditer(text):
@@ -1810,7 +1823,7 @@ def project_files(text):
             path = hit.group(1) if hit else ""
         if not path:
             first = code.split("\n", 1)[0]
-            hit = _PATH_COMMENT.match(first)
+            hit = _PATH_COMMENT.match(first) or _PATH_DOCSTRING.match(first)
             path = hit.group(1) if hit else ""
         rel = safe_rel(path) if path else None
         if rel:
@@ -1994,24 +2007,48 @@ MISSING_RUNTIME = re.compile(r"غير مثبت على الجهاز|was not found
 # import name -> pip package, where they differ
 PIP_NAMES = {"cv2": "opencv-python", "PIL": "pillow", "sklearn": "scikit-learn", "yaml": "pyyaml",
              "bs4": "beautifulsoup4", "dotenv": "python-dotenv", "docx": "python-docx", "fitz": "pymupdf",
-             "Crypto": "pycryptodome", "dateutil": "python-dateutil", "serial": "pyserial", "win32api": "pywin32"}
+             "Crypto": "pycryptodome", "dateutil": "python-dateutil", "serial": "pyserial", "win32api": "pywin32",
+             "win32com": "pywin32", "pywintypes": "pywin32", "pptx": "python-pptx", "skimage": "scikit-image",
+             "jwt": "PyJWT", "telebot": "pyTelegramBotAPI", "telegram": "python-telegram-bot", "discord": "discord.py",
+             "speech_recognition": "SpeechRecognition", "psycopg2": "psycopg2-binary", "wx": "wxPython",
+             "googleapiclient": "google-api-python-client", "websocket": "websocket-client", "attr": "attrs"}
+# What NewAl installs by itself when a program imports it: well-known packages only. The quality test sent «palindrome»
+# and «src» (the answer's own module and folder) to PyPI; a name a model makes up can be registered by anyone there,
+# and installing runs its code. Anything else the user installs on purpose.
+KNOWN_PACKAGES = set(PIP_NAMES) | set("""
+    numpy pandas scipy matplotlib seaborn plotly bokeh altair openpyxl xlsxwriter xlrd xlwt requests httpx aiohttp
+    urllib3 lxml html5lib pypdf PyPDF2 reportlab pdfplumber pytest ruff PyInstaller flask fastapi uvicorn django
+    starlette jinja2 werkzeug customtkinter pygame imageio statsmodels sympy networkx toml tomli pytz tzdata arrow
+    pendulum tqdm rich click typer colorama tabulate termcolor psutil pyautogui pynput keyboard mouse pyperclip
+    schedule qrcode faker markdown bleach selenium playwright scrapy sqlalchemy pymysql pymongo redis pydantic attrs
+    cryptography bcrypt paramiko openai anthropic tiktoken transformers torch torchvision tensorflow keras nltk textblob
+    spacy gensim wordcloud gtts pyttsx3 pydub moviepy streamlit gradio dash kivy flet PyQt5 PyQt6 PySide2 PySide6
+    aiogram websockets boto3 gspread folium geopy shapely polars pyarrow numba joblib xgboost lightgbm catboost emoji
+    unidecode regex simplejson orjson ujson chardet certifi idna""".split())
+_KNOWN = {n.lower() for n in KNOWN_PACKAGES}
+
+
+def known_package(module):
+    return module.split(".")[0].lower() in _KNOWN
 
 
 def own_module(name, answer, prog):
-    """True when a missing import is a module of the answer itself: one of its files, or «name.py» in its text (the
-    laptop's quality test: tests did «from palindrome import …» and NewAl spent two minutes on pip install palindrome,
-    which could have installed whatever PyPI has under that name)."""
+    """True when a missing import is a module or folder of the answer itself: one of its files, or a part of a path it
+    names («src/palindrome.py»: src, palindrome). The laptop's quality test: tests did «from palindrome import …» and
+    «from src import palindrome», and NewAl went to PyPI for «palindrome» and «src»."""
     base = name.split(".")[0]
-    files = {os.path.splitext(p.split("/")[-1])[0] for p in (prog or {}).get("files", {})}
-    return base in files or bool(re.search(r"(?<![\w.])%s\.py\b" % re.escape(base), answer or ""))
+    parts = set()
+    for p in list((prog or {}).get("files", {})) + re.findall(r"[\w\-./\\]+\.pyw?\b", answer or ""):
+        bits = re.split(r"[/\\]", p)
+        parts |= set(bits[:-1]) | {os.path.splitext(bits[-1])[0]}
+    return base in parts
 
 
 def install_package(module):
-    """pip install for a missing import (the package from PyPI only, into the user's Python)."""
-    import shutil
+    """pip install for a missing import of a well-known package (from PyPI, into the user's Python)."""
     exe = config.find_python()
     name = PIP_NAMES.get(module.split(".")[0], module.split(".")[0])
-    if not exe or not re.fullmatch(r"[A-Za-z0-9_.-]+", name):
+    if not exe or not known_package(module) or not re.fullmatch(r"[A-Za-z0-9_.-]+", name):
         return False
     code_, _ = connectors.run([exe, "-m", "pip", "install", "--disable-pip-version-check", "-q", name], timeout=300)
     return code_ == 0
