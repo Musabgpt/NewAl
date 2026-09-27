@@ -14,7 +14,7 @@ import urllib.request
 import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-from . import addons, agent, catalog, config, connectors, lessons, memory, phone, router, school, skills, tasks, training, workspace
+from . import addons, agent, browser, catalog, config, connectors, lessons, memory, phone, router, sandbox, school, skills, tasks, training, workspace
 from .engine import Cancelled, pool
 
 UI_DIR = os.path.join(config.BUNDLE, "ui")
@@ -95,6 +95,8 @@ def state():
         },
         "index": memory.index_state(),
         "training": training.stats(),
+        "sandbox": sandbox.available(),
+        "browser": bool(browser.find()),
         "home": config.HOME,
         "workspace": config.WORKSPACE,
         "api": "http://127.0.0.1:%d/v1" % config.get("api_port"),

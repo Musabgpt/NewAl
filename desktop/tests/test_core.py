@@ -1147,6 +1147,112 @@ class WebAppTest(unittest.TestCase):
         self.assertIn("No answer", p.http_request("http://127.0.0.1:%d/" % free))
 
 
+class LanguagesTest(unittest.TestCase):
+    PROGRAMS = {
+        "c": ("```c\n#include <stdio.h>\nint add(int a, int b) { return a + b; }\nint main(void) {\n"
+              "  printf(\"sum %d\\n\", add(2, 3));\n  return add(2, 3) == 5 ? 0 : 1;\n}\n```", "sum 5", "gcc"),
+        "cpp": ("```cpp\n#include <iostream>\n#include <vector>\nint main() {\n  std::vector<int> v{1, 2, 3};\n"
+                "  int s = 0; for (int x : v) s += x;\n  std::cout << \"sum \" << s << std::endl;\n  return s == 6 ? 0 : 1;\n}\n```",
+                "sum 6", "g++"),
+        "csharp": ("```csharp\nusing System;\nConsole.WriteLine(\"sum \" + (2 + 3));\n```", "sum 5", "dotnet"),
+        "java": ("```java\npublic class Main {\n  public static void main(String[] a) {\n"
+                 "    System.out.println(\"sum \" + (2 + 3));\n  }\n}\n```", "sum 5", "java"),
+        "go": ("```go\npackage main\n\nimport \"fmt\"\n\nfunc main() {\n\tfmt.Println(\"sum\", 2+3)\n}\n```", "sum 5", "go"),
+        "rust": ("```rust\nfn add(a: i32, b: i32) -> i32 { a + b }\nfn main() {\n    assert_eq!(add(2, 3), 5);\n"
+                 "    println!(\"sum {}\", add(2, 3));\n}\n```", "sum 5", "rustc"),
+        "ts": ("```typescript\nfunction add(a: number, b: number): number { return a + b; }\nconsole.log(`sum ${add(2, 3)}`);\n```",
+               "sum 5", "node"),
+    }
+
+    def check(self, runner):
+        from newal import langs
+        text, want, tool = self.PROGRAMS[runner]
+        if not langs.find(tool) or (runner == "ts" and langs.node_major() < 22):
+            self.skipTest("%s not installed" % tool)
+        lang, code = agent.runnable_block(text)
+        self.assertEqual(lang, runner)
+        ok, out, slow = agent.run_code(lang, code, timeout=240)
+        self.assertTrue(ok, out)
+        self.assertIn(want, out)
+        # a program that does not compile (or crashes) fails, so the loop fixes it
+        broken = {"ts": "const x: number = ;", "go": "package main\nfunc main() { undefinedCall() }",
+                  "java": "public class Main { public static void main(String[] a) { int x = ; } }"}.get(runner, "this is not code (")
+        ok, out, slow = agent.run_code(lang, broken, timeout=240)
+        self.assertFalse(ok, out)
+
+    def test_c(self):
+        self.check("c")
+
+    def test_cpp(self):
+        self.check("cpp")
+
+    def test_csharp(self):
+        self.check("csharp")
+
+    def test_java(self):
+        self.check("java")
+
+    def test_go(self):
+        self.check("go")
+
+    def test_rust(self):
+        self.check("rust")
+
+    def test_typescript(self):
+        self.check("ts")
+
+    def test_missing_toolchain_says_what_to_install(self):
+        from newal import langs
+        old = langs.find
+        langs.find = lambda name: None
+        try:
+            ok, out, slow = agent.run_code("rust", "fn main() {}")
+        finally:
+            langs.find = old
+        self.assertFalse(ok)
+        self.assertIn("غير مثبت على الجهاز", out)
+        self.assertIn("الإضافات", out)
+        self.assertTrue(agent.MISSING_RUNTIME.search(out))
+
+    def test_interactive_in_every_language(self):
+        for code in ("int x; scanf(\"%d\", &x);", "std::cin >> x;", "new Scanner(System.in)", "Console.ReadLine()",
+                     "fmt.Scan(&x)", "io::stdin().read_line(&mut s)"):
+            self.assertTrue(agent.INTERACTIVE.search(code), code)
+        self.assertEqual(agent.runnable_block("```c#\nConsole.WriteLine(1);\n```")[0], "csharp")
+
+
+class SandboxTest(unittest.TestCase):
+    def test_plan(self):
+        from newal import sandbox
+        wsb, script = sandbox.plan("python", r"C:\runs\a & b", r"C:\NewAl\bin\python")
+        self.assertIn("<Networking>Disable</Networking>", wsb)
+        self.assertIn("<HostFolder>C:\\runs\\a &amp; b</HostFolder>", wsb)          # escaped for XML
+        self.assertIn("<ReadOnly>true</ReadOnly>", wsb)                                # Python is read-only
+        self.assertIn(r"C:\py\python.exe -X utf8 main.py > out.txt 2>&1", script)
+        self.assertIn("shutdown /s /t 0", script)
+        wsb, script = sandbox.plan("powershell", r"C:\runs\x")
+        self.assertIn("main.ps1", script)
+        self.assertNotIn("C:\\py", wsb)
+
+    def test_risky_code_goes_to_the_box_without_asking(self):
+        from newal import sandbox
+        asked, boxed = [], []
+        old = (sandbox.available, sandbox.run, agent.pool.chat, catalog.pick)
+        sandbox.available = lambda: True
+        sandbox.run = lambda runner, code, folder, timeout=120: (boxed.append(code), (True, "🛡 ok\n(exit code 0)", False))[1]
+        agent.pool.chat = lambda role, messages, **kw: {"content": "```python\nimport os\nos.remove('x.txt')\n```", "tps": 1}
+        catalog.pick = lambda role: None
+        config.update({"sandbox_risky": True})
+        try:
+            t = agent.Turn(None, "delete x.txt", approve=lambda text: asked.append(text) or False)
+            answer, info = t._code([{"role": "user", "content": "delete x.txt"}], "coder")
+        finally:
+            sandbox.available, sandbox.run, agent.pool.chat, catalog.pick = old
+        self.assertEqual(asked, [])
+        self.assertEqual(len(boxed), 1)
+        self.assertTrue(info["verified"])
+
+
 class ServerTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):

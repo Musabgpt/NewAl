@@ -7,7 +7,7 @@ import re
 import threading
 import time
 
-from . import browser, catalog, config, connectors, files, lessons, memory, router, skills, tools, training, web, workspace
+from . import browser, catalog, config, connectors, files, langs, lessons, memory, router, sandbox, skills, tools, training, web, workspace
 from .engine import Cancelled, pool
 
 MAX_TOOL_ROUNDS = 6
@@ -31,7 +31,8 @@ GOAL = ("You are NewAl working autonomously toward the user's goal on their Wind
         "short report in the user's language: what you did, the result, and where files are.")
 
 CODER = ("You are an expert software engineer on Windows 11 (PowerShell, Python, Git, VS Code, Docker/WSL available). "
-         "Write complete, working code in fenced blocks with the language tag (```python, ```powershell, ```javascript...). "
+         "Write complete, working code in fenced blocks with the language tag (```python, ```powershell, ```javascript, "
+         "```html, ```c, ```cpp, ```csharp, ```java, ```go, ```rust, ```typescript). "
          "Your code is run automatically to test it: give one complete program in a single code block that runs on its "
          "own without user input, and end it with a small self-test (asserts or example calls) that prints the results. "
          "When the task needs several files (a package, a web app with templates, a project with tests), write every "
@@ -75,6 +76,7 @@ def data_url(path, limit=8_000_000):
 
 RUNNABLE = {"python": "python", "py": "python", "powershell": "powershell", "ps1": "powershell", "pwsh": "powershell",
             "javascript": "node", "js": "node", "node": "node", "html": "browser", "htm": "browser"}
+RUNNABLE.update(langs.FENCES)            # C, C++, C#, Java, Go, Rust, TypeScript
 
 
 def _system(route):
@@ -736,27 +738,31 @@ class Turn:
                 info["note"] = "same_code"
                 break                 # the model returned the same code again: stop looping
             last = prog
-            if re.search(r"\binput\s*\(|Read-Host|readline\(", code) and not prog.get("tests"):
+            if INTERACTIVE.search(code) and not prog.get("tests"):
                 info["note"] = "interactive"
                 break                 # needs a person typing: cannot be checked automatically
-            if RISKY.search(code) and not self.approve(
-                    "الكود يحذف ملفات أو يشغّل أوامر أو يرسل للنت. تجربته في مجلد العمل؟\n\n" + code[:1500]):
-                info["note"] = "not_run"
-                break
-            self.emit({"type": "status", "text": "▶ تجربة %d…" % attempt})
-            ok, output, timed_out, folder = run_program(prog)
+            boxed = False
+            if RISKY.search(code):
+                if (config.get("sandbox_risky") and sandbox.available() and not prog["project"]
+                        and lang in sandbox.RUNNERS):
+                    boxed = True             # tried in Windows Sandbox: nothing to ask, nothing on this computer
+                elif not self.approve("الكود يحذف ملفات أو يشغّل أوامر أو يرسل للنت. تجربته في مجلد العمل؟\n\n" + code[:1500]):
+                    info["note"] = "not_run"
+                    break
+            self.emit({"type": "status", "text": ("🛡 تجربة %d بصندوق ويندوز المعزول…" if boxed else "▶ تجربة %d…") % attempt})
+            ok, output, timed_out, folder = run_boxed(prog) if boxed else run_program(prog)
             missing = re.search(r"No module named '?([\w.]+)'?", output) if lang == "python" else None
             if missing and install_package(missing.group(1)):
                 self.emit({"type": "run", "lang": lang, "ok": False, "attempt": attempt,
                            "output": output[-1500:] + "\n\n📦 تم تثبيت " + missing.group(1)})
-                ok, output, timed_out, folder = run_program(prog)
+                ok, output, timed_out, folder = run_boxed(prog) if boxed else run_program(prog)
             info["run_output"] = output[-2000:]
             info["attempts"] = attempt
             if MISSING_RUNTIME.search(output):
                 # Fixing the code cannot help when Python/Node itself is missing.
                 self.emit({"type": "run", "lang": lang, "ok": False, "attempt": attempt, "output": output[-1500:]})
                 info["note"] = "no_runtime"
-                answer += "\n\n> ⚠️ ما قدرت جرّب الكود: %s غير مثبت على الجهاز." % lang
+                answer += "\n\n> ⚠️ ما قدرت جرّب الكود: %s" % (output.strip().splitlines() or [lang])[0]
                 break
             if timed_out:
                 self.emit({"type": "run", "lang": lang, "ok": True, "attempt": attempt,
@@ -1071,7 +1077,7 @@ def runnable_block(text):
     """The program in an answer: (runner, code). Models often put the function in one Python block and its tests
     in the next: then the blocks are joined in order. Otherwise, and in other languages, the last block is the
     program."""
-    blocks = [(RUNNABLE.get(lang.lower()), code) for lang, code in re.findall(r"```([\w+-]*)[^\n]*\n(.*?)```", text, re.S)]
+    blocks = [(RUNNABLE.get(lang.lower()), code) for lang, code in re.findall(r"```([\w+#-]*)[^\n]*\n(.*?)```", text, re.S)]
     blocks = [(r, c) for r, c in blocks if r and c.strip()]
     if not blocks:
         return None
@@ -1096,6 +1102,8 @@ def run_page(path):
 def run_code(runner, code, timeout=60):
     folder = os.path.join(config.WORKSPACE, "runs", time.strftime("%Y%m%d-%H%M%S-") + os.urandom(3).hex())
     os.makedirs(folder, exist_ok=True)
+    if runner in langs.FILES:
+        return langs.run(runner, code, folder, timeout)
     if runner == "browser":
         path = os.path.join(folder, "index.html")
         with open(path, "w", encoding="utf-8") as f:
@@ -1126,7 +1134,7 @@ def run_code(runner, code, timeout=60):
 
 # ------------------------------------------------------------------ programs: one block or a project
 
-_FENCE = re.compile(r"```([\w+-]*)[ \t]*([^\n`]*)\n(.*?)```", re.S)
+_FENCE = re.compile(r"```([\w+#-]*)[ \t]*([^\n`]*)\n(.*?)```", re.S)
 _PATH = re.compile(r"^(?:(?:path|file|title|filename)\s*[=:]\s*)?[\"']?([\w\-./\\]+\.[A-Za-z0-9]{1,6})[\"']?$")
 _RUN = re.compile(r"^\s*(?:\*\*)?RUN:?(?:\*\*)?:?\s*`?([^`\n]+?)`?\s*$", re.M | re.I)
 TEXT_FILES = (".py", ".js", ".mjs", ".ts", ".json", ".html", ".css", ".md", ".txt", ".toml", ".cfg", ".ini", ".yaml",
@@ -1264,6 +1272,17 @@ def run_program(prog, timeout=90):
     return code_ == 0, "$ %s\n%s\n(exit code %d)" % (shown, connectors.clip(out, 4000), code_), timed_out, folder
 
 
+def run_boxed(prog):
+    """A single program in Windows Sandbox: (ok, output, timed_out, folder)."""
+    folder = os.path.join(config.WORKSPACE, "runs", time.strftime("%Y%m%d-%H%M%S-") + os.urandom(3).hex())
+    os.makedirs(folder, exist_ok=True)
+    res = sandbox.run(prog["lang"], prog["files"]["main"], folder)
+    if res is None:
+        ok, out, slow = run_code(prog["lang"], prog["files"]["main"])
+        return ok, out, slow, None
+    return res[0], res[1], res[2], folder
+
+
 def save_project(folder, request):
     """Copies a working project from the test folder to workspace/projects/<name>."""
     import shutil
@@ -1286,10 +1305,15 @@ def project_answer(answer, prog):
 
 
 # Generated code that deletes, runs other programs or sends data: asks first even in the background loop.
+# Programs that wait for someone typing cannot be checked automatically (in any of the languages NewAl runs).
+INTERACTIVE = re.compile(r"\binput\s*\(|Read-Host|readline\(|\bscanf\s*\(|\bcin\s*>>|getline\s*\(\s*cin|"
+                         r"Scanner\s*\(\s*System\.in|Console\.ReadLine|bufio\.NewReader\(os\.Stdin|fmt\.Scan|"
+                         r"stdin\(\)\.read_line|process\.stdin")
 RISKY = re.compile(r"os\.remove|os\.unlink|shutil\.rmtree|os\.rmdir|rmtree|Remove-Item|\brm\s+-|\bdel\s+/|"
                    r"subprocess|os\.system|os\.popen|Start-Process|Invoke-Expression|\biex\b|Stop-Computer|"
                    r"Restart-Computer|Format-Volume|reg\s+delete|Set-ExecutionPolicy|requests\.(post|put|delete)|"
-                   r"smtplib|winreg|ctypes", re.I)
+                   r"smtplib|winreg|ctypes|\bsystem\s*\(|Process\.Start|Runtime\.getRuntime|os/exec|"
+                   r"std::process::Command|remove_dir_all|File\.Delete|Directory\.Delete|unlink\s*\(", re.I)
 
 MISSING_RUNTIME = re.compile(r"غير مثبت على الجهاز|was not found; run without arguments|exit code 9009|"
                              r"is not recognized as an internal or external command")

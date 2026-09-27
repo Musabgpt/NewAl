@@ -605,6 +605,7 @@ const panels = {
       <div class="card"><h4>➕ إضافة MCP أخرى</h4><div class="about">أي خادم MCP: اسم قصير وأمر التشغيل، مثل <code dir="ltr">npx -y @modelcontextprotocol/server-memory</code></div>
         <div class="row"><input type="text" id="mcpName" placeholder="الاسم (إنكليزي)" dir="ltr"><input type="text" id="mcpCmd" style="flex:1" placeholder="npx -y package-name" dir="ltr"><button id="mcpAdd">إضافة</button><span class="hint" id="mcpOut"></span></div></div>
       ${group("python", "حزم Python", "مكتبات تُستخدم عند كتابة وتشغيل الكود.")}
+      ${group("langs", "لغات برمجة", "NewAl بيجرّب ويصلّح البرامج بهاللغات لما تكون مثبتة (Python وJavaScript وPowerShell وصفحات الويب جاهزين).")}
       <h3>🎓 المهارات</h3><p class="hint">خبرات جاهزة يضيفها NewAl للطلب المناسب تلقائياً.</p>
       <div id="skillList"></div>
       <details class="card"><summary>➕ مهارة جديدة</summary>
@@ -848,6 +849,8 @@ const panels = {
       <div class="field"><label><input type="checkbox" id="one_brain" ${s.one_brain ? "checked" : ""}> 🧠 عقل واحد لكل شي: Qwen3.6 بيجاوب كل الطلبات (أذكى، وما بيتبدّل النموذج بالرام؛ المحادثة العادية أبطأ شوي)</label></div>
       <div class="field"><label>ذاكرة محادثة العقل (tokens)</label><select id="brain_context">${[16384, 32768, 65536].map(n => `<option value="${n}" ${n == s.brain_context ? "selected" : ""}>${n / 1024}k${n == 32768 ? " (مستحسن، ~0.7GB)" : n == 65536 ? " (~1.3GB)" : ""}</option>`).join("")}</select>
         <span class="hint">أكبر = مشاريع وملفات أطول بدون اختصار. رام إضافية قليلة لأن Qwen3.6 هجين.</span></div>
+      <div class="field"><label><input type="checkbox" id="sandbox_risky" ${s.sandbox_risky ? "checked" : ""}> 🛡 الكود اللي بيحذف أو بيشغّل أوامر: جرّبه بصندوق ويندوز المعزول بدل ما يسألني</label>
+        <span class="hint">${state.sandbox ? "✓ Windows Sandbox متوفر على جهازك" : "Windows Sandbox مش مفعّل على جهازك (بيحتاج ويندوز Pro، ومن «ميزات ويندوز» فعّل Windows Sandbox). بدونه بيضل يسألك."}</span></div>
       <div class="field"><label><input type="checkbox" id="review_changes" ${s.review_changes ? "checked" : ""}> 🔍 وضع المشروع: يراجع تغييراته مقابل المهمة قبل ما يسلّمك (أدق، وأبطأ شوي)</label></div>
       <div class="field"><label>أقصى عدد محاولات إصلاح</label><input type="number" id="max_fix_attempts" min="1" max="15" value="${s.max_fix_attempts}"></div>
       <div class="field"><label>عدد الأنوية (0 = تلقائي)</label><input type="number" id="threads" min="0" max="64" value="${s.threads}"></div>
@@ -861,7 +864,7 @@ const panels = {
     body.querySelector("#saveSettings").onclick = async () => {
       await api("/api/settings", {
         auto_run: body.querySelector("#auto_run").checked, verify_code: body.querySelector("#verify_code").checked,
-        review_changes: body.querySelector("#review_changes").checked,
+        review_changes: body.querySelector("#review_changes").checked, sandbox_risky: body.querySelector("#sandbox_risky").checked,
         one_brain: body.querySelector("#one_brain").checked, brain_context: +body.querySelector("#brain_context").value,
         max_fix_attempts: +body.querySelector("#max_fix_attempts").value,
         threads: +body.querySelector("#threads").value, ram_budget_gb: +body.querySelector("#ram_budget_gb").value,

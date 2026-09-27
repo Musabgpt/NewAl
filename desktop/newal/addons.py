@@ -113,6 +113,12 @@ def status():
         {"id": "python", "title": "🐍 Python", "group": "apps", "about": "لتجربة الكود وتشغيل السكربتات (مضمن مع NewAl).",
          "ready": bool(config.find_python()), "detail": config.find_python() or ""},
     ]
+    from . import langs
+    tools_needed = {"gcc": "gcc", "dotnet": "dotnet", "java": "java", "go": "go", "rust": "rustc"}
+    for key, title in langs.TITLES.items():
+        items.append({"id": "lang:" + key, "title": title, "group": "langs",
+                      "about": "لتجربة وتصليح البرامج بهاللغة (تثبيت رسمي عبر winget).",
+                      "ready": bool(langs.find(tools_needed[key])), "detail": ""})
     for key, (title, packages) in PYTHON_PACKS.items():
         items.append({"id": "py:" + key, "title": title, "group": "python", "about": "مكتبات Python: " + ", ".join(packages),
                       "ready": True if key in packs else None, "detail": ""})
@@ -134,6 +140,17 @@ def install(item_id, extra=None):
         return _vscode()
     if item_id in ("git", "node"):
         return _winget(item_id)
+    if item_id.startswith("lang:"):
+        from . import langs
+        key = item_id[5:]
+        winget = shutil.which("winget")
+        if not winget:
+            return {"ok": False, "message": "winget غير موجود؛ ثبّت %s يدوياً" % langs.TITLES.get(key, key)}
+        code, out = connectors.run([winget, "install", "--id", langs.WINGET[key], "-e", "--silent",
+                                    "--accept-package-agreements", "--accept-source-agreements"], timeout=1800)
+        tool = {"gcc": "gcc", "dotnet": "dotnet", "java": "java", "go": "go", "rust": "rustc"}[key]
+        ok = bool(langs.find(tool))
+        return {"ok": ok, "message": "تم التثبيت" if ok else connectors.clip(out, 800)}
     if item_id == "python":
         return {"ok": bool(config.find_python()), "message": config.find_python() or "Python غير موجود"}
     if item_id.startswith("py:"):
