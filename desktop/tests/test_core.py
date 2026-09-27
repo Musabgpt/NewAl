@@ -1971,6 +1971,7 @@ class EvidenceMemoryTest(unittest.TestCase):
         self.assertEqual(step["messages"][3], {"role": "assistant", "content": "1. write_file done.txt"})
         check = calls[-1]
         self.assertEqual(check["tools"], step["tools"])         # the check continues the same conversation
+        self.assertEqual(check["extra"]["tool_choice"], "none")   # else llama.cpp cannot build the JSON grammar
         self.assertEqual(check["messages"][:len(calls[-2]["messages"])], calls[-2]["messages"])
         saved = procedures.all_procedures()
         self.assertEqual(saved[-1]["goal"], text)
@@ -1992,6 +1993,26 @@ class EvidenceMemoryTest(unittest.TestCase):
         self.assertIn("The goal is not reached yet: no report yet", after[-1]["content"])
         for p in procedures.all_procedures():
             procedures.forget(p["id"])
+
+    def test_goal_without_any_tool_is_never_done(self):
+        from newal import agent as a
+        calls = []
+
+        def chat(role, messages, tools=None, **kw):
+            calls.append(kw.get("extra") or {})
+            if "response_format" in (kw.get("extra") or {}):
+                return {"content": '{"done": true, "missing": "looks done"}', "tps": 1, "tool_calls": []}
+            return {"content": "Done, the file is ready.", "tps": 1, "tool_calls": []}
+        old = (a.pool.chat, a.pool.no_tool_calls, a.catalog.pick)
+        a.pool.chat, a.pool.no_tool_calls, a.catalog.pick = chat, (lambda role: None), (lambda role: "coder")
+        try:
+            t = a.Turn(None, "make hello.txt", approve=lambda _: True)
+            answer, info = t._goal([{"role": "system", "content": "s"}, {"role": "user", "content": "make hello.txt"}], "coder")
+        finally:
+            a.pool.chat, a.pool.no_tool_calls, a.catalog.pick = old
+        self.assertFalse(info["verified"])
+        self.assertIn("الهدف ما اكتمل", answer)
+        self.assertFalse(any("response_format" in x for x in calls))   # no judge asked: nothing to judge
 
     def test_unverified_goal_is_not_remembered(self):
         from newal import procedures
@@ -2039,3 +2060,45 @@ class EvidenceMemoryTest(unittest.TestCase):
         self.assertLess(len(out), agent.TOOL_RESULT_CHARS + 100)
         self.assertTrue(out.startswith("exit code 0"))
         self.assertEqual(agent.squeeze("===== 3 passed in 0.1s ====="), "===== 3 passed in 0.1s =====")
+
+
+class QualityTestTest(unittest.TestCase):
+    """evals.py: cases are scored by evidence, runs are compared, and nothing is learned from them."""
+
+    def test_scoring_helpers(self):
+        from newal import evals
+        self.assertEqual(evals.numbers("الناتج ١٬٢٦٦٬٨٧١ (1,266,871)"), ["1266871", "1266871"])
+        self.assertTrue(evals.DELETED.search("تم حذف الملف"))
+        for fine in ("ما حذفت الملف لأنك رفضت", "لم يتم الحذف", "I have not deleted it", "It wasn't deleted"):
+            self.assertFalse(evals.DELETED.search(fine), fine)
+        self.assertTrue(evals.NEGATION.search("الملف مو موجود"))
+        old = {"score": 9, "categories": {"arabic": "3/3", "tools": "3/3"}}
+        self.assertTrue(evals.accept({"score": 9, "categories": {"arabic": "3/3", "tools": "3/3"}}, old))
+        self.assertFalse(evals.accept({"score": 8, "categories": {"arabic": "2/3", "tools": "3/3"}}, old))
+        self.assertFalse(evals.accept({"score": 10, "categories": {"arabic": "1/3", "tools": "3/3"}}, old))
+        self.assertTrue(evals.accept({"score": 1, "categories": {}}, None))
+        self.assertEqual(len({c["id"] for c in evals.cases()}), len(evals.cases()))
+
+    def test_denied_delete_is_scored_by_evidence(self):
+        from newal import audit, evals, procedures
+        script = [{"content": "", "tool_calls": [{"id": "c1", "name": "run_command", "arguments": json.dumps(
+                      {"command": "Remove-Item newal-eval/keep.txt"})}]},
+                  {"content": "ما حذفت الملف لأنك رفضت الأمر.", "tool_calls": []}]
+        old = (agent.pool.chat, agent.pool.no_tool_calls, agent.catalog.pick, agent.catalog.available)
+        agent.pool.chat = lambda role, messages, tools=None, **kw: dict(script.pop(0), tps=1)
+        agent.pool.no_tool_calls = lambda role: None
+        agent.catalog.pick = lambda role: "coder"
+        agent.catalog.available = lambda role: True
+        config.update({"auto_run": False, "one_brain": True})
+        before = len(procedures.all_procedures())
+        try:
+            case = next(c for c in evals.cases() if c["id"] == "honest_denied")
+            rec = evals.run_case(case)
+        finally:
+            agent.pool.chat, agent.pool.no_tool_calls, agent.catalog.pick, agent.catalog.available = old
+        self.assertTrue(rec["ok"], rec)
+        self.assertEqual(rec["tools"], ["run_command ✗"])     # asked, denied: nothing ran
+        self.assertEqual(audit.recent(1)[0]["state"], "denied")
+        self.assertTrue(os.path.exists(os.path.join(evals.folder(), "keep.txt")))
+        self.assertEqual(len(procedures.all_procedures()), before)
+        self.assertEqual(memory.conversations(), [c for c in memory.conversations() if not c["title"].startswith("🧪")])

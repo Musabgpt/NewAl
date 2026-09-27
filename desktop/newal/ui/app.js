@@ -1365,6 +1365,12 @@ const panels = {
       <div class="row"><button class="primary" id="diagFull">🩺 فحص شامل (5–15 دقيقة)</button><button id="diagQuick">⚡ فحص سريع (ثواني)</button>
         <button id="diagCopy" hidden>📋 نسخ التقرير</button><button id="diagOpen" hidden>📂 فتح الملف</button></div>
       <div id="diagSteps"></div>
+      <h3>🧪 اختبار الجودة</h3>
+      <p class="hint">12 مهمة حقيقية (عربي، لهجة، حساب، ملفات وأدوات، كود، صدق) بتنصحح لحالها بالدليل: الملف موجود بالمحتوى الصح،
+        الرقم صح، وما بيقول «عملت» إذا ما عمل. كل تجربة بتنحفظ مع اسم ملف العقل، فبتقارن ملفين (أسرع/أدق) على جهازك نفسه.
+        ما بيروح شي منها عالتدريب أو الذاكرة.</p>
+      <div class="row"><button class="primary" id="evalRun">🧪 ابدأ (10–25 دقيقة)</button><span id="evalOut" class="hint"></span></div>
+      <div id="evalCases"></div><div id="evalHistory"></div>
       <h3>⬆ التحديث</h3>
       <div class="field"><label><input type="checkbox" id="check_updates" ${s.check_updates ? "checked" : ""}> شوف إذا في نسخة جديدة كل كم ساعة</label>
         <span class="hint" id="updInfo">النسخة: ${state.update.dev ? "نسخة تطوير" : state.update.current}</span>
@@ -1409,6 +1415,24 @@ const panels = {
       body.querySelector("#diagOpen").onclick = () => api("/api/open", {path: d.file});
       if (d.running) setTimeout(async () => { if (!$("#panel").hidden && body.dataset.panel === "settings") showDiag(await api("/api/diagnose")); }, 2000);
     };
+    const showEval = r => {
+      const cases = body.querySelector("#evalCases");
+      if (!cases) return;
+      const icon = {ok: "✅", fail: "❌", running: "⏳", waiting: "▫"};
+      cases.innerHTML = r.cases.length ? `<table class="evals">${r.cases.map(c => `<tr><td>${icon[c.state]}</td><td>${escapeHtml(c.id)}</td>
+        <td>${escapeHtml(c.cat)}</td><td>${c.seconds ? c.seconds + " ث" : ""}</td>
+        <td dir="auto" title="${escapeHtml(c.answer || "")}">${escapeHtml(c.why || (c.answer || "").slice(0, 80))}</td></tr>`).join("")}</table>` : "";
+      body.querySelector("#evalHistory").innerHTML = r.history.length ? `<table class="evals"><tr><th>الوقت</th><th>ملف العقل</th>
+        <th>النتيجة</th><th>الفئات</th><th>الوقت الكلي</th></tr>${r.history.slice().reverse().map(h => `<tr><td>${escapeHtml(h.time)}</td>
+        <td dir="ltr">${escapeHtml(h.file)}</td><td>${h.score}/${h.total}</td><td dir="ltr">${escapeHtml(Object.entries(h.categories).map(([k, v]) => k + " " + v).join(" · "))}</td>
+        <td>${Math.round(h.seconds / 60)} د</td></tr>`).join("")}</table>` : "";
+      body.querySelector("#evalRun").disabled = r.running;
+      body.querySelector("#evalOut").textContent = r.running ? "عم يختبر… فيك تسكّر هالنافذة" :
+        r.result ? `النتيجة: ${r.result.score}/${r.result.total}` : "";
+      if (r.running) setTimeout(async () => { if (!$("#panel").hidden && body.dataset.panel === "settings") showEval(await api("/api/evals")); }, 3000);
+    };
+    body.querySelector("#evalRun").onclick = async () => showEval(await api("/api/evals", {start: true}));
+    api("/api/evals").then(showEval);
     body.querySelector("#diagFull").onclick = async () => showDiag(await api("/api/diagnose", {full: true}));
     body.querySelector("#diagQuick").onclick = async () => showDiag(await api("/api/diagnose", {full: false}));
     api("/api/diagnose").then(showDiag);

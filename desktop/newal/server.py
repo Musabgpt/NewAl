@@ -14,7 +14,7 @@ import urllib.request
 import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-from . import addons, agent, audit, browser, catalog, config, connectors, diagnose, kvcache, lessons, memory, phone, procedures, router, sandbox, schedules, school, skills, speed, tasks, training, updater, workspace
+from . import addons, agent, audit, browser, catalog, config, connectors, diagnose, evals, kvcache, lessons, memory, phone, procedures, router, sandbox, schedules, school, skills, speed, tasks, training, updater, workspace
 from .engine import Cancelled, pool
 
 UI_DIR = os.path.join(config.BUNDLE, "ui")
@@ -358,6 +358,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(tasks.listing())
         if p == "/api/diagnose":
             return self._json(diagnose.status())
+        if p == "/api/evals":
+            return self._json(evals.status())
         if p == "/api/speed-report":
             return self._json(speed_info())
         if p == "/api/app-update":
@@ -505,6 +507,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json({"ok": False, "message": str(e)})
         if p == "/api/diagnose":
             return self._json(diagnose.start(full=bool(body.get("full", True))))
+        if p == "/api/evals":
+            return self._json(evals.start(only=body.get("only") or None))
         if p == "/api/app-update":
             if body.get("action") == "install":
                 return self._json(updater.install())

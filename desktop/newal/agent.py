@@ -179,6 +179,7 @@ class Turn:
         self.sent = None               # this turn's user message as the model got it (kept for the next turns)
         self.images = []               # pictures made during the turn (🎨 generate_image)
         self._procedures = []          # goal mode: how a similar verified goal was reached before (procedures.py)
+        self.learn = True              # keep procedures and lessons from this turn (off for the quality test)
 
     # -------------------------------------------------------------- entry
 
@@ -547,7 +548,12 @@ class Turn:
             claim = unsupported_claim(answer, self.tools_used)
             missing_files = [p for p in claimed_paths(answer, absolute_only=True)
                              if "..." not in p and "…" not in p and not os.path.exists(p)]
-            if claim or missing_files:
+            if not any(not procedures.failed(t) for t in self.tools_used):
+                # No tool has done anything yet: there is no evidence to check, whatever the answer says (a model that
+                # skipped the work was accepted by the judge in a real run).
+                verdict = {"done": False, "missing": "No tool has done anything on the computer yet. Do the goal with "
+                                                     "the tools, then check the result with them."}
+            elif claim or missing_files:
                 verdict = {"done": False, "missing": ("These files do not exist: %s. " % ", ".join(missing_files)
                                                       if missing_files else "") +
                                                      ("No tool did this: «%s»." % claim if claim else "")}
@@ -883,6 +889,8 @@ class Turn:
 
     def _remember_procedure(self, answer):
         """A goal verified by evidence leaves its working steps for the next similar goal (procedures.py)."""
+        if not self.learn:
+            return
         try:
             if procedures.add(self.text, self.tools_used, answer):
                 self.emit({"type": "status", "text": "📘 حفظت طريقة الإنجاز للمرات الجاية"})
@@ -910,10 +918,12 @@ class Turn:
             try:
                 ask = messages + [{"role": "assistant", "content": answer}, {"role": "user", "content": (
                     GOAL_CHECK_IN_PLACE % (goal[:2000], ("[filesystem check by NewAl]\n" + files) if files else ""))}]
+                # tool_choice none: the tool list is still in the prompt (the same prompt, so it stays cached), and
+                # llama.cpp can then build the JSON grammar (with tools allowed it fails: "failed to parse grammar").
                 r = pool.chat(role, ask, tools=defs, cancel=self.cancel, max_tokens=200, temperature=0,
-                              extra=dict(pool.no_tool_calls(role) or {},
-                                         chat_template_kwargs={"enable_thinking": False}, response_format={"type": "json_schema",
-                                                          "json_schema": {"name": "answer", "schema": schema}}))
+                              extra={"tool_choice": "none", "chat_template_kwargs": {"enable_thinking": False},
+                                     "response_format": {"type": "json_schema",
+                                                         "json_schema": {"name": "answer", "schema": schema}}})
                 verdict = json.loads(r["content"][r["content"].index("{"):r["content"].rindex("}") + 1])
                 if isinstance(verdict.get("done"), bool):
                     verdict["_exchange"] = [ask[-1], {"role": "assistant", "content": r["content"]}]
@@ -1213,6 +1223,8 @@ class Turn:
 
     def _learn(self, request, history, final_code, solved, last_output):
         """Writes down what this task taught: the rule that made failing code work, or the approach to avoid."""
+        if not self.learn:
+            return
         task = re.sub(r"\s+", " ", self.text or request)[:300]
         if not solved:
             lessons.add("avoid", "For a task like «%s», this failed %d times: %s. Try a different approach or "
@@ -1555,6 +1567,7 @@ def needs_web(text):
 # Words that ask for something to be done (not only said): with these a chat request keeps its tools. Calculations
 # too: a number is worked out by running it, not guessed.
 _ACTION = re.compile(r"ثب[ّ]?ت|نز[ّ]?ل|حم[ّ]?ل|احذف|امسح|انقل|انسخ|سم[ّ]?ي|غي[ّ]?ر اسم|جدول|ذك[ّ]?رني|نب[ّ]?هني|سك[ّ]?ر|"
+                     r"كمبيوتر|حاسوب|لابتوب|الجهاز|هالجهاز|hostname|\bmy (?:computer|pc|laptop)\b|"
                      r"ارفع|ابعث|ارسل|أرسل|احفظ|سج[ّ]?ل|اضبط|فع[ّ]?ل|وق[ّ]?ف|احسب|حسب|بيساوي|يساوي|حل المعادلة|"
                      r"\d\s*[-+*/×÷^%]\s*\d|"
                      r"\b(install|download|delete|remove|move|copy|rename|schedule|remind|save|upload|send|set|"

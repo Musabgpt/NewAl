@@ -218,3 +218,5 @@ button.danger { color: #e66; }
 .audit { max-height: 320px; overflow: auto; }
 .audit .row { margin: 2px 0; font-size: 12.5px; flex-wrap: nowrap; }
 .audit .row [dir=ltr] { font-family: Consolas, "Cascadia Mono", monospace; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+table.evals { width: 100%; border-collapse: collapse; font-size: 13px; margin: 6px 0; }
+table.evals td, table.evals th { padding: 3px 6px; border-bottom: 1px solid var(--line, #333); text-align: start; }
