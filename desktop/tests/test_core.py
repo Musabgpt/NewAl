@@ -2289,3 +2289,27 @@ class LaptopFindingsTest(unittest.TestCase):
         finally:
             connectors.run = old
         self.assertEqual([a[-1] for a in ran], ["pandas", "opencv-python"])
+
+    def test_a_function_is_not_a_project(self):
+        # The «مشروع Python مرتب» skill (package, argparse main.py, tests/, requirements, README) came with every request
+        # that said «بايثون»: for «اكتب دالة بايثون is_palindrome…» the brain wrote a whole package (1733 tokens, 316 s on
+        # the laptop) whose files NewAl could not run, three rounds in a row.
+        from newal import skills
+        names = lambda text: [s["id"] for s in skills.relevant(text)]
+        self.assertNotIn("python-project", names("اكتب دالة بايثون is_palindrome(s) بتتجاهل المسافات، وجربها بـ asserts."))
+        self.assertNotIn("python-project", names("write a python script that renames my photos"))
+        self.assertIn("python-project", names("اعملي مشروع بايثون لإدارة المكتبة"))
+        self.assertIn("python-project", names("a small python cli with argparse"))
+
+    def test_uncalled_test_functions_really_run(self):
+        import importlib.util
+        if not importlib.util.find_spec("pytest"):
+            self.skipTest("pytest not installed")
+        good = "def sq(x):\n    return x * x\n\n\ndef test_sq():\n    assert sq(3) == 9\n"
+        bad = good.replace("x * x", "x + x")
+        self.assertTrue(agent.pytest_style(good))
+        self.assertFalse(agent.pytest_style(good + "\ntest_sq()\n"))
+        ok, out, _ = agent.run_code("python", good)
+        self.assertTrue(ok, out)
+        ok, out, _ = agent.run_code("python", bad)
+        self.assertFalse(ok, out)          # run as a plain program it «passed»: the assert in test_sq never ran

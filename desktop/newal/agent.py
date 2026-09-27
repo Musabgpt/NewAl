@@ -1741,6 +1741,14 @@ def run_page(path):
 
 
 _last_run = threading.local()        # the folder the last run_code of this thread worked in
+# Checks written as pytest functions that nothing calls: run as a plain program they never ran, and their asserts still
+# counted as the program's self-test. Such a program runs under pytest.
+_TEST_FUNCS = re.compile(r"^def test_\w*\s*\(", re.M)
+_CALLS_TESTS = re.compile(r"pytest\.main|unittest\.main|^\s*test_\w*\s*\(", re.M)
+
+
+def pytest_style(code):
+    return bool(_TEST_FUNCS.search(code)) and not _CALLS_TESTS.search(code)
 
 
 def run_code(runner, code, timeout=60):
@@ -1759,9 +1767,11 @@ def run_code(runner, code, timeout=60):
     with open(path, "w", encoding="utf-8-sig" if runner == "powershell" else "utf-8") as f:
         f.write(code)
     if runner == "python":
-        import shutil
         exe = config.find_python()
-        args = [exe, "-X", "utf8", path] if exe else None
+        if exe and pytest_style(code):
+            args = [exe, "-X", "utf8", "-m", "pytest", "-q", "-s", "-p", "no:cacheprovider", path]
+        else:
+            args = [exe, "-X", "utf8", path] if exe else None
     elif runner == "node":
         import shutil
         exe = shutil.which("node")
