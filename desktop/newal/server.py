@@ -14,7 +14,7 @@ import urllib.request
 import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-from . import addons, agent, browser, catalog, config, connectors, diagnose, lessons, memory, phone, router, sandbox, school, skills, speed, tasks, training, updater, workspace
+from . import addons, agent, browser, catalog, config, connectors, diagnose, kvcache, lessons, memory, phone, router, sandbox, schedules, school, skills, speed, tasks, training, updater, workspace
 from .engine import Cancelled, pool
 
 UI_DIR = os.path.join(config.BUNDLE, "ui")
@@ -50,7 +50,7 @@ def _title(text):
 
 
 def run_chat(job, body):
-    conv = body.get("conv") or memory.new_conversation(temp=bool(body.get("temp")))
+    conv = body.get("conv") or memory.new_conversation(temp=bool(body.get("temp")), project=body.get("space") or 0)
     text = (body.get("text") or "").strip()
     attachments = [p for p in body.get("attachments", []) if os.path.exists(p)]
     try:
@@ -73,6 +73,11 @@ def run_chat(job, body):
             memory.update_message(uid, meta=dict(umeta, sent=turn.sent))
         mid = memory.add_message(conv, "assistant", answer, meta)
         job.emit({"type": "done", "conv": conv, "message_id": mid, "meta": meta, "content": answer})
+        if not meta.get("temp"):
+            agent.later(memory.index_chat, conv)        # this exchange joins the memory of earlier chats (when idle)
+        # While the user reads and types: the brain reads the conversation ahead and it is saved to disk.
+        threading.Thread(target=_safe, args=(agent.read_ahead, conv, meta.get("role"), not meta.get("temp")),
+                         daemon=True).start()
     except Cancelled:
         job.emit({"type": "cancelled", "conv": conv})
     except Exception as e:  # noqa: BLE001 - shown in the chat
@@ -103,10 +108,21 @@ def state():
         "update": updater.status(),
         "browser": bool(browser.find()),
         "brain": speed.state(),
+        "notices": schedules.notices(),
+        "voice": _ready("voice"),
+        "image": _ready("images"),
         "home": config.HOME,
         "workspace": config.WORKSPACE,
         "api": "http://127.0.0.1:%d/v1" % config.get("api_port"),
     }
+
+
+def _ready(name):
+    try:
+        import importlib
+        return importlib.import_module("." + name, __package__).ready()
+    except Exception:  # noqa: BLE001
+        return False
 
 
 def speed_info():
@@ -317,6 +333,15 @@ class Handler(BaseHTTPRequestHandler):
             return self._stream(qs.get("job", [""])[0])
         if p == "/api/memories":
             return self._json(memory.memories())
+        if p == "/api/projects":
+            return self._json(memory.projects())
+        if p == "/api/schedules":
+            return self._json(schedules.listing())
+        m = re.fullmatch(r"/api/projects/(\d+)", p)
+        if m:
+            pid = int(m.group(1))
+            return self._json({"project": memory.project(pid), "files": memory.project_files(pid),
+                               "chats": memory.project_chats(pid)})
         if p == "/api/addons":
             return self._json(addons.status())
         if p == "/api/addons/setup_all":
@@ -358,6 +383,19 @@ class Handler(BaseHTTPRequestHandler):
             return self._openai()
         if p == "/api/upload":
             return self._upload()
+        if p == "/api/voice-warm":
+            from . import voice
+            voice.warm()
+            return self._json({"ok": True})
+        if p == "/api/transcribe":
+            from . import voice
+            try:
+                return self._json(voice.transcribe(self._body()))
+            except Exception as e:  # noqa: BLE001 - shown next to the microphone
+                return self._json({"error": str(e)})
+        m = re.fullmatch(r"/api/projects/(\d+)/upload", p)
+        if m:
+            return self._project_upload(int(m.group(1)))
         body = self._jbody()
         if p == "/api/chat":
             job = Job()
@@ -377,17 +415,46 @@ class Handler(BaseHTTPRequestHandler):
                     config.update({"auto_run": True})
                 job.pending[body["id"]][0].set()
             return self._json({"ok": True})
+        if p == "/api/schedules":
+            try:
+                if body.get("delete"):
+                    schedules.delete(body["delete"])
+                elif body.get("run"):
+                    schedules.run(body["run"], wait=False)
+                elif body.get("seen"):
+                    schedules.notices(clear=True)
+                else:
+                    return self._json(schedules.save(body))
+            except (ValueError, KeyError) as e:
+                return self._json({"error": str(e)})
+            return self._json({"ok": True})
+        if p == "/api/projects/save":
+            pid = memory.save_project(int(body.get("id") or 0), (body.get("name") or "مشروع").strip(),
+                                      body.get("instructions") or "")
+            return self._json({"id": pid})
+        m = re.fullmatch(r"/api/projects/(\d+)/(delete|remove-file)", p)
+        if m:
+            if m.group(2) == "delete":
+                memory.delete_project(int(m.group(1)))
+            else:
+                memory.remove_project_file(int(m.group(1)), body.get("name", ""))
+            return self._json({"ok": True})
+        m = re.fullmatch(r"/api/conversations/(\d+)/move", p)
+        if m:
+            memory.move_to_project(int(m.group(1)), body.get("project") or 0)
+            return self._json({"ok": True})
         if p == "/api/conversations":
             if body.get("leave_temp"):
                 memory.purge_temp()                  # the user left a temporary chat
                 return self._json({"ok": True})
-            return self._json({"id": memory.new_conversation(temp=bool(body.get("temp")))})
+            return self._json({"id": memory.new_conversation(temp=bool(body.get("temp")), project=body.get("space") or 0)})
         m = re.fullmatch(r"/api/conversations/(\d+)/(rename|delete)", p)
         if m:
             if m.group(2) == "rename":
                 memory.rename(int(m.group(1)), body.get("title", ""))
             else:
                 memory.delete_conversation(int(m.group(1)))
+                kvcache.forget(int(m.group(1)))
             return self._json({"ok": True})
         if p == "/api/feedback":
             training.feedback(body.get("training_id", ""), body.get("good"), body.get("note", ""))
@@ -591,6 +658,20 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Cache-Control", "no-cache")
         self.end_headers()
         self.wfile.write(data)
+
+    def _project_upload(self, pid):
+        if not memory.project(pid):
+            return self._json({"error": "no project"}, 404)
+        name = urllib.parse.unquote(self.headers.get("X-Filename") or "file")
+        name = re.sub(r'[\\/:*?"<>|]', "_", os.path.basename(name)) or "file"
+        folder = os.path.join(memory.PROJECT_FILES, str(pid))
+        os.makedirs(folder, exist_ok=True)
+        path = os.path.join(folder, name)
+        with open(path, "wb") as f:
+            f.write(self._body())
+        # Indexed so every question in the project finds the pieces that matter.
+        threading.Thread(target=lambda: _safe(memory.index_file, path, "project_file"), daemon=True).start()
+        self._json({"path": path, "name": name, "size": os.path.getsize(path)})
 
     def _upload(self):
         name = urllib.parse.unquote(self.headers.get("X-Filename") or "file")

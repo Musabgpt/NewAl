@@ -5,7 +5,7 @@ const api = (path, body) => fetch(path, body === undefined ? {} : {method: "POST
   .then(r => r.json());
 
 let conv = null, job = null, attachments = [], state = null;
-const ROUTE_LABEL = {research: "🔬 بحث معمّق", code: "💻 برمجة", tools: "🛠 أدوات", analyze: "🧠 تحليل", chat: "💬 محادثة", goal: "🎯 هدف", project: "🧑‍💻 مشروع"};
+const ROUTE_LABEL = {image: "🎨 صورة", research: "🔬 بحث معمّق", code: "💻 برمجة", tools: "🛠 أدوات", analyze: "🧠 تحليل", chat: "💬 محادثة", goal: "🎯 هدف", project: "🧑‍💻 مشروع"};
 const TOOL_LABEL = {
   web_search: "🔎 بحث بالنت", read_url: "🌐 قراءة صفحة", weather: "⛅ الطقس", currency: "💱 عملات",
   current_time: "🕒 الوقت", library_docs: "📚 توثيق المكتبة", list_files: "📁 ملفات المشروع", search: "🔎 بحث بالكود",
@@ -24,6 +24,7 @@ const TOOL_LABEL = {
 
 // ------------------------------------------------------------------ conversations
 
+let space = 0;                 // 📁 the project new chats go into (like Claude Projects), 0 = none
 let tempMode = false;          // 🕶 temporary chat: not listed, not used for training, deleted when left
 
 async function loadConvs() {
@@ -35,14 +36,25 @@ async function loadConvs() {
   for (const c of list) {
     const d = document.createElement("div");
     d.className = "conv" + (c.id === conv ? " active" : "");
-    d.innerHTML = '<span dir="auto"></span><button class="x" title="إعادة تسمية">✎</button><button class="x" title="حذف">🗑</button>';
-    d.querySelector("span").textContent = c.title;
+    d.innerHTML = '<span dir="auto"></span><button class="x" title="نقل لمشروع">📁</button><button class="x" title="إعادة تسمية">✎</button><button class="x" title="حذف">🗑</button>';
+    d.querySelector("span").textContent = (c.project ? "📁 " : "") + c.title;
     if (c.snippet) {
       const sn = document.createElement("small"); sn.className = "snippet"; sn.dir = "auto"; sn.textContent = c.snippet;
       d.querySelector("span").appendChild(document.createElement("br")); d.querySelector("span").appendChild(sn);
     }
     d.onclick = () => openConv(c.id);
-    const [ren, del] = d.querySelectorAll(".x");
+    const [move, ren, del] = d.querySelectorAll(".x");
+    move.onclick = async e => {
+      e.stopPropagation();
+      const list = await api("/api/projects");
+      if (!list.length) { alert("ما في مشاريع بعد: اعمل واحد من ＋ جنب «📁 المشاريع»."); return; }
+      const pick = prompt("رقم المشروع (0 = بدون مشروع):\n" + list.map((p, i) => `${i + 1}. ${p.name}`).join("\n"), "1");
+      if (pick === null) return;
+      const n = parseInt(pick, 10);
+      await api(`/api/conversations/${c.id}/move`, {project: n > 0 && list[n - 1] ? list[n - 1].id : 0});
+      if (conv === c.id) setSpace(n > 0 && list[n - 1] ? list[n - 1] : null);
+      loadConvs();
+    };
     ren.onclick = async e => {
       e.stopPropagation();
       const t = prompt("اسم المحادثة", c.title);
@@ -63,8 +75,32 @@ function leaveTemp() {
   if (conv && tempMode) api("/api/conversations", {leave_temp: true});
 }
 
-function newChat(temp) {
+// The project (📁) the open chat belongs to, shown in the header; new chats go into it until it is left.
+function setSpace(p) {
+  space = p ? p.id : 0;
+  const chip = $("#spaceChip");
+  chip.hidden = !p;
+  if (p) { chip.textContent = "📁 " + p.name + " ✕"; chip.title = "ضمن المشروع «" + p.name + "». اضغط للخروج منه"; }
+}
+
+async function loadSpaces() {
+  const list = await api("/api/projects");
+  const box = $("#spaces");
+  box.innerHTML = "";
+  for (const p of list) {
+    const d = document.createElement("div");
+    d.className = "conv space" + (p.id === space ? " active" : "");
+    d.innerHTML = '<span dir="auto"></span><small class="hint"></small>';
+    d.querySelector("span").textContent = "📁 " + p.name;
+    d.querySelector("small").textContent = `${p.chats} محادثة · ${p.files} ملف`;
+    d.onclick = () => showPanel("space", p.id);
+    box.appendChild(d);
+  }
+}
+
+function newChat(temp, keepSpace) {
   leaveTemp();
+  if (!keepSpace) setSpace(null);
   tempMode = temp === true;
   conv = null;
   $("#messages").innerHTML = "";
@@ -121,17 +157,40 @@ async function openConv(id) {
   const msgs = await api(`/api/conversations/${id}/messages`);
   $("#messages").innerHTML = "";
   $("#welcome").hidden = msgs.length > 0;
-  for (const m of msgs) {
-    if (m.role === "user") addUser(m.content, m.meta.attachments || [], m.id);
-    else if (m.role === "assistant") {
-      const b = addBot();
-      b.finish(m.content, m.meta, m.id);
-    }
-  }
+  // A long conversation opens on its last messages at once; the older ones render when asked for.
+  showMessages(msgs.slice(-HISTORY_PAGE));
+  if (msgs.length > HISTORY_PAGE) olderButton(msgs.slice(0, -HISTORY_PAGE));
   const c = (await api("/api/conversations")).find(c => c.id === id);
   $("#title").textContent = c ? c.title : "NewAl";
+  setSpace(c && c.project ? (await api("/api/projects")).find(p => p.id === c.project) : null);
   loadConvs();
   scrollDown(true);
+}
+
+const HISTORY_PAGE = 30;
+
+function showMessages(list) {
+  for (const m of list) {
+    if (m.role === "user") addUser(m.content, m.meta.attachments || [], m.id);
+    else if (m.role === "assistant") addBot().finish(m.content, m.meta, m.id);
+  }
+}
+
+function olderButton(older) {
+  const box = $("#messages");
+  const b = document.createElement("button");
+  b.className = "older";
+  b.textContent = `⬆ عرض الرسائل الأقدم (${older.length})`;
+  b.onclick = () => {
+    const chunk = older.splice(-HISTORY_PAGE), chat = $("#chat");
+    const height = chat.scrollHeight, first = b.nextSibling, before = box.children.length;
+    showMessages(chunk);                                  // appended at the end, then moved above the others
+    const added = [...box.children].slice(before);
+    for (const el of added) box.insertBefore(el, first);
+    chat.scrollTop += chat.scrollHeight - height;         // the view stays on what the user was reading
+    if (older.length) b.textContent = `⬆ عرض الرسائل الأقدم (${older.length})`; else b.remove();
+  };
+  box.prepend(b);
 }
 
 // ------------------------------------------------------------------ messages
@@ -258,6 +317,22 @@ function addBot() {
     },
     fix(e) { extras.appendChild(box("", `🔧 طلب الإصلاح ${e.attempt}`, e.prompt)); },
     image(e) {
+      if ((e.caption || "").startsWith("🎨")) {
+        // A picture NewAl drew: shown big in the answer, with download and open.
+        let g = d.querySelector(".gen-images");
+        if (!g) { g = document.createElement("div"); g.className = "gen-images"; d.insertBefore(g, d.querySelector(".files-out")); }
+        if (g.querySelector(`[data-path="${CSS.escape(e.path)}"]`)) return;
+        const fig = document.createElement("figure");
+        fig.dataset.path = e.path;
+        const url = "/api/file?path=" + encodeURIComponent(e.path);
+        fig.innerHTML = '<img><figcaption><a download>⬇ تنزيل</a> <a href="#" data-open>↗ فتح</a></figcaption>';
+        fig.querySelector("img").src = url;
+        fig.querySelector("img").onclick = () => window.open(url, "_blank");
+        fig.querySelector("a[download]").href = url;
+        fig.querySelector("[data-open]").onclick = ev => { ev.preventDefault(); api("/api/open", {path: e.path}); };
+        g.appendChild(fig); scrollDown();
+        return;
+      }
       // What the model looked at (a page it built): shown small, full size on click.
       const b = box("ok", e.caption || "📸", "");
       const img = document.createElement("img");
@@ -296,7 +371,7 @@ function addBot() {
       paint();
       enhance(content);
       if (live) canvasFollow(text);
-      if (!live) for (const p of (meta || {}).images || []) this.image({path: p, caption: "📊 " + p.split(/[\\/]/).pop()});
+      if (!live) for (const p of (meta || {}).images || []) this.image({path: p, caption: (/[\\/]images[\\/][^\\/]+$/.test(p) ? "🎨 " : "📊 ") + p.split(/[\\/]/).pop()});
       meta = meta || {};
       if (!route.textContent && meta.route) route.textContent = `${ROUTE_LABEL[meta.route] || meta.route} · ${meta.model || ""}`;
       if (draft) draft.querySelector("summary").textContent = "⚙ مسودات الكود";
@@ -645,6 +720,62 @@ function wireCanvas() {
   $("#canvasAsk").onkeydown = e => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); canvasAsk(); } };
 }
 
+// ------------------------------------------------------------------ 🎤 voice input
+
+// Records the microphone as 16 kHz mono 16-bit WAV (what Whisper reads) and puts the text in the message box.
+const mic = {stream: null, ctx: null, node: null, chunks: [], busy: false};
+
+async function toggleMic() {
+  const btn = $("#mic");
+  if (mic.busy) return;
+  if (mic.stream) return stopMic();
+  if (state && !state.voice) {
+    if (confirm("الإدخال الصوتي بحاجة نموذج «🎤 الصوت» (570 MB). تفتح «النماذج» لتنزّله؟")) showPanel("models");
+    return;
+  }
+  api("/api/voice-warm", {});            // the model loads while the user speaks
+  try {
+    mic.stream = await navigator.mediaDevices.getUserMedia({audio: {channelCount: 1, echoCancellation: true, noiseSuppression: true}});
+  } catch (e) { alert("ما قدرت افتح الميكروفون: " + e.message); return; }
+  mic.ctx = new (window.AudioContext || window.webkitAudioContext)({sampleRate: 16000});
+  const src = mic.ctx.createMediaStreamSource(mic.stream);
+  mic.node = mic.ctx.createScriptProcessor(4096, 1, 1);
+  mic.chunks = [];
+  mic.node.onaudioprocess = e => mic.chunks.push(new Float32Array(e.inputBuffer.getChannelData(0)));
+  src.connect(mic.node); mic.node.connect(mic.ctx.destination);
+  btn.classList.add("rec"); btn.textContent = "⏹"; btn.title = "إيقاف وتحويل لنص";
+}
+
+async function stopMic() {
+  const btn = $("#mic");
+  const rate = mic.ctx.sampleRate;
+  mic.node.disconnect(); mic.stream.getTracks().forEach(t => t.stop()); mic.ctx.close();
+  mic.stream = null;
+  btn.classList.remove("rec"); btn.textContent = "⏳"; mic.busy = true;
+  try {
+    const r = await (await fetch("/api/transcribe", {method: "POST", headers: {"X-NewAl": "1", "Content-Type": "audio/wav"},
+                                                    body: wavFile(mic.chunks, rate)})).json();
+    if (r.error) alert(r.error);
+    else if (r.text) {
+      const t = $("#input");
+      t.value = (t.value ? t.value.replace(/\s*$/, " ") : "") + r.text;
+      autosize(); t.focus();
+    }
+  } finally { mic.busy = false; btn.textContent = "🎤"; btn.title = "🎤 احكي بدل ما تكتب"; }
+}
+
+function wavFile(chunks, rate) {
+  const n = chunks.reduce((a, c) => a + c.length, 0);
+  const buf = new ArrayBuffer(44 + n * 2), v = new DataView(buf);
+  const str = (o, s) => [...s].forEach((ch, i) => v.setUint8(o + i, ch.charCodeAt(0)));
+  str(0, "RIFF"); v.setUint32(4, 36 + n * 2, true); str(8, "WAVE"); str(12, "fmt ");
+  v.setUint32(16, 16, true); v.setUint16(20, 1, true); v.setUint16(22, 1, true); v.setUint32(24, rate, true);
+  v.setUint32(28, rate * 2, true); v.setUint16(32, 2, true); v.setUint16(34, 16, true); str(36, "data"); v.setUint32(40, n * 2, true);
+  let o = 44;
+  for (const c of chunks) for (const x of c) { v.setInt16(o, Math.max(-1, Math.min(1, x)) * 0x7fff, true); o += 2; }
+  return new Blob([buf], {type: "audio/wav"});
+}
+
 // ------------------------------------------------------------------ sending
 
 async function send(text, files, editId) {
@@ -665,7 +796,7 @@ async function send(text, files, editId) {
   const mode = document.querySelector("input[name=mode]:checked").value;
   const plan = mode === "project" && $("#planFirst").checked;
   const r = await api("/api/chat", {conv, text, attachments: files, mode, think: $("#think").checked, plan, edit_from: editId || null,
-                                   temp: tempMode});
+                                   temp: tempMode, space: tempMode ? 0 : space});
   job = r.job;
   setBusy(true);
   const es = new EventSource("/api/chat/stream?job=" + job);
@@ -785,7 +916,32 @@ async function refreshState() {
     b.textContent = "🧠 النماذج"; b.onclick = () => showPanel("models");
     n.appendChild(b);
   } else n.hidden = true;
+  showNotices(state.notices || []);
   return state;
+}
+
+// ⏰ A scheduled task ran: a card at the top (and a desktop notification when the browser allows it).
+const shownNotices = new Set();
+function showNotices(list) {
+  let box = $("#toasts");
+  if (!box) { box = document.createElement("div"); box.id = "toasts"; document.body.appendChild(box); }
+  for (const x of list) {
+    const key = x.id + ":" + x.at;
+    if (shownNotices.has(key)) continue;
+    shownNotices.add(key);
+    const t = document.createElement("div");
+    t.className = "toast";
+    t.innerHTML = "<b></b><div dir=\"auto\"></div>";
+    t.querySelector("b").textContent = "⏰ " + x.name;
+    t.querySelector("div").textContent = x.text.replace(/[`*#>]/g, "").slice(0, 180);
+    t.onclick = () => { openConv(x.conv); t.remove(); api("/api/schedules", {seen: true}); };
+    box.appendChild(t);
+    setTimeout(() => t.remove(), 30000);
+    try {
+      if (window.Notification && Notification.permission === "granted" && document.hidden)
+        new Notification("⏰ " + x.name, {body: x.text.slice(0, 180)}).onclick = () => { window.focus(); openConv(x.conv); };
+    } catch (_) {}
+  }
 }
 
 const panels = {
@@ -1359,12 +1515,126 @@ panels.speed = async function (body) {
   if ((b.state === "loading" || b.state === "warming")) setTimeout(() => { if (!$("#panel").hidden && body.dataset.panel === "speed") panels.speed(body); }, 2500);
 };
 
-function showPanel(name) {
+function showPanel(name, arg) {
   const body = $("#panelBody");
   body.dataset.panel = name;
   $("#panel").hidden = false;
-  panels[name](body);
+  panels[name](body, arg);
 }
+
+// ⏰ Scheduled tasks: NewAl answers a request at a time or on a schedule, in the task's own chat.
+const DAYS = ["الإثنين", "الثلاثاء", "الأربعاء", "الخميس", "الجمعة", "السبت", "الأحد"];
+panels.schedules = async function (body) {
+  const list = await api("/api/schedules");
+  const when = x => x.kind === "once" ? "مرة وحدة " + new Date(x.at * 1000).toLocaleString("ar") :
+    x.kind === "daily" ? "كل يوم " + x.time : x.kind === "hourly" ? "كل ساعة" :
+    "كل " + (x.days || []).map(d => DAYS[d]).join("، ") + " " + x.time;
+  body.innerHTML = `<h2>⏰ المهام المجدولة</h2>
+    <div class="about">NewAl بيعمل الطلب بالوقت اللي بتحدده وبيحط الجواب بمحادثة خاصة فيها مع إشعار. مثلاً «كل يوم الساعة 8 لخصلي أخبار الذكاء الاصطناعي»
+      أو «الخميس الساعة 6 ذكرني أتصل بطبيب الأسنان». بتقدر كمان تطلبها منه بالمحادثة مباشرة. بتشتغل طول ما NewAl مفتوح.</div>
+    <div class="card"><h4>مهمة جديدة</h4>
+      <input id="scName" type="text" dir="auto" style="width:100%" placeholder="الاسم (مثلاً: أخبار الصبح)">
+      <textarea id="scPrompt" rows="3" dir="auto" style="width:100%" placeholder="شو بدك ياه يعمل؟ (مثلاً: ابحث عن أهم 5 أخبار بالذكاء الاصطناعي اليوم ولخصها بنقاط)"></textarea>
+      <div class="row"><select id="scKind"><option value="daily">كل يوم</option><option value="weekly">كل أسبوع</option>
+        <option value="once">مرة وحدة</option><option value="hourly">كل ساعة</option></select>
+        <input id="scTime" type="time" value="08:00"><input id="scDate" type="date" hidden>
+        <span id="scDays" hidden>${DAYS.map((d, i) => `<label class="chip"><input type="checkbox" value="${i}">${d}</label>`).join("")}</span></div>
+      <div class="row"><button id="scAdd" class="primary">＋ جدولة</button><button id="scNotify">🔔 اسمح بإشعارات المتصفح</button></div></div>
+    <div id="scList"></div>`;
+  const kind = body.querySelector("#scKind");
+  const sync = () => { body.querySelector("#scDate").hidden = kind.value !== "once"; body.querySelector("#scDays").hidden = kind.value !== "weekly"; };
+  kind.onchange = sync;
+  body.querySelector("#scDate").value = new Date().toISOString().slice(0, 10);
+  body.querySelector("#scNotify").onclick = () => window.Notification && Notification.requestPermission();
+  body.querySelector("#scAdd").onclick = async () => {
+    const item = {name: body.querySelector("#scName").value.trim(), prompt: body.querySelector("#scPrompt").value.trim(),
+                  kind: kind.value, time: body.querySelector("#scTime").value || "08:00"};
+    if (item.kind === "once") item.at = new Date(body.querySelector("#scDate").value + "T" + item.time).getTime() / 1000;
+    if (item.kind === "weekly") item.days = [...body.querySelectorAll("#scDays input:checked")].map(c => +c.value);
+    const r = await api("/api/schedules", item);
+    if (r.error) { alert(r.error); return; }
+    panels.schedules(body);
+  };
+  const box = body.querySelector("#scList");
+  for (const x of list.slice().reverse()) {
+    const c = document.createElement("div");
+    c.className = "card";
+    c.innerHTML = `<h4 dir="auto"></h4><div class="about" dir="auto"></div><div class="hint"></div>
+      <div class="row"><button data-a="run">▶ شغّل هلق</button><button data-a="toggle"></button>${x.conv ? '<button data-a="open">💬 النتائج</button>' : ""}
+      <span style="flex:1"></span><button data-a="del" class="danger">🗑</button></div>`;
+    c.querySelector("h4").textContent = (x.enabled ? "⏰ " : "⏸ ") + x.name;
+    c.querySelector(".about").textContent = x.prompt;
+    c.querySelector(".hint").textContent = when(x) + (x.next_run ? " · الجاية: " + new Date(x.next_run * 1000).toLocaleString("ar") : "") +
+      (x.last_run ? " · آخر مرة: " + new Date(x.last_run * 1000).toLocaleString("ar") + (x.last_status === "error" ? " ⚠" : " ✓") : "");
+    c.querySelector("[data-a=toggle]").textContent = x.enabled ? "⏸ إيقاف" : "▶ تفعيل";
+    c.querySelector("[data-a=run]").onclick = async () => { await api("/api/schedules", {run: x.id}); alert("بلّش. النتيجة بتطلع بمحادثة «⏰ " + x.name + "»."); };
+    c.querySelector("[data-a=toggle]").onclick = async () => { await api("/api/schedules", Object.assign({}, x, {enabled: !x.enabled})); panels.schedules(body); };
+    c.querySelector("[data-a=del]").onclick = async () => { if (confirm("حذف المهمة؟")) { await api("/api/schedules", {delete: x.id}); panels.schedules(body); } };
+    const open = c.querySelector("[data-a=open]");
+    if (open) open.onclick = () => { $("#panel").hidden = true; openConv(x.conv); };
+    box.appendChild(c);
+  }
+};
+
+// 📁 A project, like Claude Projects: instructions and files that go with every chat in it.
+panels.space = async function (body, pid) {
+  const d = pid ? await api("/api/projects/" + pid) : {project: {id: 0, name: "", instructions: ""}, files: [], chats: []};
+  const p = d.project;
+  body.innerHTML = `<h2>📁 ${pid ? "مشروع" : "مشروع جديد"}</h2>
+    <div class="card"><h4>الاسم</h4><input id="spName" type="text" dir="auto" style="width:100%" placeholder="مثلاً: رسالة التخرج، متجري، تعلم الألماني">
+      <h4>التعليمات</h4>
+      <div class="about">بتنطبق على كل محادثة بالمشروع: مين إنت، شو الهدف، شو الأسلوب اللي بدك ياه.</div>
+      <textarea id="spInst" rows="6" dir="auto" style="width:100%" placeholder="مثال: أنا طالب هندسة. جاوب بالعربي الفصيح، وبأمثلة من مشروع التخرج (نظام ري ذكي بـ ESP32)."></textarea>
+      <div class="row"><button id="spSave" class="primary">حفظ</button>${pid ? '<button id="spChat">✎ محادثة جديدة بالمشروع</button><span style="flex:1"></span><button id="spDel" class="danger">🗑 حذف المشروع</button>' : ""}</div></div>
+    ${pid ? `<div class="card"><h4>📎 ملفات المشروع (${d.files.length})</h4>
+      <div class="about">NewAl بيدوّر فيها مع كل سؤال بالمشروع وبياخد المقاطع المفيدة (PDF، Word، Excel، كود، نصوص).</div>
+      <div id="spFiles"></div><div class="row"><button id="spAdd">＋ إضافة ملفات</button><input type="file" id="spInput" multiple hidden></div></div>
+      <div class="card"><h4>💬 محادثات المشروع (${d.chats.length})</h4><div id="spChats"></div></div>` : ""}`;
+  body.querySelector("#spName").value = p.name || "";
+  body.querySelector("#spInst").value = p.instructions || "";
+  body.querySelector("#spSave").onclick = async () => {
+    const name = body.querySelector("#spName").value.trim();
+    if (!name) { body.querySelector("#spName").focus(); return; }
+    const r = await api("/api/projects/save", {id: pid || 0, name, instructions: body.querySelector("#spInst").value});
+    await loadSpaces();
+    if (space === r.id) setSpace({id: r.id, name});
+    panels.space(body, r.id);
+  };
+  if (!pid) return;
+  body.querySelector("#spChat").onclick = () => { $("#panel").hidden = true; newChat(false); setSpace(p); loadSpaces(); };
+  body.querySelector("#spDel").onclick = async () => {
+    if (!confirm("حذف المشروع وملفاته؟ المحادثات بتضل كمحادثات عادية.")) return;
+    await api(`/api/projects/${pid}/delete`, {});
+    if (space === pid) setSpace(null);
+    $("#panel").hidden = true; loadSpaces(); loadConvs();
+  };
+  const files = body.querySelector("#spFiles");
+  for (const f of d.files) {
+    const r = document.createElement("div");
+    r.className = "row";
+    r.innerHTML = '<span dir="ltr" style="flex:1"></span><span class="hint"></span><button>🗑</button>';
+    r.querySelector("span").textContent = "📄 " + f.name;
+    r.querySelector(".hint").textContent = fileSize(f.size);
+    r.querySelector("button").onclick = async () => { await api(`/api/projects/${pid}/remove-file`, {name: f.name}); panels.space(body, pid); };
+    files.appendChild(r);
+  }
+  const input = body.querySelector("#spInput");
+  body.querySelector("#spAdd").onclick = () => input.click();
+  input.onchange = async () => {
+    for (const f of input.files)
+      await fetch(`/api/projects/${pid}/upload`, {method: "POST", headers: {"X-NewAl": "1", "X-Filename": encodeURIComponent(f.name)}, body: f});
+    panels.space(body, pid); loadSpaces();
+  };
+  const chats = body.querySelector("#spChats");
+  for (const c of d.chats) {
+    const r = document.createElement("div");
+    r.className = "conv";
+    r.innerHTML = '<span dir="auto"></span>';
+    r.querySelector("span").textContent = c.title;
+    r.onclick = () => { $("#panel").hidden = true; openConv(c.id); };
+    chats.appendChild(r);
+  }
+};
 
 // ------------------------------------------------------------------ wiring
 
@@ -1402,6 +1672,9 @@ function autosize() {
 document.addEventListener("DOMContentLoaded", () => {
   try { document.documentElement.dataset.theme = localStorage.getItem("theme") || "dark"; } catch (_) {}
   $("#newChat").onclick = () => newChat(false);
+  $("#newSpace").onclick = () => showPanel("space", 0);
+  $("#mic").onclick = toggleMic;
+  $("#spaceChip").onclick = () => newChat(false);          // leave the project: a new ordinary chat
   $("#tempChat").onclick = () => newChat(!tempMode);
   let searchTimer = null;
   $("#convSearch").oninput = () => { clearTimeout(searchTimer); searchTimer = setTimeout(loadConvs, 250); };
@@ -1451,6 +1724,7 @@ document.addEventListener("DOMContentLoaded", () => {
     if (f.length) { e.preventDefault(); f.forEach(upload); }
   });
   loadConvs();
+  loadSpaces();
   refreshState();
   setInterval(() => { if (!job) refreshState(); }, 15000);
   $("#input").focus();

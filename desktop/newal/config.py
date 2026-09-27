@@ -85,6 +85,10 @@ DEFAULTS = {
     "spec_type": "",              # speculative decoding for the brain ("ngram-mod"), kept only when measured faster
     "mtp": True,                  # the brain drafts with its own MTP heads (when its file has them)
     "preload": True,              # load the brain when NewAl opens and let it read the system prompts in advance
+    "chat_memory": True,          # questions can use what was said in earlier chats (like ChatGPT's chat history)
+    "schedule_toasts": True,      # a Windows notification when a scheduled task (⏰) has run
+    "kv_disk": True,              # save what each conversation has read, to continue it instantly after a restart
+    "kv_disk_gb": 3,              # disk space for those saved readings (the most recent conversations are kept)
     "about_me": "",               # custom instructions (like ChatGPT's): what NewAl should know about the user
     "answer_style": "",           # ... and how they want answers
     "school_enabled": False,      # Kaggle School: hard tasks go to Kaggle's GPUs every week

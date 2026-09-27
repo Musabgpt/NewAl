@@ -40,25 +40,30 @@ def db():
         CREATE INDEX IF NOT EXISTS chunks_source ON chunks(source);
         CREATE TABLE IF NOT EXISTS sources(path TEXT PRIMARY KEY, mtime REAL, kind TEXT);
         """)
-        if "temp" not in [r[1] for r in c.execute("PRAGMA table_info(conversations)")]:
-            with _write:
-                try:
-                    c.execute("ALTER TABLE conversations ADD COLUMN temp INTEGER DEFAULT 0")
-                    c.commit()
-                except sqlite3.OperationalError:
-                    pass                      # another thread added it first
+        c.execute("CREATE TABLE IF NOT EXISTS projects(id INTEGER PRIMARY KEY, name TEXT, instructions TEXT, "
+                  "created REAL, updated REAL)")
+        have = [r[1] for r in c.execute("PRAGMA table_info(conversations)")]
+        for col in ("temp", "project"):
+            if col not in have:
+                with _write:
+                    try:
+                        c.execute("ALTER TABLE conversations ADD COLUMN %s INTEGER DEFAULT 0" % col)
+                        c.commit()
+                    except sqlite3.OperationalError:
+                        pass                      # another thread added it first
         _local.conn = c
     return c
 
 
 # ------------------------------------------------------------------ conversations
 
-def new_conversation(title="محادثة جديدة", temp=False):
-    """temp: a temporary chat (🕶), like ChatGPT's: not listed, not used for training, deleted when left."""
+def new_conversation(title="محادثة جديدة", temp=False, project=0):
+    """temp: a temporary chat (🕶), like ChatGPT's: not listed, not used for training, deleted when left.
+    project: the project (📁) it belongs to: its instructions and files go with every question."""
     db()
     with _write:
-        cur = db().execute("INSERT INTO conversations(title, created, updated, temp) VALUES(?,?,?,?)",
-                           (title, time.time(), time.time(), 1 if temp else 0))
+        cur = db().execute("INSERT INTO conversations(title, created, updated, temp, project) VALUES(?,?,?,?,?)",
+                           (title, time.time(), time.time(), 1 if temp else 0, int(project or 0)))
         db().commit()
         return cur.lastrowid
 
@@ -114,7 +119,130 @@ def delete_conversation(conv):
     with _write:
         db().execute("DELETE FROM messages WHERE conv=?", (conv,))
         db().execute("DELETE FROM conversations WHERE id=?", (conv,))
+        db().execute("DELETE FROM chunks WHERE source LIKE ?", ("chat:%d:%%" % conv,))
+        db().execute("DELETE FROM sources WHERE path LIKE ?", ("chat:%d:%%" % conv,))
         db().commit()
+
+
+def conversation(conv):
+    r = db().execute("SELECT * FROM conversations WHERE id=?", (conv,)).fetchone()
+    return dict(r) if r else None
+
+
+# ------------------------------------------------------------------ projects (like Claude Projects)
+
+PROJECT_FILES = os.path.join(config.DATA, "project_files")
+
+
+def projects():
+    return [dict(r, chats=db().execute("SELECT COUNT(*) FROM conversations c WHERE project=? AND NOT temp AND EXISTS "
+                                       "(SELECT 1 FROM messages m WHERE m.conv=c.id)", (r["id"],)).fetchone()[0],
+                 files=len(project_files(r["id"])))
+            for r in db().execute("SELECT * FROM projects ORDER BY updated DESC")]
+
+
+def project(pid):
+    r = db().execute("SELECT * FROM projects WHERE id=?", (pid,)).fetchone()
+    return dict(r) if r else None
+
+
+def save_project(pid, name, instructions):
+    with _write:
+        if pid:
+            db().execute("UPDATE projects SET name=?, instructions=?, updated=? WHERE id=?",
+                         (name[:80], instructions, time.time(), pid))
+        else:
+            pid = db().execute("INSERT INTO projects(name, instructions, created, updated) VALUES(?,?,?,?)",
+                               (name[:80], instructions, time.time(), time.time())).lastrowid
+        db().commit()
+    os.makedirs(os.path.join(PROJECT_FILES, str(pid)), exist_ok=True)
+    return pid
+
+
+def delete_project(pid):
+    """The project goes; its chats stay as ordinary chats. Its files are removed from the index and the disk."""
+    import shutil
+    folder = os.path.join(PROJECT_FILES, str(pid))
+    with _write:
+        db().execute("UPDATE conversations SET project=0 WHERE project=?", (pid,))
+        db().execute("DELETE FROM projects WHERE id=?", (pid,))
+        db().execute("DELETE FROM chunks WHERE source LIKE ?", (folder + os.sep + "%",))
+        db().execute("DELETE FROM sources WHERE path LIKE ?", (folder + os.sep + "%",))
+        db().commit()
+    shutil.rmtree(folder, ignore_errors=True)
+
+
+def project_files(pid):
+    folder = os.path.join(PROJECT_FILES, str(pid))
+    try:
+        return [{"name": n, "path": os.path.join(folder, n), "size": os.path.getsize(os.path.join(folder, n))}
+                for n in sorted(os.listdir(folder)) if os.path.isfile(os.path.join(folder, n))]
+    except OSError:
+        return []
+
+
+def remove_project_file(pid, name):
+    path = os.path.join(PROJECT_FILES, str(pid), os.path.basename(name))
+    with _write:
+        db().execute("DELETE FROM chunks WHERE source=?", (path,))
+        db().execute("DELETE FROM sources WHERE path=?", (path,))
+        db().commit()
+    try:
+        os.remove(path)
+    except OSError:
+        pass
+
+
+def project_chats(pid):
+    return [dict(r) for r in db().execute(
+        "SELECT * FROM conversations c WHERE project=? AND NOT temp AND EXISTS (SELECT 1 FROM messages m "
+        "WHERE m.conv = c.id) ORDER BY updated DESC", (pid,))]
+
+
+def move_to_project(conv, pid):
+    with _write:
+        db().execute("UPDATE conversations SET project=? WHERE id=?", (int(pid or 0), conv))
+        db().commit()
+
+
+# ------------------------------------------------------------------ memory from earlier chats
+
+def index_chat(conv):
+    """Each question and its answer of a conversation become searchable notes (like ChatGPT's "reference chat
+    history"): a later question in another chat finds what was said here. Runs when the computer is idle."""
+    c = conversation(conv)
+    if not c or c.get("temp"):
+        return 0
+    rows = [m for m in messages(conv) if m["role"] in ("user", "assistant")]
+    done = {r["path"] for r in db().execute("SELECT path FROM sources WHERE path LIKE ?", ("chat:%d:%%" % conv,))}
+    todo = []
+    for q, a in zip(rows, rows[1:]):
+        if q["role"] != "user" or a["role"] != "assistant":
+            continue
+        source = "chat:%d:%d" % (conv, a["id"])
+        if source in done or len(q["content"]) + len(a["content"]) < 60:
+            continue
+        text = "%s\nQ: %s\nA: %s" % (c["title"], q["content"][:600], re.sub(r"```.*?```", "[code]", a["content"],
+                                                                          flags=re.S)[:1200])
+        todo.append((source, text))
+    if not todo:
+        return 0
+    vecs = _embed([t for _, t in todo]) if can_embed() else []
+    with _write:
+        for i, (source, text) in enumerate(todo):
+            db().execute("INSERT INTO chunks(source, pos, text, vec) VALUES(?,?,?,?)",
+                         (source, 0, text, _pack(vecs[i]) if vecs else None))
+            db().execute("INSERT OR REPLACE INTO sources(path, mtime, kind) VALUES(?,?,?)", (source, time.time(), "chat"))
+        db().commit()
+    return len(todo)
+
+
+def unindexed_chats(limit=50):
+    """Conversations with answers not yet in the chat memory (older chats, or ones from before this feature)."""
+    return [r["id"] for r in db().execute(
+        "SELECT c.id FROM conversations c WHERE NOT c.temp AND EXISTS (SELECT 1 FROM messages m WHERE m.conv=c.id "
+        "AND m.role='assistant' AND NOT EXISTS (SELECT 1 FROM sources s WHERE s.path = 'chat:' || c.id || ':' || m.id))"
+        " ORDER BY c.updated DESC LIMIT ?", (limit,))]
 
 
 def add_message(conv, role, content, meta=None):
@@ -267,13 +395,22 @@ def _words(s):
     return {w for w in re.findall(r"\w{3,}", s.lower())}
 
 
-def search(query, k=5, kinds=("memory", "chunk")):
-    """The most relevant memories and file pieces: [{kind, text, source, score}]."""
+def search(query, k=5, kinds=("memory", "chunk", "chat"), skip_conv=None, project=0):
+    """The most relevant memories, file pieces and earlier chats: [{kind, text, source, score}].
+    skip_conv: the conversation being answered (its own turns are already in the prompt). project: its files
+    come first."""
     rows = []
     if "memory" in kinds:
         rows += [("memory", r["text"], "ذاكرة", r["vec"]) for r in db().execute("SELECT text, vec FROM memories")]
-    if "chunk" in kinds:
-        rows += [("chunk", r["text"], r["source"], r["vec"]) for r in db().execute("SELECT text, source, vec FROM chunks")]
+    if "chunk" in kinds or "chat" in kinds:
+        skip = "chat:%d:" % skip_conv if skip_conv else None
+        use_chats = "chat" in kinds and config.get("chat_memory")
+        for r in db().execute("SELECT text, source, vec FROM chunks"):
+            if r["source"].startswith("chat:"):
+                if use_chats and not (skip and r["source"].startswith(skip)):
+                    rows.append(("chat", r["text"], r["source"], r["vec"]))
+            elif "chunk" in kinds:
+                rows.append(("chunk", r["text"], r["source"], r["vec"]))
     if not rows:
         return []
     have_vecs = can_embed() and any(r[3] for r in rows)
@@ -287,6 +424,9 @@ def search(query, k=5, kinds=("memory", "chunk")):
     else:
         qw = _words(query)
         scores = [len(qw & _words(r[1])) / (1 + len(qw)) for r in rows]
+    if project:
+        mine = os.path.join(PROJECT_FILES, str(project)) + os.sep
+        scores = [sc + (0.15 if rows[i][2].startswith(mine) else 0) for i, sc in enumerate(scores)]
     best = sorted(range(len(rows)), key=lambda i: -scores[i])[:20]
     # Measured with Qwen3-Embedding: related notes score ~0.75, unrelated ones up to ~0.45.
     best = [i for i in best if scores[i] > (0.55 if have_vecs else 0.0)]

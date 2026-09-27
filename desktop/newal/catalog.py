@@ -60,6 +60,20 @@ MODELS = {
         "url": HF + "ggml-org/Qwen3-Reranker-0.6B-Q8_0-GGUF/resolve/main/qwen3-reranker-0.6b-q8_0.gguf",
         "about": "يرتب نتائج البحث في الذاكرة حسب الصلة",
     },
+    "voice": {
+        # Measured on 3 Egyptian/English sentences, 4 CPU threads: medium with a window cut to the recording 3.6 s
+        # each and nearly turbo's text; large-v3-turbo 22 s (it breaks with a short window); small 1.3 s but weaker.
+        "title": "Whisper medium", "label": "🎤 الصوت", "kind": "whisper", "optional": True,
+        "file": "ggml-medium-q5_0.bin", "size": 539212467, "magic": b"lmgg",
+        "url": HF + "ggerganov/whisper.cpp/resolve/main/ggml-medium-q5_0.bin",
+        "about": "احكي بدل ما تكتب (🎤 جنب خانة الكتابة): بيفهم العربي باللهجات وبيكتب الكلمات الإنجليزية جوّاه",
+    },
+    "image": {
+        "title": "SD-Turbo", "label": "🎨 الصور", "kind": "image", "optional": True,
+        "file": "sd_turbo-f16-q8_0.gguf", "size": 2023745376,
+        "url": HF + "Green-Sky/SD-Turbo-GGUF/resolve/main/sd_turbo-f16-q8_0.gguf",
+        "about": "يرسم صور من وصف (🎨 أو «ارسملي…»): 512×512 بخطوة وحدة، أقل من دقيقة على المعالج",
+    },
 }
 
 # Which model answers when the preferred one is not downloaded yet.
@@ -74,19 +88,23 @@ FALLBACK = {
 }
 
 
-def _is_gguf(p):
-    # Downloads land in <file>.part and are renamed when complete, so an existing GGUF file is whole.
+def _is_gguf(p, magic=b"GGUF"):
+    # Downloads land in <file>.part and are renamed when complete, so an existing model file is whole.
     try:
         with open(p, "rb") as f:
-            return f.read(4) == b"GGUF"
+            return f.read(4) == magic
     except OSError:
         return False
+
+
+def _magic(role):
+    return MODELS[role].get("magic", b"GGUF")
 
 
 def path(role):
     """The file serving a role: its current file, else one an earlier version downloaded, else where it will go."""
     main = os.path.join(config.MODELS, MODELS[role]["file"])
-    if _is_gguf(main):
+    if _is_gguf(main, _magic(role)):
         return main
     for old in MODELS[role].get("legacy", []):
         p = os.path.join(config.MODELS, old["file"])
@@ -96,7 +114,7 @@ def path(role):
 
 
 def available(role):
-    return _is_gguf(path(role))
+    return _is_gguf(path(role), _magic(role))
 
 
 def legacy(role):

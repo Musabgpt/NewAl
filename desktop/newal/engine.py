@@ -114,6 +114,7 @@ SPEC_TYPES = ("ngram-mod",)  # drafts from text already seen: helps when a fix r
 # Multi-token prediction with the brain's own MTP heads. Measured on Qwen3.6-35B-A3B (4-core AVX2 CPU), words/s
 # for code / Arabic: none 6.1 / 6.3, 1 draft 8.0 / 7.3, 2 drafts 8.5 / 6.6, 3 drafts 9.5 / 6.2, and 3 drafts kept
 # only while the model is at least 60% sure 9.7 / 7.4 (drafts long in code, short in prose): that one.
+SLOTS = os.path.join(config.DATA, "slots")
 MTP_ARGS = ["--spec-type", "draft-mtp", "--spec-draft-n-max", "3", "--spec-draft-p-min", "0.6"]
 _mtp_broken = set()          # roles whose engine did not start with MTP (an older llama.cpp): run without it
 MIN_CONTEXT = 16384        # tokens; goal mode with tool lists and results needs room (RAM cost ~1 GB per model)
@@ -146,6 +147,7 @@ class Server:
         self.log_path = os.path.join(config.LOGS, "llama-%s.log" % role)
         self.path = catalog.path(role)
         self.mtp = False
+        self.slot_conv = None          # the conversation whose reading the slot holds now (kvcache.py)
 
     @property
     def url(self):
@@ -197,6 +199,10 @@ class Server:
             # Earlier conversations kept in RAM: a side request (review, a look at a page) does not make the next
             # step re-read the whole task (measured: 53 tokens instead of ~4000). Capped for a 24 GB laptop.
             args += ["--cache-ram", "2048" if self.role == "coder" else "512"]
+            # What a conversation has read is saved to disk after each answer and read back when it is opened
+            # again, even after a restart (see kvcache.py).
+            os.makedirs(SLOTS, exist_ok=True)
+            args += ["--slot-save-path", SLOTS]
 
         elif kind == "embed":
             args += ["--embedding", "--pooling", "last", "-c", "8192", "-b", "8192", "-ub", "8192"]
@@ -334,6 +340,7 @@ class Pool:
         """Streams one completion. on_delta(kind, text) gets "content" and "reasoning" pieces.
         Returns {"content", "reasoning", "tool_calls", "tps", "role"}."""
         s = self.get(role)
+        s.slot_conv = None
         messages = with_images(messages, s.vision())
         body = {"messages": messages, "stream": True, "max_tokens": max_tokens, "temperature": temperature,
                 "top_p": 0.95, "min_p": 0.05, "repeat_penalty": 1.05, "timings_per_token": False}
@@ -407,6 +414,7 @@ class Pool:
     def complete_json(self, role, messages, schema, max_tokens=60):
         """A short answer constrained to a JSON schema (used by the router and the judge)."""
         s = self.get(role)
+        s.slot_conv = None
         body = {"messages": with_images(messages, s.vision()), "max_tokens": max_tokens, "temperature": 0,
                 "chat_template_kwargs": {"enable_thinking": False},
                 "response_format": {"type": "json_schema", "json_schema": {"name": "answer", "schema": schema}}}
@@ -467,6 +475,58 @@ class Pool:
         for r in out.get("results", []):
             scores[r["index"]] = r["relevance_score"]
         return scores
+
+    # ------------------------------------------------------------ reading ahead, saving what was read
+
+    TURN_STARTS = ("<|im_start|>", "<|start_header_id|>", "<start_of_turn>", "<|turn>")
+
+    def running(self, role):
+        """The loaded server for `role`, or None (never loads a model)."""
+        s = self.servers.get(catalog.pick(role) or role)
+        return s if s and s.alive() else None
+
+    def prime(self, role, messages, tools=None, chat_kwargs=None):
+        """Makes llama.cpp read the start of the next request now, while the user is still typing: the conversation
+        up to where the next question will begin. Returns the number of tokens it read (0 when not loaded)."""
+        s = self.running(role)
+        if not s:
+            return 0
+        kw = {"enable_thinking": False, "preserve_thinking": True} if s.model["file"].lower().startswith("qwen3") else {}
+        kw.update(chat_kwargs or {})
+        renders = []
+        for mark in ("\u2063A", "\u2063B"):
+            body = {"messages": messages + [{"role": "user", "content": mark}]}
+            if tools:
+                body["tools"] = tools
+            if kw:
+                body["chat_template_kwargs"] = kw
+            renders.append(self._post(s, "/apply-template", body)["prompt"])
+        a, b = renders
+        n = 0
+        while n < min(len(a), len(b)) and a[n] == b[n]:
+            n += 1
+        head = a[:n]
+        # Cut at the special token that opens the next turn: text cut elsewhere could be tokenized differently
+        # once the question follows it.
+        cut = max(head.rfind(t) for t in self.TURN_STARTS)
+        if cut <= 0:
+            return 0
+        started = time.time()
+        out = self._post(s, "/completion", {"prompt": head[:cut], "n_predict": 0, "cache_prompt": True})
+        self._record(s.role, "prime", out.get("timings"), time.time() - started)
+        return (out.get("timings") or {}).get("prompt_n", 0)
+
+    def save_slot(self, role, filename):
+        s = self.running(role)
+        if not s:
+            return None
+        return self._post(s, "/slots/0?action=save", {"filename": filename})
+
+    def restore_slot(self, role, filename):
+        s = self.running(role)
+        if not s:
+            return None
+        return self._post(s, "/slots/0?action=restore", {"filename": filename})
 
     def _post(self, s, path, body):
         req = urllib.request.Request(s.url + path, json.dumps(body).encode("utf-8"),

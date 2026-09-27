@@ -25,7 +25,7 @@ jobs:
           python-version: "3.12"
 
       - name: Install Python packages
-        run: python -m pip install --upgrade pip pyinstaller pywebview pypdf numpy truststore certifi qrcode
+        run: python -m pip install --upgrade pip pyinstaller pywebview pypdf numpy truststore certifi qrcode pywhispercpp
 
       - name: Python checks
         run: |
@@ -58,6 +58,25 @@ jobs:
           Expand-Archive rclone.zip -DestinationPath rclone -Force
           Get-ChildItem rclone -Recurse -Filter rclone.exe | Copy-Item -Destination bin
           Set-Content bin/llama-cpp-version.txt $rel.tag_name
+          # stable-diffusion.cpp (🎨 pictures): its Windows AVX2 CPU build, in its own folder (its ggml DLLs
+          # must not replace llama.cpp's).
+          $sdRels = Invoke-RestMethod -Uri "https://api.github.com/repos/leejet/stable-diffusion.cpp/releases?per_page=20" -Headers @{ Authorization = "Bearer $env:GH_TOKEN"; "User-Agent" = "NewAl" }
+          $sdAsset = $null; $sdRel = $null
+          foreach ($r in $sdRels) {
+            $a = $r.assets | Where-Object { $_.name -match "win" -and $_.name -match "avx2" -and $_.name -match "x64" -and $_.name -match "\.zip$" -and $_.name -notmatch "cuda|vulkan|rocm|sycl" } | Select-Object -First 1
+            if ($a) { $sdRel = $r; $sdAsset = $a; break }
+          }
+          if (-not $sdAsset) { $sdRels | Select-Object -First 2 | ForEach-Object { Write-Host "$($_.tag_name): $(($_.assets | ForEach-Object name) -join ', ')" }; throw "no stable-diffusion.cpp Windows AVX2 build" }
+          Write-Host "stable-diffusion.cpp $($sdRel.tag_name): $($sdAsset.name)"
+          Invoke-WebRequest $sdAsset.browser_download_url -OutFile sd.zip
+          Expand-Archive sd.zip -DestinationPath sdx -Force
+          New-Item -ItemType Directory -Force bin/sd-cli | Out-Null
+          Get-ChildItem sdx -Recurse -Include *.exe, *.dll | Copy-Item -Destination bin/sd-cli
+          if (-not (Test-Path bin/sd-cli/sd-cli.exe)) {
+            if (Test-Path bin/sd-cli/sd.exe) { Rename-Item bin/sd-cli/sd.exe sd-cli.exe } else { Get-ChildItem bin/sd-cli; throw "sd-cli.exe missing" }
+          }
+          & bin/sd-cli/sd-cli.exe --help | Select-Object -First 3
+          if ($LASTEXITCODE -gt 1) { throw "sd-cli does not start ($LASTEXITCODE)" }
           # Git Credential Manager (standalone): one-click GitHub/GitLab sign-in even without Git installed.
           $gcmRel = Invoke-RestMethod -Uri "https://api.github.com/repos/git-ecosystem/git-credential-manager/releases/latest" -Headers @{ Authorization = "Bearer $env:GH_TOKEN"; "User-Agent" = "NewAl" }
           $gcmAsset = $gcmRel.assets | Where-Object { $_.name -match "^gcm-win-x86-.*\.zip$" -and $_.name -notmatch "symbols" } | Select-Object -First 1
@@ -73,7 +92,7 @@ jobs:
           foreach ($dll in "vcruntime140.dll", "vcruntime140_1.dll", "msvcp140.dll", "msvcp140_1.dll", "msvcp140_2.dll",
                            "msvcp140_atomic_wait.dll", "msvcp140_codecvt_ids.dll", "concrt140.dll", "vcomp140.dll") {
             $src = Join-Path $env:SystemRoot "System32\$dll"
-            if (Test-Path $src) { Copy-Item $src bin -Force }
+            if (Test-Path $src) { Copy-Item $src bin -Force; Copy-Item $src bin/sd-cli -Force }
           }
           # Python for testing generated code on PCs without Python (the official embeddable build + pip).
           $py = "3.12.10"
@@ -97,6 +116,7 @@ jobs:
         run: |
           python -m pip install -q pefile
           python tools/check_dlls.py bin
+          python tools/check_dlls.py bin/sd-cli
 
       - name: Check the engine runs a model
         run: |
@@ -123,6 +143,9 @@ jobs:
           Pop-Location
           if (-not (Test-Path assets/newal-agent.vsix)) { throw "the extension was not packaged" }
 
+      - name: Check voice input (whisper.cpp) loads
+        run: python -c "from pywhispercpp.model import Model; print(Model.system_info())"
+
       - name: Download the UI libraries (math, diagrams, live previews)
         run: python tools/fetch_vendor.py
 
@@ -135,7 +158,8 @@ jobs:
         run: |
           pyinstaller --noconfirm --windowed --name NewAl --icon assets/newal.ico `
             --add-data "newal/ui;ui" --add-data "newal/skills;skills" --add-data "newal/kaggle;kaggle" --add-data "assets;assets" `
-            --collect-submodules newal --collect-data certifi --hidden-import truststore --collect-submodules qrcode NewAl.py
+            --collect-submodules newal --collect-data certifi --hidden-import truststore --collect-submodules qrcode `
+            --collect-all pywhispercpp NewAl.py
           Copy-Item -Recurse bin dist/NewAl/bin
 
       - name: Check the built app

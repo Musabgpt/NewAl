@@ -68,10 +68,13 @@ def main():
         return
     from newal import server
     httpd = server.serve(port)
-    from newal import school, speed, tasks, updater
+    from newal import agent, schedules, school, speed, tasks, updater
     speed.warm_up()                  # the brain loads and reads its instructions while the window opens
     memory.purge_temp()              # temporary chats (🕶) do not outlive the session
+    for conv in memory.unindexed_chats():
+        agent.later(memory.index_chat, conv)   # older chats join the chat memory, while the computer is idle
     school.start_scheduler()
+    schedules.start_scheduler()      # ⏰ the user's scheduled tasks
     tasks.start_worker()
     updater.start_checker()
     if config.get("phone_access"):

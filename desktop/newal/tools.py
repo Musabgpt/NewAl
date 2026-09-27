@@ -70,6 +70,17 @@ def find_files(pattern="*", folder=""):
     return "Folder: %s\nPattern: %s (all sub-folders)\nCount: %d\n%s" % (root, pattern, len(found), lines)
 
 
+def schedule_prompt(name, prompt, when, time_hhmm="", days="", date=""):
+    from . import schedules
+    return schedules.add_from_tool(name, prompt, when, time_hhmm, days, date)
+
+
+def generate_image(prompt, width=512, height=512):
+    from . import images
+    r = images.generate(prompt, width, height)
+    return "image: %s\nDrawn in %s s (%dx%d) from: %s" % (r["path"], r["seconds"], r["width"], r["height"], r["prompt"])
+
+
 def web_search(query):
     r = web.search(query)
     if not r:
@@ -156,6 +167,16 @@ TOOLS = {
     "zip_path": (wintools.zip_path, "Compress a file or folder into a .zip.",
                  _p(source=S("file or folder"), archive=S("zip path", True)), False),
     "unzip_path": (wintools.unzip_path, "Extract a .zip archive.", _p(archive=S("zip file"), folder=S("target folder", True)), False),
+    "generate_image": (generate_image, "Draw a picture on this computer (Stable Diffusion) and show it in the chat. "
+                       "The prompt must be English: subject, setting, style, lighting, colours.",
+                       _p(prompt=S("English description of the picture"), width=S("pixels, default 512", True),
+                          height=S("pixels, default 512", True)), False),
+    "schedule_prompt": (schedule_prompt,
+                        "Have NewAl itself do something later or on a schedule (a reminder, a daily news summary, a "
+                        "weekly report...): at that time it answers `prompt` in its own chat and shows a notification.",
+                        _p(name=S("short title"), prompt=S("what to do then, as a request to NewAl"),
+                           when=S("once, daily, weekly or hourly"), time_hhmm=S("HH:MM (24h)", True),
+                           days=S("weekly: days like 0,3 (0=Monday)", True), date=S("once: YYYY-MM-DD", True)), False),
     "schedule_task": (wintools.schedule_task, "Schedule a PowerShell command in Windows Task Scheduler, daily or once at HH:MM.",
                       _p(name=S("task name"), command=S("PowerShell command"), time_hhmm=S("HH:MM"),
                          daily=B("repeat every day")), True),
@@ -171,7 +192,7 @@ GROUPS = {
     "desktop": (r"حافظة|clipboard|انسخ|الصق|لقطة|screenshot|سكرين|اشعار|إشعار|notify|ذكرني|نبهني|نزّل|نزل ملف|download|"
                 r"zip|ضغط|فك الضغط|جدول|schedule|كل يوم|يومياً",
                 ["clipboard_get", "clipboard_set", "screenshot", "notify", "download_file", "zip_path", "unzip_path",
-                 "schedule_task"]),
+                 "generate_image", "schedule_prompt", "schedule_task"]),
     "github": (r"git ?hub|جيت ?هاب|جيتهب|جت هب|مستودع|repo|\bpr\b|issue|git_|push|clone|كلون",
                ["github_repos", "github_read", "github_issues", "github_create_issue", "github_create_repo",
                 "git_clone", "git_push"]),

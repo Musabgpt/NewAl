@@ -1632,6 +1632,171 @@ class OutputsTest(unittest.TestCase):
         self.assertEqual([f["rel"] for f in agent.outputs(d)["files"]], ["a.py"])
 
 
+class ChatMemoryAndProjectsTest(unittest.TestCase):
+    def test_earlier_chats_are_found_but_not_the_current_one(self):
+        a = memory.new_conversation("سفر")
+        memory.add_message(a, "user", "شو أحسن وقت لزيارة مدينة بترا بالأردن؟")
+        memory.add_message(a, "assistant", "أحسن وقت لزيارة البترا بالربيع (آذار لأيار) لأن الجو معتدل.")
+        self.assertEqual(memory.index_chat(a), 1)
+        self.assertEqual(memory.index_chat(a), 0)                       # indexed once
+        self.assertNotIn(a, memory.unindexed_chats())
+        b = memory.new_conversation("جديد")
+        found = memory.search("زيارة البترا بالربيع", k=3, skip_conv=b)
+        self.assertTrue(any(n["kind"] == "chat" and "البترا" in n["text"] for n in found), found)
+        self.assertFalse(any(n["kind"] == "chat" for n in memory.search("زيارة البترا بالربيع", k=3, skip_conv=a)))
+        config.update({"chat_memory": False})
+        try:
+            self.assertFalse(any(n["kind"] == "chat" for n in memory.search("زيارة البترا بالربيع", k=3)))
+        finally:
+            config.update({"chat_memory": True})
+        self.assertIn("سفر", agent.note_label([n for n in found if n["kind"] == "chat"][0]))
+        memory.delete_conversation(a)
+        self.assertFalse(any(n["kind"] == "chat" for n in memory.search("زيارة البترا بالربيع", k=3)))
+
+    def test_temporary_chats_are_not_remembered(self):
+        t = memory.new_conversation(temp=True)
+        memory.add_message(t, "user", "سر: كلمة السر تبعي هي بندورة123 لا تحكيها لحدا")
+        memory.add_message(t, "assistant", "تمام، ما رح احكيها لحدا أبداً أبداً.")
+        self.assertEqual(memory.index_chat(t), 0)
+
+    def test_project_instructions_files_and_chats(self):
+        pid = memory.save_project(0, "رسالة التخرج", "جاوب بالفصحى وبأمثلة عن الري الذكي.")
+        folder = os.path.join(memory.PROJECT_FILES, str(pid))
+        with open(os.path.join(folder, "notes.txt"), "w", encoding="utf-8") as f:
+            f.write("حساس الرطوبة موصول على المنفذ GPIO34 ويقرأ كل عشر دقائق.")
+        memory.index_file(os.path.join(folder, "notes.txt"), "project_file")
+        c = memory.new_conversation(project=pid)
+        memory.add_message(c, "user", "مرحبا")
+        self.assertEqual([x["id"] for x in memory.project_chats(pid)], [c])
+        self.assertEqual(memory.projects()[0]["files"], 1)
+        prompt = agent.project_prompt(pid)
+        self.assertTrue(prompt.startswith("\n\n# Project: رسالة التخرج"))
+        self.assertIn("notes.txt", prompt)
+        found = memory.search("على أي منفذ حساس الرطوبة", k=2, project=pid)
+        self.assertTrue(found and "GPIO34" in found[0]["text"])
+        memory.delete_project(pid)
+        self.assertFalse(os.path.exists(folder))
+        self.assertEqual(memory.conversation(c)["project"], 0)          # the chat stays, outside the project
+
+
+class SchedulesTest(unittest.TestCase):
+    def test_next_run(self):
+        import datetime
+        from newal import schedules
+        base = datetime.datetime(2026, 9, 28, 9, 30).timestamp()            # a Monday, 09:30
+        nxt = lambda item: datetime.datetime.fromtimestamp(schedules.next_run(item, base))
+        self.assertEqual(nxt({"kind": "daily", "time": "08:00"}), datetime.datetime(2026, 9, 29, 8, 0))
+        self.assertEqual(nxt({"kind": "daily", "time": "10:15"}), datetime.datetime(2026, 9, 28, 10, 15))
+        self.assertEqual(nxt({"kind": "weekly", "time": "18:00", "days": [3]}), datetime.datetime(2026, 10, 1, 18, 0))
+        self.assertEqual(nxt({"kind": "hourly", "time": "00:05"}), datetime.datetime(2026, 9, 28, 10, 5))
+        self.assertIsNone(schedules.next_run({"kind": "once", "at": base - 60}, base))
+        with self.assertRaises(ValueError):
+            schedules.save({"kind": "daily", "time": "25:00", "prompt": "x"})
+
+    def test_due_task_runs_into_its_own_chat(self):
+        import time as _time
+        from newal import schedules
+
+        class FakeTurn:
+            def __init__(self, conv, text, **kw):
+                self.text = text
+
+            def run(self):
+                return "نتيجة: " + self.text.splitlines()[-1], {"route": "chat"}
+        item = schedules.save({"name": "تذكير", "prompt": "ذكرني بالدوا", "kind": "once", "at": _time.time() + 3600})
+        self.assertIn("تمت جدولة", schedules.add_from_tool("اخبار", "لخص الأخبار", "daily", "08:00"))
+        old = agent.Turn
+        agent.Turn = FakeTurn
+        try:
+            schedules.tick(now=_time.time() + 7200)
+        finally:
+            agent.Turn = old
+        done = next(x for x in schedules.listing() if x["id"] == item["id"])
+        self.assertEqual(done["last_status"], "ok")
+        self.assertFalse(done["enabled"])                                  # once: done
+        msgs = memory.messages(done["conv"])
+        self.assertEqual([m["role"] for m in msgs], ["user", "assistant"])
+        self.assertEqual(msgs[1]["content"], "نتيجة: ذكرني بالدوا")
+        self.assertEqual(memory.conversation(done["conv"])["title"], "⏰ تذكير")
+        self.assertTrue(any(n["id"] == item["id"] for n in schedules.notices(clear=True)))
+        self.assertIn("schedule_prompt", tools.brain_names())
+
+
+class KvCacheTest(unittest.TestCase):
+    def test_history_window_is_the_same_for_read_ahead_and_the_next_turn(self):
+        c = memory.new_conversation()
+        for i in range(30):
+            memory.add_message(c, "user", "سؤال %d " % i + "x" * 900)
+            memory.add_message(c, "assistant", "جواب %d " % i + "y" * 900)
+        ahead = agent.history(c, "coder", "chat")
+        memory.add_message(c, "user", "السؤال الجديد")
+        nxt = agent.history(c, "coder", "chat")
+        self.assertEqual(nxt[:-1], ahead)
+        self.assertEqual(nxt[-1]["content"], "السؤال الجديد")
+
+    def test_nothing_happens_without_a_loaded_brain(self):
+        from newal import kvcache
+        self.assertEqual(kvcache.after_answer(1, "coder", [{"role": "system", "content": "x"}]), 0)
+        self.assertFalse(kvcache.resume(1, "coder"))
+        self.assertEqual(agent.read_ahead(1, "agent"), 0)
+
+
+class VoiceAndImagesTest(unittest.TestCase):
+    def test_wav_is_read_at_16k_mono(self):
+        import io
+        import struct
+        import wave
+        from newal import voice
+        buf = io.BytesIO()
+        with wave.open(buf, "wb") as w:
+            w.setnchannels(2); w.setsampwidth(2); w.setframerate(48000)
+            w.writeframes(b"".join(struct.pack("<hh", 16384, 16384) for _ in range(48000)))
+        a = voice.samples(buf.getvalue())
+        self.assertAlmostEqual(len(a), 16000, delta=2)
+        self.assertAlmostEqual(float(a[100]), 0.5, places=3)
+
+    def test_models_are_checked_by_their_own_header(self):
+        for role, magic in (("voice", b"lmgg"), ("image", b"GGUF")):
+            path = os.path.join(config.MODELS, catalog.MODELS[role]["file"])
+            self.assertFalse(catalog.available(role))
+            with open(path, "wb") as f:
+                f.write(b"junk")
+            self.assertFalse(catalog.available(role))
+            with open(path, "wb") as f:
+                f.write(magic + b"\0" * 16)
+            self.assertTrue(catalog.available(role))
+            os.remove(path)
+        self.assertNotIn("voice", catalog.needed())
+        self.assertTrue(next(m for m in catalog.status() if m["role"] == "image")["optional"])
+
+    def test_draw_requests(self):
+        for t in ("ارسملي قطة بتقرأ كتاب", "ارسم غروب شمس على البحر", "اعملي صورة لسيارة حمرا", "draw me a dragon"):
+            self.assertTrue(agent.DRAW.search(t), t)
+        for t in ("ارسم رسم بياني للمبيعات من ملف excel", "شو يعني ارسم؟", "draw a chart of my data"):
+            self.assertFalse(agent.DRAW.search(t), t)
+
+    def test_drawing_without_the_model_explains_what_to_download(self):
+        answer, meta = agent.Turn(None, "ارسملي قطة", mode="auto").run()
+        self.assertEqual(meta["route"], "image")
+        self.assertIn("⚠", answer)
+
+    def test_tool_pictures_show_in_the_chat(self):
+        from newal import images
+        png = os.path.join(config.WORKSPACE, "images", "t.png")
+        os.makedirs(os.path.dirname(png), exist_ok=True)
+        open(png, "wb").close()
+        old = images.generate
+        images.generate = lambda p, w=512, h=512: {"path": png, "seconds": 1, "width": 512, "height": 512, "prompt": p}
+        events = []
+        try:
+            t = agent.Turn(None, "x", emit=events.append)
+            t._tool("generate_image", {"prompt": "a cat"})
+        finally:
+            images.generate = old
+        self.assertEqual(t.images, [png])
+        self.assertTrue(any(e["type"] == "image" and e["caption"].startswith("🎨") for e in events))
+
+
 class ServerTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):

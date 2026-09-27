@@ -7,7 +7,7 @@ import re
 import threading
 import time
 
-from . import browser, catalog, config, connectors, files, langs, lessons, memory, router, sandbox, skills, tools, training, web, workspace
+from . import browser, catalog, config, connectors, files, kvcache, langs, lessons, memory, router, sandbox, skills, tools, training, web, workspace
 from .engine import Cancelled, pool
 
 MAX_TOOL_ROUNDS = 6
@@ -166,6 +166,7 @@ class Turn:
         self.tools_used = []
         self.approved = set()          # add-ons (MCP servers) the user allowed during this turn
         self.sent = None               # this turn's user message as the model got it (kept for the next turns)
+        self.images = []               # pictures made during the turn (🎨 generate_image)
 
     # -------------------------------------------------------------- entry
 
@@ -182,6 +183,8 @@ class Turn:
     def _run(self):
         started = time.time()
         self._look()
+        if self.mode == "image" or (self.mode == "auto" and DRAW.search(self.text)):
+            return self._draw(started)
         route = self.mode if self.mode in router.ROUTES + ("goal", "project", "research") else router.route(self.text)
         if route == "code" and self.mode == "auto" and MULTI_STEP.search(self.text):
             # "write X, build an exe, push it to GitHub" is a task, not one program: a single script cannot
@@ -210,6 +213,8 @@ class Turn:
         else:
             answer, info = self._plain(messages, role)
         meta.update(info)
+        if self.images:
+            meta["images"] = list(meta.get("images") or []) + self.images
         meta["tools"] = self.tools_used
         meta["seconds"] = round(time.time() - started, 1)
         if memory.is_temp(self.conv):
@@ -220,6 +225,46 @@ class Turn:
                                            attempts=info.get("attempts"),
                                            run=info.get("run_output"), judge=info.get("judge"), tools=self.tools_used)
         return answer, meta
+
+    # -------------------------------------------------------------- 🎨 drawing
+
+    def _draw(self, started):
+        """"ارسملي قطة بتقرأ كتاب": the brain writes the picture's description in English (SD-Turbo reads English
+        only), then stable-diffusion.cpp draws it."""
+        from . import images
+        self.emit({"type": "route", "route": "image", "role": "image", "model": catalog.MODELS["image"]["title"]})
+        if not images.ready():
+            why = "نزّل «🎨 الصور» من «النماذج» (2 GB) لارسم صور على جهازك." if images.tool() else \
+                "محرك الصور غير موجود بهالنسخة من NewAl."
+            return "⚠ " + why, {"route": "image", "seconds": round(time.time() - started, 1)}
+        prompt = self.text
+        brain = catalog.pick("coder")
+        if brain and re.search(r"[^\x00-\x7f]", prompt):
+            self.emit({"type": "status", "text": "🎨 يكتب وصف الصورة…"})
+            try:
+                r = pool.chat(brain, [{"role": "system", "content": DRAW_PROMPT}, {"role": "user", "content": self.text}],
+                              cancel=self.cancel, max_tokens=120, temperature=0.4,
+                              extra={"chat_template_kwargs": {"enable_thinking": False}})
+                prompt = r["content"].strip().strip('"') or prompt
+            except Cancelled:
+                raise
+            except Exception:  # noqa: BLE001 - draw from the user's own words
+                pass
+        size = re.search(r"(\d{3})\s*[x×*]\s*(\d{3})", self.text)
+        w, h = (int(size.group(1)), int(size.group(2))) if size else (512, 512)
+        self.emit({"type": "status", "text": "🎨 عم يرسم… (أقل من دقيقة)"})
+        self.emit({"type": "tool", "name": "generate_image", "args": prompt, "state": "start"})
+        try:
+            res = images.generate(prompt, w, h, steps=4 if self.think else 1)
+        except Exception as e:  # noqa: BLE001 - shown in the chat
+            self.emit({"type": "tool", "name": "generate_image", "state": "done", "result": str(e)})
+            return "⚠ %s" % e, {"route": "image", "seconds": round(time.time() - started, 1)}
+        self.emit({"type": "tool", "name": "generate_image", "state": "done", "result": res["path"]})
+        self.emit({"type": "image", "path": res["path"], "caption": "🎨 " + os.path.basename(res["path"])})
+        answer = "🎨 رسمتها بـ %s ث (%d×%d).\n\n> %s\n\nبدك غيّر شي؟ احكيلي (ألوان، أسلوب، تفاصيل) أو فعّل 💭 لجودة أعلى (4 خطوات)." % (
+            res["seconds"], res["width"], res["height"], prompt)
+        return answer, {"route": "image", "role": "image", "model": catalog.MODELS["image"]["title"],
+                        "images": [res["path"]], "seconds": round(time.time() - started, 1)}
 
     # -------------------------------------------------------------- images: look first
 
@@ -260,17 +305,18 @@ class Turn:
         # Qwen3.6 at ~28 tokens/s. So: the system prompt never changes during the day, earlier turns are sent exactly
         # as they were sent (with the notes they had), and the window over a long conversation moves in big jumps
         # instead of one message per turn. Only this turn's own words are new.
-        system = _system(route, role)
+        conv = memory.conversation(self.conv) if self.conv else None
+        pid = (conv or {}).get("project") or 0
+        system = _system(route, role) + project_prompt(pid)
         try:
-            notes = memory.search(self.text, k=NOTES_K)
+            notes = memory.search(self.text, k=NOTES_K, skip_conv=self.conv, project=pid)
         except Exception:  # noqa: BLE001 - memory is a bonus, never a blocker
             notes = []
         notes_text = ""
         if notes:
-            self.emit({"type": "memory", "items": [{"source": n["source"], "text": n["text"][:200]} for n in notes]})
-            notes_text = "Notes from my long-term memory and project files that may help:\n" + "\n---\n".join(
-                "[%s]\n%s" % (os.path.basename(n["source"]) if n["kind"] == "chunk" else "memory", n["text"][:NOTE_CHARS])
-                for n in notes) + "\n\n"
+            self.emit({"type": "memory", "items": [{"source": note_label(n), "text": n["text"][:200]} for n in notes]})
+            notes_text = ("Notes from my long-term memory, project files and our earlier chats that may help:\n" +
+                          "\n---\n".join("[%s]\n%s" % (note_label(n), n["text"][:NOTE_CHARS]) for n in notes) + "\n\n")
         msgs = [{"role": "system", "content": system}]
         # An answer that worked for a similar request goes into this message, not in front of the history: anything
         # that changes near the start makes llama.cpp re-read the whole conversation.
@@ -278,11 +324,9 @@ class Turn:
         if shown:
             notes_text = "An answer that worked for a similar request before:\n" + "\n\n".join(
                 "Request: %s\nAnswer:\n%s" % (ask[:400], ans[:900]) for ask, ans in shown) + "\n\n" + notes_text
-        history = [m for m in memory.messages(self.conv) if m["role"] in ("user", "assistant")][:-1]  # not this turn's
-        items = [{"role": m["role"], "content": (m.get("meta") or {}).get("sent") or m["content"]} for m in history]
-        start = window_start([len(x["content"]) for x in items],
-                             BRAIN_HISTORY_CHARS if unified(role, route) else HISTORY_CHARS)
-        msgs += items[start:]
+        msgs += history(self.conv, role, route)[:-1]           # without this turn's question (it is added below)
+        if kvcache.resume(self.conv, role):
+            self.emit({"type": "status", "text": "⚡ المحادثة مقروءة مسبقاً"})
         user = self.text
         found = skills.relevant(self.text) if route in ("tools", "goal", "code", "analyze", "project") else []
         if found:
@@ -852,6 +896,9 @@ class Turn:
         result = tools.call(name, arguments)
         self.tools_used.append({"name": name, "args": arguments, "result": result[:500]})
         self.emit({"type": "tool", "name": name, "state": "done", "result": result[:3000]})
+        for img in images_in(result):                # a picture the tool made (🎨): shown under the answer
+            self.images.append(img)
+            self.emit({"type": "image", "path": img, "caption": "🎨 " + os.path.basename(img)})
         return result
 
     # -------------------------------------------------------------- code: write, run, judge, fix
@@ -1203,6 +1250,14 @@ CODE_TASK_TOOL = {"type": "function", "function": {
     "parameters": {"type": "object", "properties": {"task": {"type": "string", "description": "what the program must do"}},
                    "required": ["task"]}}}
 
+
+# "draw me / make a picture of ..." (not "draw a chart of my data": that is a program, see _code).
+DRAW = re.compile(r"^\s*(ارسم(لي|ي|يلي)?|ارسملي|صمم(لي|ي)? صورة|اعمل(لي|ي)? صورة|ولّ?د(لي|ي)? صورة|بدي صورة|"
+                  r"draw( me)?|generate an? (image|picture)|create an? (image|picture)|make an? (image|picture))\b(?!.*"
+                  r"(chart|graph|plot|رسم بياني|مخطط|جدول|csv|excel|بيانات))", re.I)
+DRAW_PROMPT = ("Turn the user's request into one English prompt for an image model (Stable Diffusion): the subject, "
+               "the setting, the style, the lighting and the colours, comma-separated, at most 40 words. Reply with the "
+               "prompt only.")
 
 MULTI_STEP = re.compile(r"github|gitlab|push|commit|deploy|publish|upload|\bexe\b|executable|installer|pyinstaller|"
                         r"ارفع|رفع|انشر|نشر|ثبت|ثبّت|حوله لبرنامج|ملف تنفيذي|درايف|drive", re.I)
@@ -1743,6 +1798,11 @@ _active = [0, 0.0]             # turns running now, when the last one ended
 IDLE_SECONDS = 45
 
 
+def busy():
+    """True while a turn is running (someone waits for an answer)."""
+    return _active[0] > 0
+
+
 def later(fn, *args):
     """Runs model work that can wait (writing down a lesson) when nobody is waiting for an answer. The brain answers
     one request at a time, so a lesson written right after an answer made the next question wait behind it."""
@@ -1768,6 +1828,48 @@ def _idle_worker():
                 job[0](*job[1])
             except Exception:  # noqa: BLE001 - background work never breaks anything
                 pass
+
+
+def history(conv, role, route):
+    """The earlier turns of a conversation as the model gets them: each question exactly as it was sent (with its
+    notes), each answer as written, over a window that moves in big jumps (window_start)."""
+    rows = [m for m in memory.messages(conv) if m["role"] in ("user", "assistant")]
+    items = [{"role": m["role"], "content": (m.get("meta") or {}).get("sent") or m["content"]} for m in rows]
+    # The window is measured without the newest question, as it is when the next turn is built.
+    lengths = [len(x["content"]) for x in items]
+    if items and items[-1]["role"] == "user":
+        lengths = lengths[:-1]
+    start = window_start(lengths, BRAIN_HISTORY_CHARS if unified(role, route) else HISTORY_CHARS)
+    return items[start:]
+
+
+def project_prompt(pid):
+    """A project's instructions, at the end of the system prompt: the tools and the shared prompt before them stay
+    as llama.cpp already read them."""
+    p = memory.project(pid) if pid else None
+    if not p:
+        return ""
+    names = ", ".join(f["name"] for f in memory.project_files(pid)[:30])
+    return ("\n\n# Project: %s\n%s%s" % (p["name"], (p["instructions"] or "").strip(),
+                                          "\nProject files (searched for every question): " + names if names else ""))
+
+
+def note_label(n):
+    if n["kind"] == "chat":
+        conv = memory.conversation(int(n["source"].split(":")[1]))
+        return "earlier chat: " + (conv["title"] if conv else "?")
+    return os.path.basename(n["source"]) if n["kind"] == "chunk" else "memory"
+
+
+def read_ahead(conv, role, keep=True):
+    """After an answer: the brain reads the conversation up to where the next question will start, while the user
+    types, and the reading is saved to disk (kvcache.py). Only for the brain's shared prompt: then the next request
+    starts exactly like this whatever it asks."""
+    if not unified(role, "chat"):
+        return 0
+    pid = (memory.conversation(conv) or {}).get("project") or 0
+    msgs = [{"role": "system", "content": _system("chat", role) + project_prompt(pid)}] + history(conv, role, "chat")
+    return kvcache.after_answer(conv, role, msgs, brain_tools(), keep=keep)
 
 
 def window_start(lengths, budget):
