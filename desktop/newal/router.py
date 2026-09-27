@@ -118,9 +118,14 @@ _COMPUTER = re.compile(r"(شغ[ّ]?ل|نف[ّ]?ذ|افتح|سك[ّ]?ر|اعرض|
                        r"(رام|هارد|مساحة|القرص|المعالج|البطارية|عمليات|جهازي|كمبيوتري|لابتوبي|ويندوز)", re.I)
 
 
+_BUILD = re.compile(r"(اكتب|اكتبلي|اعمل|اعملي|سوي|سويلي|برمج|صمم|انشئ|أنشئ|create|write|build|make|develop|code)\b.{0,40}"
+                    r"(برنامج|كود|سكربت|سكريبت|تطبيق|دالة|موقع|صفحة|لعبة|آلة حاسبة|حاسبة|app|application|program|"
+                    r"script|function|website|web ?page|game|calculator|tool|bot)", re.I)
+
+
 def route(text):
-    if _CODE.search(text):
-        return "code"
+    if _CODE.search(text) or _BUILD.search(text):
+        return "code"          # programs always go to the coding model
     if _COMPUTER.search(text) and not re.search(r"اكتب|برمج|write|code|script|سكربت|دالة|function", text, re.I):
         return "tools"
     if catalog.available("embed"):

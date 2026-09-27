@@ -124,6 +124,11 @@ class AgentTest(unittest.TestCase):
         self.assertTrue(agent.MULTI_STEP.search("اكتب آلة حاسبة وارفعها على جيتهب"))
         self.assertFalse(agent.MULTI_STEP.search("اكتب دالة بايثون تحسب المضروب"))
 
+    def test_programs_go_to_the_coder(self):
+        self.assertTrue(agent.writes_program('{"path": "calc.py", "content": "%s"}' % ("x" * 300)))
+        self.assertFalse(agent.writes_program('{"path": "notes.md", "content": "%s"}' % ("x" * 300)))
+        self.assertIn("code_task for ANY", agent.GOAL)
+
     def test_error_line_prefers_the_real_error(self):
         out = "Traceback...\nfatal: could not read Username for 'https://github.com'\nIf you see 'done', it worked\n(exit code 1)"
         self.assertIn("fatal:", agent.error_line(out))
@@ -178,6 +183,11 @@ class TrainingTest(unittest.TestCase):
 
 
 class RouterTest(unittest.TestCase):
+    def test_build_requests_go_to_the_coder(self):
+        for q in ["Create a professional calculator application for me in .exe format",
+                  "اكتبلي برنامج بايثون يرتب الملفات", "اعمل موقع بسيط لمطعم", "write a script that renames photos"]:
+            self.assertEqual(router.route(q), "code", q)
+
     def test_rules(self):
         self.assertEqual(router.route("Traceback (most recent call last):\n  File x"), "code")
         self.assertEqual(router.route("```js\nlet a\n```"), "code")
@@ -216,7 +226,7 @@ class ComputerRequestTest(unittest.TestCase):
             self.assertEqual(router.route(q), "tools", q)
             self.assertFalse(agent.needs_web(q), q)
             self.assertTrue(agent.is_local(q), q)
-        self.assertEqual(router.route("اكتب سكربت بايثون يفتح ملف"), "chat")  # code wording is not a command
+        self.assertEqual(router.route("اكتب سكربت بايثون يفتح ملف"), "code")  # writing code, not a command
         self.assertFalse(agent.is_local("شو آخر أخبار الذكاء الاصطناعي"))
 
     def test_store_python_stub_is_skipped(self):

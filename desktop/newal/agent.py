@@ -22,8 +22,8 @@ WEB_PERSONA = ("You are NewAl, a capable assistant. The web search for this ques
 
 GOAL = ("You are NewAl working autonomously toward the user's goal on their Windows computer. Work in steps: "
         "decide the next action, do it with a tool, look at the result, and correct course when something fails. "
-        "Use every tool that helps: run_command (PowerShell) to inspect and change the computer, code_task to write "
-        "and test a program until it works, write_file/read_file for files, web_search/read_url for information. "
+        "Use every tool that helps: run_command (PowerShell) to inspect and change the computer, code_task for ANY "
+        "program or script (a dedicated coding model writes and tests it until it works; never write programs yourself), write_file/read_file for files, web_search/read_url for information. "
         "Do not ask the user questions you can answer with a tool, and do not stop until the goal is reached and "
         "checked. «مجلد العمل» / \"workspace\" means the NewAl workspace folder given below; unless the user names "
         "another place, create files and folders there (relative paths go there, commands start there). Finish with a "
@@ -74,7 +74,7 @@ class Turn:
     def run(self):
         started = time.time()
         route = self.mode if self.mode in router.ROUTES + ("goal",) else router.route(self.text)
-        if route == "code" and MULTI_STEP.search(self.text):
+        if route == "code" and self.mode == "auto" and MULTI_STEP.search(self.text):
             # "write X, build an exe, push it to GitHub" is a task, not one program: a single script cannot
             # push without the user's credentials. Goal mode has git_push, run_command and code_task for it.
             route = "goal"
@@ -264,6 +264,11 @@ class Turn:
                                   "your plan with the other tools (e.g. code_task to build it yourself)." % MAX_SEARCHES)
                     elif c["name"] == "code_task":
                         result = self._code_task(c["arguments"])
+                    elif c["name"] == "write_file" and writes_program(c["arguments"]):
+                        # Programs are written by the coding model (DeepSeek-Coder) and tested, not typed in by
+                        # the planner: send it through code_task.
+                        result = ("Not written: programs must be made with code_task (the coding model writes and "
+                                  "tests them). Call code_task with a full description of this program.")
                     else:
                         result = self._tool(c["name"], c["arguments"])
                     messages.append({"role": "tool", "tool_call_id": c["id"] or "call_%d_%d" % (steps, i),
@@ -292,8 +297,9 @@ class Turn:
             task = json.loads(arguments or "{}").get("task", "")
         except ValueError:
             task = arguments
-        self.emit({"type": "tool", "name": "code_task", "args": task, "state": "start"})
         coder = catalog.pick("coder")
+        self.emit({"type": "tool", "name": "code_task", "args": task, "state": "start"})
+        self.emit({"type": "status", "text": "💻 %s يكتب البرنامج…" % catalog.MODELS[coder]["title"]})
         msgs = [{"role": "system", "content": _system("code")}, {"role": "user", "content": task}]
         answer, info = self._code(msgs, coder)
         block = runnable_block(answer)
@@ -643,6 +649,18 @@ def install_package(module):
         return False
     code_, _ = connectors.run([exe, "-m", "pip", "install", "--disable-pip-version-check", "-q", name], timeout=300)
     return code_ == 0
+
+
+CODE_EXT = (".py", ".js", ".ts", ".ps1", ".bat", ".cmd", ".java", ".cs", ".cpp", ".c", ".go", ".rs", ".html", ".php")
+
+
+def writes_program(arguments):
+    import json
+    try:
+        a = json.loads(arguments or "{}") if isinstance(arguments, str) else (arguments or {})
+    except ValueError:
+        return False
+    return str(a.get("path", "")).lower().endswith(CODE_EXT) and len(a.get("content", "")) > 200
 
 
 def compact(messages, keep=6, budget_chars=24000):

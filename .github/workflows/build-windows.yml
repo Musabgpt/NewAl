@@ -84,7 +84,7 @@ jobs:
           # The embeddable build has no tkinter: copy it from the full Python so GUI programs (calculators,
           # small tools) can be tested and built.
           $base = python -c "import sys; print(sys.base_prefix)"
-          Copy-Item "$base/DLLs/_tkinter.pyd", "$base/DLLs/tcl86t.dll", "$base/DLLs/tk86t.dll" bin/python -Force
+          Get-ChildItem "$base/DLLs" | Where-Object { $_.Name -match "^(_tkinter\.pyd|t(cl|k)\d+t?\.dll|zlib.*\.dll)$" } | ForEach-Object { Write-Host "tk: $($_.Name)"; Copy-Item $_.FullName bin/python -Force }
           Copy-Item "$base/Lib/tkinter" bin/python/tkinter -Recurse -Force
           Copy-Item "$base/tcl" bin/python/tcl -Recurse -Force
           bin/python/python.exe -c "import json, sqlite3, urllib.request, tkinter; print('bundled python ok, tk', tkinter.TkVersion)"
