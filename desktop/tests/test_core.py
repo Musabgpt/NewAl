@@ -63,7 +63,7 @@ class ToolsTest(unittest.TestCase):
         self.assertIn("github_repos", tools.select("ارفع مشروعي على جيتهب"))
         self.assertIn("kaggle_download", tools.select("نزل داتا سيت من كاغل"))
         self.assertIn("drive_upload", tools.select("حط الملف على درايف"))
-        self.assertIn("vscode_open", tools.select("افتحه بـ VS Code"))
+        self.assertIn("vscode", tools.select("افتحه بـ VS Code"))
 
     def test_definitions_are_valid(self):
         for d in tools.definitions():
@@ -89,9 +89,41 @@ class ToolsTest(unittest.TestCase):
         self.assertIn(os.path.join("sub", "deep", "c.py"), out)
 
     def test_bad_calls(self):
-        self.assertIn("غير معروفة", tools.call("nope", {}))
-        self.assertIn("وسائط خاطئة", tools.call("write_file", {"path": "a"}))
+        self.assertIn("No tool named 'nope'", tools.call("nope", {}))
+        self.assertIn("Missing required argument(s) for write_file: content", tools.call("write_file", {"path": "a"}))
         self.assertIn("غير صالحة", tools.call("read_file", "{not json"))
+
+    def test_closed_world_resolution(self):
+        self.assertEqual(tools.resolve("powershell", '{"command": "dir"}')[:2],
+                         ("run_command", {"command": "dir", "shell": "powershell"}))
+        self.assertEqual(tools.resolve("cmd", {"command": "dir"})[1]["shell"], "cmd")
+        self.assertEqual(tools.resolve("vscode_open", {"path": "a.py"})[:2], ("vscode", {"path": "a.py"}))
+        self.assertEqual(tools.resolve("run_comand", {"command": "x", "bogus": 1})[:2], ("run_command", {"command": "x"}))
+        self.assertIn("shell غير معروف", tools.call("run_command", {"command": "x", "shell": "zsh"}))
+        out = tools.call("run_command", {"command": "echo مرحبا", "shell": "cmd"})
+        self.assertIn("exit code 0", out)
+        self.assertIn("مرحبا", out)
+
+    def test_false_success_is_caught(self):
+        self.assertTrue(agent.unsupported_claim("تمام، أنشأت لك الملف plan.md", []))
+        self.assertTrue(agent.unsupported_claim("فتحت لك VS Code على المشروع", []))
+        self.assertTrue(agent.unsupported_claim("I've installed pandas", [{"name": "run_command", "result": "خطأ: x"}]))
+        self.assertFalse(agent.unsupported_claim("أنشأت الملف", [{"name": "write_file", "result": "تم إنشاء الملف"}]))
+        self.assertFalse(agent.unsupported_claim("الجاذبية قوة بتجذب الأجسام لبعضها", []))
+
+    def test_read_only_calls_run_together(self):
+        import time as _t
+        old = tools.TOOLS["current_time"]
+        tools.TOOLS["current_time"] = (lambda: (_t.sleep(0.5), "t")[1],) + old[1:]
+        try:
+            t = agent.Turn(None, "x")
+            started = _t.time()
+            out = t._tools([{"name": "current_time", "arguments": "{}"}] * 4)
+            took = _t.time() - started
+        finally:
+            tools.TOOLS["current_time"] = old
+        self.assertEqual(out, ["t"] * 4)
+        self.assertLess(took, 1.2)
 
     def test_approval_rules(self):
         config.update({"auto_run": False})
@@ -332,7 +364,7 @@ class WinToolsTest(unittest.TestCase):
         config.update({"github_token": ""})
         self.assertNotIn("github_repos", tools.goal_names())
         self.assertIn("run_command", tools.goal_names())
-        self.assertIn("schedule_task", tools.goal_names())
+        self.assertIn("schedule", tools.goal_names())
 
 
 class SignInTest(unittest.TestCase):
@@ -1371,12 +1403,12 @@ class SpeedTest(unittest.TestCase):
         finally:
             config.update({"about_me": "", "answer_style": ""})
 
-    def test_chat_sends_the_same_tools_but_no_tool_calls(self):
+    def test_chat_sends_the_same_tools_and_allows_them(self):
         seen = []
         old = (agent.pool.chat, agent.pool.no_tool_calls)
         agent.pool.no_tool_calls = lambda role: {"logit_bias": [[7, False]]}
         agent.pool.chat = lambda role, messages, tools=None, **kw: (seen.append((tools, kw.get("extra"))),
-                                                                   {"content": "أهلاً", "tps": 1})[1]
+                                                                   {"content": "أهلاً", "tps": 1, "tool_calls": []})[1]
         config.update({"one_brain": True})
         try:
             t = agent.Turn(None, "مرحبا")
@@ -1387,7 +1419,7 @@ class SpeedTest(unittest.TestCase):
         tools_sent, extra = seen[0]
         self.assertEqual(tools_sent, agent.brain_tools())                 # the shared list, in its fixed order
         self.assertEqual({d["function"]["name"] for d in tools_sent}, set(tools.brain_names()))
-        self.assertEqual(extra["logit_bias"], [[7, False]])
+        self.assertNotIn("logit_bias", extra)            # the brain decides itself when chat needs a tool
         self.assertFalse(extra["chat_template_kwargs"]["enable_thinking"])
 
     def test_passing_asserts_replace_the_judge(self):
@@ -1719,7 +1751,7 @@ class SchedulesTest(unittest.TestCase):
         self.assertEqual(msgs[1]["content"], "نتيجة: ذكرني بالدوا")
         self.assertEqual(memory.conversation(done["conv"])["title"], "⏰ تذكير")
         self.assertTrue(any(n["id"] == item["id"] for n in schedules.notices(clear=True)))
-        self.assertIn("schedule_prompt", tools.brain_names())
+        self.assertIn("schedule", tools.brain_names())
 
 
 class KvCacheTest(unittest.TestCase):
@@ -1741,22 +1773,9 @@ class KvCacheTest(unittest.TestCase):
         self.assertEqual(agent.read_ahead(1, "agent"), 0)
 
 
-class VoiceAndImagesTest(unittest.TestCase):
-    def test_wav_is_read_at_16k_mono(self):
-        import io
-        import struct
-        import wave
-        from newal import voice
-        buf = io.BytesIO()
-        with wave.open(buf, "wb") as w:
-            w.setnchannels(2); w.setsampwidth(2); w.setframerate(48000)
-            w.writeframes(b"".join(struct.pack("<hh", 16384, 16384) for _ in range(48000)))
-        a = voice.samples(buf.getvalue())
-        self.assertAlmostEqual(len(a), 16000, delta=2)
-        self.assertAlmostEqual(float(a[100]), 0.5, places=3)
-
+class ImagesTest(unittest.TestCase):
     def test_models_are_checked_by_their_own_header(self):
-        for role, magic in (("voice", b"lmgg"), ("image", b"GGUF")):
+        for role, magic in (("image", b"GGUF"),):
             path = os.path.join(config.MODELS, catalog.MODELS[role]["file"])
             self.assertFalse(catalog.available(role))
             with open(path, "wb") as f:
@@ -1766,7 +1785,7 @@ class VoiceAndImagesTest(unittest.TestCase):
                 f.write(magic + b"\0" * 16)
             self.assertTrue(catalog.available(role))
             os.remove(path)
-        self.assertNotIn("voice", catalog.needed())
+        self.assertNotIn("image", catalog.needed())
         self.assertTrue(next(m for m in catalog.status() if m["role"] == "image")["optional"])
 
     def test_draw_requests(self):
@@ -1795,6 +1814,31 @@ class VoiceAndImagesTest(unittest.TestCase):
             images.generate = old
         self.assertEqual(t.images, [png])
         self.assertTrue(any(e["type"] == "image" and e["caption"].startswith("🎨") for e in events))
+
+
+class KaggleConnectTest(unittest.TestCase):
+    def test_one_click_uses_credentials_already_here(self):
+        from newal import connectors
+        home = tempfile.mkdtemp()
+        os.makedirs(os.path.join(home, ".kaggle"))
+        with open(os.path.join(home, ".kaggle", "kaggle.json"), "w") as f:
+            json.dump({"username": "musab", "key": "k" * 32}, f)
+        sent = []
+        old_api, old_home = connectors._api, os.environ.get("HOME")
+        connectors._api = lambda url, h=None, *a, **k: (sent.append(h), [{"ref": "musab/nb"}])[1]
+        os.environ["HOME"] = home
+        config.update({"kaggle_username": "", "kaggle_key": "", "kaggle_token": ""})
+        try:
+            r = connectors.kaggle_connect(open_page=False)
+        finally:
+            connectors._api = old_api
+            os.environ["HOME"] = old_home or ""
+        self.assertEqual(r["state"], "ok", r)
+        self.assertTrue(connectors.kaggle_connected())
+        self.assertTrue(sent[0]["Authorization"].startswith("Basic "))
+        config.update({"kaggle_token": "KGAT_" + "a" * 30})
+        self.assertEqual(connectors._kg(), {"Authorization": "Bearer KGAT_" + "a" * 30})
+        config.update({"kaggle_username": "", "kaggle_key": "", "kaggle_token": ""})
 
 
 class ServerTest(unittest.TestCase):

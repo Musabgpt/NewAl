@@ -20,10 +20,9 @@
     <button data-panel="models">🧠 النماذج</button>
     <button data-panel="connect">🔗 الربط</button>
     <button data-panel="addons">🧩 الإضافات والمهارات</button>
-    <button data-panel="memory">🗂 الذاكرة والمشروع</button>
-    <button data-panel="project">🧑‍💻 المشروع</button>
-    <button data-panel="schedules">⏰ مهام مجدولة</button>
-    <button data-panel="tasks">🗂 مهام بالخلفية</button>
+    <button data-panel="memory">🧠 الذاكرة</button>
+    <button data-panel="project">🧑‍💻 مجلد الكود</button>
+    <button data-panel="alltasks">⏰ المهام</button>
     <button data-panel="phone">📱 الهاتف</button>
     <button data-panel="speed">⚡ السرعة</button>
     <button data-panel="settings">⚙ الإعدادات</button>
@@ -62,7 +61,6 @@
     <div id="composer">
       <button id="attach" title="إرفاق ملف">＋</button>
       <textarea id="input" rows="1" placeholder="اسأل أي شيء… (Enter للإرسال، Shift+Enter لسطر جديد)" dir="auto"></textarea>
-      <button id="mic" title="🎤 احكي بدل ما تكتب (اضغط مرة للبدء ومرة للإيقاف)">🎤</button>
       <button id="send" title="إرسال">↑</button>
     </div>
     <div id="modes">
@@ -70,11 +68,7 @@
       <label class="chip goal" title="أعطه هدفاً: يخطط وينفذ ويجرّب ويصحح حتى يتحقق"><input type="radio" name="mode" value="goal">🎯 هدف</label>
       <label class="chip" title="يشتغل بمجلد مشروعك متل Codex: يقرأ ويعدّل ويشغّل الاختبارات ويصلّح"><input type="radio" name="mode" value="project">🧑‍💻 مشروع</label>
       <label class="chip" title="يقسم سؤالك لعدة عمليات بحث، يقرأ صفحات كتير، ويكتب تقرير مرتب مع المصادر (دقايق)"><input type="radio" name="mode" value="research">🔬 بحث معمّق</label>
-      <label class="chip"><input type="radio" name="mode" value="code">💻 برمجة</label>
       <label class="chip" title="يرسم صورة من وصفك على جهازك (SD-Turbo)"><input type="radio" name="mode" value="image">🎨 صورة</label>
-      <label class="chip"><input type="radio" name="mode" value="tools">🛠 أدوات</label>
-      <label class="chip"><input type="radio" name="mode" value="analyze">🧠 تحليل</label>
-      <label class="chip"><input type="radio" name="mode" value="chat">💬 محادثة</label>
       <label class="chip toggle"><input type="checkbox" id="think">💭 تفكير عميق</label>
       <label class="chip toggle" title="وضع المشروع: بيقرأ المشروع ويكتب خطة بدون ما يغيّر شي، وإنت بتوافق"><input type="checkbox" id="planFirst">📝 خطة أولاً</label>
     </div>

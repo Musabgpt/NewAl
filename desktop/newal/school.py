@@ -72,7 +72,7 @@ def hours_this_week(st):
 
 
 def connected():
-    return bool(config.get("kaggle_username") and config.get("kaggle_key"))
+    return connectors.kaggle_connected()
 
 
 # ------------------------------------------------------------------ tasks
@@ -121,14 +121,17 @@ def cli(args, timeout=600):
     if not py:
         return 1, "Python غير موجود"
     os.makedirs(CFG_DIR, exist_ok=True)
-    cred = os.path.join(CFG_DIR, "kaggle.json")
-    with open(cred, "w", encoding="utf-8") as f:
-        json.dump({"username": config.get("kaggle_username"), "key": config.get("kaggle_key")}, f)
-    try:
-        os.chmod(cred, 0o600)
-    except OSError:
-        pass
     env = dict(os.environ, KAGGLE_CONFIG_DIR=CFG_DIR, PYTHONIOENCODING="utf-8")
+    if config.get("kaggle_token"):
+        env["KAGGLE_API_TOKEN"] = config.get("kaggle_token")          # a new API token
+    else:
+        cred = os.path.join(CFG_DIR, "kaggle.json")
+        with open(cred, "w", encoding="utf-8") as f:
+            json.dump({"username": config.get("kaggle_username"), "key": config.get("kaggle_key")}, f)
+        try:
+            os.chmod(cred, 0o600)
+        except OSError:
+            pass
     code, out = connectors.run([py, "-m", "kaggle"] + args, timeout=timeout, env=env)
     if code != 0 and "No module named kaggle" in out:
         c2, o2 = connectors.run([py, "-m", "pip", "install", "-q", "--disable-pip-version-check", "kaggle"], timeout=600)

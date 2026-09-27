@@ -75,6 +75,7 @@ DEFAULTS = {
     "gitlab_url": "https://gitlab.com",
     "kaggle_username": "",
     "kaggle_key": "",
+    "kaggle_token": "",           # a new Kaggle API token (KGAT_…), used instead of username + key
     "context7_key": "",           # optional free key for the library-docs add-on (a higher daily limit)
     "drive_remote": "gdrive",
     "api_port": 8766,
@@ -110,7 +111,7 @@ if os.path.exists(_path):
     except (OSError, ValueError):
         pass
 
-SECRETS = ("github_token", "gitlab_token", "kaggle_key", "context7_key", "phone_key")
+SECRETS = ("github_token", "gitlab_token", "kaggle_key", "kaggle_token", "context7_key", "phone_key")
 
 
 def get(key):

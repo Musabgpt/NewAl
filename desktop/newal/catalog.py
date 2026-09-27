@@ -60,14 +60,6 @@ MODELS = {
         "url": HF + "ggml-org/Qwen3-Reranker-0.6B-Q8_0-GGUF/resolve/main/qwen3-reranker-0.6b-q8_0.gguf",
         "about": "يرتب نتائج البحث في الذاكرة حسب الصلة",
     },
-    "voice": {
-        # Measured on 3 Egyptian/English sentences, 4 CPU threads: medium with a window cut to the recording 3.6 s
-        # each and nearly turbo's text; large-v3-turbo 22 s (it breaks with a short window); small 1.3 s but weaker.
-        "title": "Whisper medium", "label": "🎤 الصوت", "kind": "whisper", "optional": True,
-        "file": "ggml-medium-q5_0.bin", "size": 539212467, "magic": b"lmgg",
-        "url": HF + "ggerganov/whisper.cpp/resolve/main/ggml-medium-q5_0.bin",
-        "about": "احكي بدل ما تكتب (🎤 جنب خانة الكتابة): بيفهم العربي باللهجات وبيكتب الكلمات الإنجليزية جوّاه",
-    },
     "image": {
         "title": "SD-Turbo", "label": "🎨 الصور", "kind": "image", "optional": True,
         "file": "sd_turbo-f16-q8_0.gguf", "size": 2023745376,

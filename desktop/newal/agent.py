@@ -28,7 +28,9 @@ GOAL = ("You are NewAl working autonomously toward the user's goal on their Wind
         "Use every tool that helps: run_command (PowerShell) to inspect and change the computer, code_task for ANY "
         "program or script (a dedicated coding model writes and tests it until it works; never write programs yourself), write_file/read_file for files, web_search/read_url for information. "
         "Do not ask the user questions you can answer with a tool, and do not stop until the goal is reached and "
-        "checked. «مجلد العمل» / \"workspace\" means the NewAl workspace folder given below; unless the user names "
+        "checked with the tools (read the file back, run the program, list the folder): no partial result, no "
+        "placeholder or simulated data, no half solution presented as done. When a step fails, find out why "
+        "(error output, docs, a web search) and try another way. run_command: shell=powershell (default), cmd or wsl. «مجلد العمل» / \"workspace\" means the NewAl workspace folder given below; unless the user names "
         "another place, create files and folders there (relative paths go there, commands start there). Finish with a "
         "short report in the user's language: what you did, the result, and where files are.")
 
@@ -76,7 +78,13 @@ BRAIN = ("You are NewAl, a capable assistant and expert software engineer runnin
          "and give the command that checks it on its own line: RUN: python -m pytest -q. Explain in a few short lines, "
          "without repeating the code. Data files (CSV, Excel, JSON) are loaded from the path given with pandas; charts are "
          "saved with matplotlib as PNG files in the current folder (never plt.show()) and the key numbers printed.\n"
-         "Plans, reviews and comparisons: find root causes, compare options honestly, and give precise, actionable steps.")
+         "Plans, reviews and comparisons: find root causes, compare options honestly, and give precise, actionable steps.\n"
+         "Actions: when the user wants something done on this computer (create, run, open, install, download, move, "
+         "schedule), do it with the tools and report what the tool returned. run_command runs PowerShell by default, "
+         "shell=cmd for cmd.exe commands and batch files, shell=wsl for Linux; check the exit code and the output. "
+         "vscode opens files and folders, jumps to a line, compares files and installs extensions. Never say something "
+         "was done, created or checked unless a tool did it in this conversation, and never present a guess, a sample "
+         "or a partial result as the real one.")
 SHARED_ROUTES = ("chat", "tools", "code", "analyze")
 
 
@@ -376,12 +384,13 @@ class Turn:
     def _agent(self, messages, role, route="tools"):
         context = " ".join(m["content"] for m in messages[-4:] if m["role"] == "user")
         shared = unified(role, route)
-        if route == "chat":
-            # Plain conversation: no tool calls and no needless searches. A small model gets no tool list (~1500
-            # prompt tokens saved); the brain gets its usual one, already in its cache.
+        if route == "chat" and not shared:
+            # Plain conversation with a small model: no tool list (~1500 prompt tokens saved) and no tool calls.
+            # The brain always keeps its tools: it decides itself when a request needs one ("open the settings"
+            # sounds like chat but is an action), so nothing is answered as done without being done.
             r = pool.chat(role, messages, tools=brain_tools() if shared else None, on_delta=self._delta,
                           cancel=self.cancel, extra=dict(pool.no_tool_calls(role) or {}, **self._extra(role)))
-            if not TOOL_MARKUP.search(r["content"]):
+            if not TOOL_MARKUP.search(r["content"]) and not unsupported_claim(r["content"], self.tools_used):
                 return r["content"].strip(), {"tps": r["tps"]}
             # The model wanted a tool after all: go through the tools path.
             self.emit({"type": "draft_reset"})
@@ -420,18 +429,28 @@ class Turn:
         if web.is_arabic(self.text):
             messages[-1] = dict(messages[-1], content=messages[-1]["content"] + "\n\n(أجب بالعربية)")
             self.sent = messages[-1]["content"]
+        challenged = False
         for _ in range(MAX_TOOL_ROUNDS):
             r = pool.chat(role, messages, tools=defs, on_delta=self._delta, cancel=self.cancel,
                           extra=self._extra(role))
             if not r["tool_calls"]:
+                claim = unsupported_claim(r["content"], self.tools_used)
+                if claim and not challenged:
+                    # The answer says something was done that no tool did (the commonest agent failure: "false
+                    # success"). Once: do it for real, or say plainly that it was not done.
+                    challenged = True
+                    self.emit({"type": "status", "text": "🔎 يتحقق إنو نفّذ فعلاً…"})
+                    self.emit({"type": "draft_reset"})
+                    messages += [{"role": "assistant", "content": r["content"]}, {"role": "user", "content": CLAIM_CHECK % claim}]
+                    continue
                 return r["content"].strip(), {"tps": r["tps"]}
             messages.append(assistant_turn(r, "call_%d"))
             repeated = True
-            for i, c in enumerate(r["tool_calls"]):
+            for c in r["tool_calls"]:
                 key = (c["name"], c["arguments"])
                 repeated &= key in seen
                 seen.add(key)
-                result = self._tool(c["name"], c["arguments"])
+            for i, (c, result) in enumerate(zip(r["tool_calls"], self._tools(r["tool_calls"]))):
                 messages.append({"role": "tool", "tool_call_id": c["id"] or "call_%d" % i, "content": result})
             if repeated:
                 break
@@ -505,16 +524,31 @@ class Turn:
             if checks >= MAX_GOAL_CHECKS:
                 break
             checks += 1
-            verdict = self._goal_check(self.text, messages, answer)
-            self.emit({"type": "goal_check", "done": verdict.get("done"), "missing": verdict.get("missing", "")})
+            # Evidence-carrying termination: the goal ends only on evidence from the computer itself (the files it
+            # names exist, the tool outputs show the result), never on the model saying it is done.
+            claim = unsupported_claim(answer, self.tools_used)
+            missing_files = [p for p in claimed_paths(answer, absolute_only=True) if not os.path.exists(p)]
+            if claim or missing_files:
+                verdict = {"done": False, "missing": ("These files do not exist: %s. " % ", ".join(missing_files)
+                                                      if missing_files else "") +
+                                                     ("No tool did this: «%s»." % claim if claim else "")}
+            else:
+                verdict = self._goal_check(self.text, messages, answer)
+            last_missing = verdict.get("missing", "")
+            self.emit({"type": "goal_check", "done": verdict.get("done"), "missing": last_missing})
             if verdict.get("done"):
-                return answer, {"tps": tps, "verified": True, "judge": verdict.get("missing", ""), "steps": steps}
+                return answer, {"tps": tps, "verified": True, "judge": last_missing, "steps": steps}
             messages.append({"role": "assistant", "content": answer})
             messages.append({"role": "user", "content": "The goal is not reached yet: %s\nContinue working with the "
-                                                        "tools until it is done." % verdict.get("missing", "")})
+                                                        "tools until it is really done (no partial result, nothing "
+                                                        "simulated or assumed)." % last_missing})
             steps_since_check = 0
             self.emit({"type": "draft_reset"})
-        return answer or "توقفت بعد %d خطوة بدون إكمال الهدف." % steps, {"tps": tps, "verified": False, "steps": steps}
+        # Out of steps or checks: say exactly what is missing instead of presenting a partial result as done.
+        missing = locals().get("last_missing") or "ما تأكدت إنو اكتمل"
+        return ((answer + "\n\n" if answer else "") +
+                "> ⚠️ **الهدف ما اكتمل بعد** (بعد %d خطوة). الناقص: %s\n> احكيلي «كمّل» لأكمل من هون." % (steps, missing),
+                {"tps": tps, "verified": False, "steps": steps, "judge": missing})
 
     # -------------------------------------------------------------- project: work in a real folder (like Codex)
 
@@ -835,6 +869,12 @@ class Turn:
         self.emit({"type": "status", "text": "🧠 هل تحقق الهدف؟"})
         try:
             workspace = "NewAl workspace folder: %s\n\n" % config.WORKSPACE
+            files = ""
+            for p in claimed_paths(answer + "\n" + evidence)[:10]:
+                files += "%s: %s\n" % (p, ("exists, %d bytes" % os.path.getsize(p)) if os.path.isfile(p) else
+                                        "folder exists" if os.path.isdir(p) else "DOES NOT EXIST")
+            if files:
+                evidence += "\n\n[filesystem check by NewAl]\n" + files
             return pool.complete_json(judge, [
                 {"role": "system", "content": "Decide whether the goal was actually reached, using only the tool results "
                                               "as evidence (claims without evidence do not count). Check every part: "
@@ -844,8 +884,10 @@ class Turn:
                 {"role": "user", "content": "%sGoal:\n%s\n\nTool results and messages:\n%s\n\nFinal report:\n%s"
                                             % (workspace, goal[:2000], evidence[-8000:], answer[:2000])}], schema,
                 max_tokens=200)
-        except Exception:  # noqa: BLE001
-            return {"done": True, "missing": ""}
+        except Cancelled:
+            raise
+        except Exception as e:  # noqa: BLE001 - an unchecked goal is not a reached goal
+            return {"done": False, "missing": "could not verify the result (%s): check it with the tools" % str(e)[:120]}
 
     def _web_context(self, question):
         from concurrent.futures import ThreadPoolExecutor
@@ -879,6 +921,15 @@ class Turn:
                    "\nأجب بالعربية." if lang == "Arabic" else ""))
 
     def _tool(self, name, arguments):
+        if not name.startswith("mcp__"):
+            # Closed world: the call is mapped to a real tool (or refused) before anything runs or is approved.
+            real, fixed, error = tools.resolve(name, arguments)
+            if error:
+                self.emit({"type": "tool", "name": name, "args": arguments, "state": "start"})
+                self.emit({"type": "tool", "name": name, "state": "denied", "result": error})
+                self.tools_used.append({"name": name, "args": arguments, "error": error})
+                return "Error: " + error
+            name, arguments = real, fixed
         self.emit({"type": "tool", "name": name, "args": arguments, "state": "start"})
         if name.startswith("mcp__") and not config.get("auto_run"):
             server = name.split("__")[1]
@@ -900,6 +951,16 @@ class Turn:
             self.images.append(img)
             self.emit({"type": "image", "path": img, "caption": "🎨 " + os.path.basename(img)})
         return result
+
+    def _tools(self, calls):
+        """Results of one step's tool calls, in order. Calls that only read (searches, pages, files) run at the same
+        time; anything that changes something runs one after the other."""
+        names = [tools.resolve(c["name"], c["arguments"])[0] for c in calls]
+        if len(calls) > 1 and all(n in tools.READ_ONLY for n in names):
+            from concurrent.futures import ThreadPoolExecutor
+            with ThreadPoolExecutor(max_workers=min(4, len(calls))) as ex:
+                return list(ex.map(lambda c: self._tool(c["name"], c["arguments"]), calls))
+        return [self._tool(c["name"], c["arguments"]) for c in calls]
 
     # -------------------------------------------------------------- code: write, run, judge, fix
 
@@ -1155,6 +1216,12 @@ class Turn:
                 ask["content"] += "\n\nThe screenshot of the rendered page is attached: check it shows what was asked."
                 ask["_images"] = [data_url(shot.group(1).strip())]
         try:
+            files = ""
+            for p in claimed_paths(answer + "\n" + evidence)[:10]:
+                files += "%s: %s\n" % (p, ("exists, %d bytes" % os.path.getsize(p)) if os.path.isfile(p) else
+                                        "folder exists" if os.path.isdir(p) else "DOES NOT EXIST")
+            if files:
+                evidence += "\n\n[filesystem check by NewAl]\n" + files
             return pool.complete_json(judge, [{"role": "system", "content": VERDICT_PROMPT}, ask], schema, max_tokens=150)
         except Exception:  # noqa: BLE001
             return {"ok": True, "reason": "ran without errors"}
@@ -1223,7 +1290,7 @@ PLAN_PROMPT = ("Before acting, write a short plan for this goal: at most 6 numbe
                "yourself with code_task over searching for existing ones. Plan only, no tool calls.")
 MAX_SEARCHES = 3
 GOAL_THINKING = 160            # tokens of thinking before each goal step (~6 s): better choices, still moving
-MAX_GOAL_STEPS = 25
+MAX_GOAL_STEPS = 40
 MAX_PROJECT_STEPS = 60
 MAX_PROJECT_CHECKS = 5
 MAX_REVIEWS = 1                # a second one (to confirm the fix) only with 💭
@@ -1242,13 +1309,71 @@ REVIEW_PROMPT = ("You review a code change before it is handed to the user. Comp
                  "task done, is anything broken, half-finished, or left over (debug prints, commented-out code, TODOs)? "
                  "Report only real problems, not style or taste. JSON: ok (true when it can be handed over) and "
                  "problems (short, concrete fixes; empty when ok).")
-MAX_GOAL_CHECKS = 4
+MAX_GOAL_CHECKS = 6
 CODE_TASK_TOOL = {"type": "function", "function": {
     "name": "code_task",
     "description": "Write a program for a task and run/test/fix it until it works. Returns the working program, "
                    "its output and where it was saved. Use it for anything that needs code.",
     "parameters": {"type": "object", "properties": {"task": {"type": "string", "description": "what the program must do"}},
                    "required": ["task"]}}}
+
+
+# Answers that report an action, and the tools that can have done it. A claim with none of those tools having run
+# successfully this turn is sent back ("false success": 44-76% of agent failures in tau2-bench/AppWorld, 2026).
+CLAIMS = [
+    (r"(أنشأت|انشأت|كتبت|حفظت|عملت(لك)?|سويت|تم (إنشاء|انشاء|حفظ|كتابة))\s+(لك\s+)?(ال)?(ملف|مجلد|سكربت|برنامج)|"
+     r"\b(I('ve| have)? (created|saved|written|wrote)|file (was |has been )?(created|saved))\b",
+     {"write_file", "run_command", "code_task", "zip_path", "unzip_path", "download_file", "generate_image",
+      "write_project_file", "edit_file"}),
+    (r"(شغّلت|شغلت|نفّذت|نفذت|تم (تشغيل|تنفيذ) (الأمر|الكود|السكربت|البرنامج))|\bI('ve| have)? (ran|run|executed)\b",
+     {"run_command", "code_task", "run_tests", "run_project"}),
+    (r"(فتحت|تم فتح)\s+(لك\s+)?(ال)?(برنامج|ملف|مجلد|موقع|رابط|VS ?Code|فيجوال|المتصفح|notepad|excel)|"
+     r"\bI('ve| have)? opened\b", {"open_target", "vscode", "run_command"}),
+    (r"(ثبّت|ثبتت|تم تثبيت)|\bI('ve| have)? installed\b", {"run_command", "vscode"}),
+    (r"(نزّلت|نزلت|تم تنزيل|تم تحميل)|\bI('ve| have)? downloaded\b",
+     {"download_file", "kaggle_download", "drive_download", "git_clone", "run_command"}),
+    (r"(رفعت|تم رفع|دفعت التغييرات)|\bI('ve| have)? (pushed|uploaded)\b",
+     {"git_push", "drive_upload", "run_command", "github_create_repo"}),
+    (r"(جدولت|تمت جدولة|تم جدولة)|\bI('ve| have)? scheduled\b", {"schedule"}),
+    (r"(نسخت|تم نسخ)\s+.{0,20}(الحافظة|clipboard)", {"clipboard_set"}),
+]
+CLAIM_CHECK = ("Your answer says: «%s». No tool did that in this conversation turn, so it did not happen. Do it now "
+               "with the tools (and check the result), or tell me plainly that it was not done and why. Never report "
+               "an action that a tool did not actually perform.")
+
+
+_WIN_PATH = re.compile(r"(?:[A-Za-z]:\\|%USERPROFILE%\\|~[\\/])[^\s`'\"<>|*?]+\.[A-Za-z0-9]{1,6}\b")
+_FILE_EXT = (r"(?:py|js|ts|html?|css|json|md|txt|csv|xlsx?|docx?|pdf|pptx?|png|jpe?g|gif|svg|zip|exe|ps1|bat|cmd|"
+             r"java|cs|cpp|c|h|go|rs|sql|ya?ml|toml|ini|log|xml|ipynb|mp3|mp4|wav)")
+_WS_FILE = re.compile(r"`([\w\-./\\]+\." + _FILE_EXT + r")`", re.I)
+
+
+def claimed_paths(text, absolute_only=False):
+    """Files a report names: absolute paths, and (unless absolute_only) `name.ext` in backticks taken as inside the
+    workspace (only a hint for the judge: the file may be in another folder)."""
+    out = []
+    for m in _WIN_PATH.findall(text or ""):
+        p = os.path.expandvars(os.path.expanduser(m.rstrip(".,;:)")))
+        if p not in out:
+            out.append(p)
+    for m in ([] if absolute_only else _WS_FILE.findall(text or "")):
+        if not os.path.isabs(m) and "/" not in m[:1]:
+            p = os.path.join(config.WORKSPACE, m)
+            if p not in out and not any(o.endswith(m) for o in out):
+                out.append(p)
+    return out if config.IS_WINDOWS or os.environ.get("NEWAL_TEST_PATHS") else [p for p in out if not p[1:3] == ":\\"]
+
+
+def unsupported_claim(answer, used):
+    """The first action the answer reports that no successful tool call this turn can have done, else ''."""
+    ok = {t["name"] for t in used if not t.get("denied") and not t.get("error")
+          and not str(t.get("result", "")).startswith(("خطأ", "Error"))}
+    for pattern, able in CLAIMS:
+        m = re.search(pattern, answer or "", re.I)
+        if m and not (ok & able):
+            line = next((l for l in answer.splitlines() if m.group(0) in l), m.group(0))
+            return line.strip()[:200]
+    return ""
 
 
 # "draw me / make a picture of ..." (not "draw a chart of my data": that is a program, see _code).

@@ -70,7 +70,28 @@ def find_files(pattern="*", folder=""):
     return "Folder: %s\nPattern: %s (all sub-folders)\nCount: %d\n%s" % (root, pattern, len(found), lines)
 
 
-def schedule_prompt(name, prompt, when, time_hhmm="", days="", date=""):
+def run_command(command, shell="powershell", cwd="", timeout=120):
+    kind = (shell or "powershell").strip().lower()
+    kind = {"ps": "powershell", "pwsh": "powershell", "bat": "cmd", "bash": "wsl"}.get(kind, kind)
+    if kind not in ("powershell", "cmd", "wsl"):
+        return "shell غير معروف: %s (المتاح: powershell, cmd, wsl)" % shell
+    folder = _path(cwd) if cwd else None
+    if folder and not os.path.isdir(folder):
+        return "المجلد غير موجود: " + folder
+    try:
+        seconds = max(5, min(1800, int(float(timeout or 120))))
+    except ValueError:
+        seconds = 120
+    return connectors.shell(command, kind, folder, timeout=seconds)
+
+
+def schedule(name, when, time_hhmm="", prompt="", command="", days="", date=""):
+    if command and not prompt:
+        if when.strip().lower() not in ("once", "daily"):
+            return "أوامر مجدول ويندوز: once أو daily فقط. لغير هيك استخدم prompt."
+        return wintools.schedule_task(name, command, time_hhmm or "09:00", daily=when.strip().lower() == "daily")
+    if not prompt:
+        return "حدد prompt (شو يعمل NewAl) أو command (أمر PowerShell)"
     from . import schedules
     return schedules.add_from_tool(name, prompt, when, time_hhmm, days, date)
 
@@ -112,10 +133,12 @@ TOOLS = {
     "currency": (web.currency, "Convert money between currencies (ISO codes like USD, EUR, SYP, SAR).",
                  _p(amount=S("amount"), from_currency=S("ISO code"), to_currency=S("ISO code")), False),
     "current_time": (now, "The current local date and time.", _p(), False),
-    "run_command": (lambda command, shell="powershell", cwd="": connectors.shell(command, shell, _path(cwd) if cwd else None),
-                    "Run a command in the computer's terminal (PowerShell by default; shell can be cmd or wsl). "
-                    "Default folder is the NewAl workspace.",
-                    _p(command=S("the command"), shell=S("powershell, cmd or wsl", True), cwd=S("working folder", True)), True),
+    "run_command": (run_command,
+                    "Run a command on this computer and get its real output and exit code. shell: powershell (default), "
+                    "cmd or wsl. Default folder: the NewAl workspace. timeout in seconds (default 120, up to 1800 for "
+                    "installs and builds).",
+                    _p(command=S("the command"), shell=S("powershell, cmd or wsl", True), cwd=S("working folder", True),
+                       timeout=S("seconds", True)), True),
     "write_file": (write_file, "Create or overwrite a text file (code, notes, csv, html...). Relative paths go to the workspace.",
                    _p(path=S("file path"), content=S("full file content")), True),
     "read_file": (read_file, "Read a file: text, code, PDF, Word, Excel, PowerPoint.", _p(path=S("file path")), False),
@@ -154,7 +177,11 @@ TOOLS = {
     "kaggle_download": (connectors.kaggle_download, "Download a Kaggle dataset (owner/name) as a zip into the workspace.",
                         _p(ref=S("owner/dataset")), False),
     "kaggle_notebooks": (connectors.kaggle_notebooks, "List the user's Kaggle notebooks.", _p(), False),
-    "vscode_open": (connectors.vscode_open, "Open a file or folder in VS Code.", _p(path=S("file or folder", True)), False),
+    "vscode": (connectors.vscode, "Use VS Code: action = open (file/folder), goto (file at a line), diff (path vs other), "
+               "install_extension (id like ms-python.python), list_extensions, new_window.",
+               _p(action=S("open (default), goto, diff, install_extension, list_extensions or new_window", True),
+                  path=S("file or folder", True), line=S("line number for goto", True),
+                  other=S("second file for diff", True), extension=S("extension id", True)), False),
     "system_info": (wintools.system_info, "This computer: name, Windows version, CPU, RAM, free disk space, IP.", _p(), False),
     "open_target": (wintools.open_target, "Open an app (notepad, calc, excel, chrome, code...), a website URL or a "
                     "file/folder on this computer.", _p(target=S("app name, URL or path")), False),
@@ -171,15 +198,12 @@ TOOLS = {
                        "The prompt must be English: subject, setting, style, lighting, colours.",
                        _p(prompt=S("English description of the picture"), width=S("pixels, default 512", True),
                           height=S("pixels, default 512", True)), False),
-    "schedule_prompt": (schedule_prompt,
-                        "Have NewAl itself do something later or on a schedule (a reminder, a daily news summary, a "
-                        "weekly report...): at that time it answers `prompt` in its own chat and shows a notification.",
-                        _p(name=S("short title"), prompt=S("what to do then, as a request to NewAl"),
-                           when=S("once, daily, weekly or hourly"), time_hhmm=S("HH:MM (24h)", True),
-                           days=S("weekly: days like 0,3 (0=Monday)", True), date=S("once: YYYY-MM-DD", True)), False),
-    "schedule_task": (wintools.schedule_task, "Schedule a PowerShell command in Windows Task Scheduler, daily or once at HH:MM.",
-                      _p(name=S("task name"), command=S("PowerShell command"), time_hhmm=S("HH:MM"),
-                         daily=B("repeat every day")), True),
+    "schedule": (schedule, "Do something later or on a schedule. With `prompt`: NewAl itself answers it then (a reminder, a "
+                           "daily news summary, a weekly report) in its own chat with a notification. With `command`: "
+                           "a PowerShell command run by Windows Task Scheduler (runs even when NewAl is closed).",
+                 _p(name=S("short title"), when=S("once, daily, weekly or hourly"), time_hhmm=S("HH:MM (24h)", True),
+                    prompt=S("what NewAl should do then", True), command=S("PowerShell command instead of a prompt", True),
+                    days=S("weekly: days like 0,3 (0=Monday)", True), date=S("once: YYYY-MM-DD", True)), False),
 }
 
 ARG_ALIASES = {"currency": {"from_currency": "frm", "to_currency": "to"}}
@@ -192,7 +216,7 @@ GROUPS = {
     "desktop": (r"حافظة|clipboard|انسخ|الصق|لقطة|screenshot|سكرين|اشعار|إشعار|notify|ذكرني|نبهني|نزّل|نزل ملف|download|"
                 r"zip|ضغط|فك الضغط|جدول|schedule|كل يوم|يومياً",
                 ["clipboard_get", "clipboard_set", "screenshot", "notify", "download_file", "zip_path", "unzip_path",
-                 "generate_image", "schedule_prompt", "schedule_task"]),
+                 "generate_image", "schedule"]),
     "github": (r"git ?hub|جيت ?هاب|جيتهب|جت هب|مستودع|repo|\bpr\b|issue|git_|push|clone|كلون",
                ["github_repos", "github_read", "github_issues", "github_create_issue", "github_create_repo",
                 "git_clone", "git_push"]),
@@ -200,7 +224,7 @@ GROUPS = {
                                                       "gitlab_create_issue", "git_clone", "git_push"]),
     "drive": (r"drive|درايف|جوجل درايف|قوقل درايف", ["drive_list", "drive_download", "drive_upload"]),
     "kaggle": (r"kaggle|كاغل|كاجل|كيغل|dataset|داتا ?سيت", ["kaggle_search", "kaggle_download", "kaggle_notebooks"]),
-    "vscode": (r"vs ?code|visual studio|فيجوال|في ?اس ?كود|فس ?كود", ["vscode_open"]),
+    "vscode": (r"vs ?code|visual studio|فيجوال|في ?اس ?كود|فس ?كود", ["vscode"]),
 }
 
 
@@ -224,7 +248,7 @@ def connected():
         out.append("gitlab")
     if connectors.drive_connected():
         out.append("drive")
-    if config.get("kaggle_username") and config.get("kaggle_key"):
+    if connectors.kaggle_connected():
         out.append("kaggle")
     if connectors.vscode_path():
         out.append("vscode")
@@ -300,6 +324,51 @@ def needs_approval(name):
     return TOOLS[name][3] and not config.get("auto_run")
 
 
+# Other names models use for the real tools (closed-world: a call is resolved to a tool that exists or refused).
+TOOL_ALIASES = {"powershell": "run_command", "cmd": "run_command", "shell": "run_command", "terminal": "run_command",
+                "run_cmd": "run_command", "execute": "run_command", "bash": "run_command", "exec": "run_command",
+                "vscode_open": "vscode", "open_vscode": "vscode", "code": "vscode", "open_in_vscode": "vscode",
+                "search": "web_search", "google": "web_search", "browse": "read_url", "fetch": "read_url",
+                "open_url": "read_url", "create_file": "write_file", "save_file": "write_file", "cat": "read_file",
+                "ls": "list_dir", "open": "open_target", "open_app": "open_target", "schedule_task": "schedule",
+                "schedule_prompt": "schedule", "draw": "generate_image", "image": "generate_image"}
+# Tools that only read: several of them in one step run at the same time.
+READ_ONLY = {"web_search", "read_url", "weather", "currency", "current_time", "read_file", "list_dir", "find_files",
+             "search_memory", "system_info", "clipboard_get", "github_repos", "github_read", "github_issues",
+             "gitlab_projects", "gitlab_read", "gitlab_issues", "drive_list", "kaggle_search", "kaggle_notebooks"}
+
+
+def resolve(name, arguments, allowed=None):
+    """(tool name, arguments dict, error). The name must be a real tool (an alias or a near-miss spelling is mapped
+    to it); required arguments must be there; unknown ones are dropped. A refused call returns the reason, which
+    goes back to the model instead of a made-up result."""
+    import difflib
+    if isinstance(arguments, str):
+        try:
+            arguments = json.loads(arguments or "{}")
+        except ValueError:
+            return name, {}, "وسائط غير صالحة (JSON): " + arguments[:200]
+    if not isinstance(arguments, dict):
+        return name, {}, "الوسائط لازم تكون object"
+    names = list(allowed or TOOLS)
+    real = name if name in TOOLS else TOOL_ALIASES.get((name or "").lower())
+    if not real:
+        close = difflib.get_close_matches(name or "", names, n=1, cutoff=0.75)
+        real = close[0] if close else None
+    if not real or real not in TOOLS:
+        return name, arguments, "No tool named %r. Use one of: %s" % (name, ", ".join(sorted(names)))
+    props = TOOLS[real][2].get("properties", {})
+    required = TOOLS[real][2].get("required", [])
+    fixed = {k: v for k, v in arguments.items() if k in props or k in ARG_ALIASES.get(real, {})}
+    if name in ("cmd", "powershell", "bash") and "shell" not in fixed:
+        fixed["shell"] = {"bash": "wsl"}.get(name, name)
+    missing = [k for k in required if fixed.get(k) in (None, "")]
+    if missing:
+        return real, fixed, "Missing required argument(s) for %s: %s. Parameters: %s" % (
+            real, ", ".join(missing), json.dumps(props, ensure_ascii=False)[:600])
+    return real, fixed, ""
+
+
 def call(name, arguments):
     if name.startswith("mcp__"):
         from . import mcp
@@ -307,13 +376,9 @@ def call(name, arguments):
             return connectors.clip(mcp.manager.call(name, arguments), 8000)
         except Exception as e:  # noqa: BLE001
             return "خطأ: %s" % e
-    if name not in TOOLS:
-        return "أداة غير معروفة: " + name
-    if isinstance(arguments, str):
-        try:
-            arguments = json.loads(arguments or "{}")
-        except ValueError:
-            return "وسائط غير صالحة: " + arguments[:200]
+    name, arguments, error = resolve(name, arguments)
+    if error:
+        return "خطأ: " + error
     args = {ARG_ALIASES.get(name, {}).get(k, k): v for k, v in (arguments or {}).items()}
     try:
         return str(TOOLS[name][0](**args))

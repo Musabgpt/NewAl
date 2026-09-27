@@ -16,10 +16,10 @@ const TOOL_LABEL = {
   git_clone: "git clone", git_push: "git push", gitlab_projects: "GitLab", gitlab_read: "GitLab",
   gitlab_issues: "GitLab", gitlab_create_issue: "GitLab", drive_list: "Google Drive", drive_download: "Google Drive",
   drive_upload: "Google Drive", kaggle_search: "Kaggle", kaggle_download: "Kaggle", kaggle_notebooks: "Kaggle",
-  vscode_open: "VS Code", code_task: "💻 كتابة وتجربة برنامج", plan: "📋 الخطة", find_files: "🔍 بحث عن ملفات",
+  vscode: "VS Code", code_task: "💻 كتابة وتجربة برنامج", plan: "📋 الخطة", find_files: "🔍 بحث عن ملفات",
   system_info: "💻 معلومات الجهاز", open_target: "↗ فتح", clipboard_get: "📋 الحافظة", clipboard_set: "📋 نسخ",
   screenshot: "📸 لقطة شاشة", notify: "🔔 إشعار", download_file: "⬇ تنزيل", zip_path: "🗜 ضغط", unzip_path: "🗜 فك ضغط",
-  schedule_task: "⏰ جدولة",
+  schedule: "⏰ جدولة",
 };
 
 // ------------------------------------------------------------------ conversations
@@ -289,7 +289,7 @@ function addBot() {
       const label = TOOL_LABEL[e.name] || e.name;
       if (e.state === "start") {
         let args = e.args;
-        try { args = JSON.stringify(JSON.parse(e.args), null, 1); } catch (_) {}
+        try { args = JSON.stringify(typeof e.args === "string" ? JSON.parse(e.args) : e.args, null, 1); } catch (_) {}
         const b = box("", "⏳ " + label, args);
         (tools[e.name] = tools[e.name] || []).push(b);
         extras.appendChild(b);
@@ -720,62 +720,6 @@ function wireCanvas() {
   $("#canvasAsk").onkeydown = e => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); canvasAsk(); } };
 }
 
-// ------------------------------------------------------------------ 🎤 voice input
-
-// Records the microphone as 16 kHz mono 16-bit WAV (what Whisper reads) and puts the text in the message box.
-const mic = {stream: null, ctx: null, node: null, chunks: [], busy: false};
-
-async function toggleMic() {
-  const btn = $("#mic");
-  if (mic.busy) return;
-  if (mic.stream) return stopMic();
-  if (state && !state.voice) {
-    if (confirm("الإدخال الصوتي بحاجة نموذج «🎤 الصوت» (570 MB). تفتح «النماذج» لتنزّله؟")) showPanel("models");
-    return;
-  }
-  api("/api/voice-warm", {});            // the model loads while the user speaks
-  try {
-    mic.stream = await navigator.mediaDevices.getUserMedia({audio: {channelCount: 1, echoCancellation: true, noiseSuppression: true}});
-  } catch (e) { alert("ما قدرت افتح الميكروفون: " + e.message); return; }
-  mic.ctx = new (window.AudioContext || window.webkitAudioContext)({sampleRate: 16000});
-  const src = mic.ctx.createMediaStreamSource(mic.stream);
-  mic.node = mic.ctx.createScriptProcessor(4096, 1, 1);
-  mic.chunks = [];
-  mic.node.onaudioprocess = e => mic.chunks.push(new Float32Array(e.inputBuffer.getChannelData(0)));
-  src.connect(mic.node); mic.node.connect(mic.ctx.destination);
-  btn.classList.add("rec"); btn.textContent = "⏹"; btn.title = "إيقاف وتحويل لنص";
-}
-
-async function stopMic() {
-  const btn = $("#mic");
-  const rate = mic.ctx.sampleRate;
-  mic.node.disconnect(); mic.stream.getTracks().forEach(t => t.stop()); mic.ctx.close();
-  mic.stream = null;
-  btn.classList.remove("rec"); btn.textContent = "⏳"; mic.busy = true;
-  try {
-    const r = await (await fetch("/api/transcribe", {method: "POST", headers: {"X-NewAl": "1", "Content-Type": "audio/wav"},
-                                                    body: wavFile(mic.chunks, rate)})).json();
-    if (r.error) alert(r.error);
-    else if (r.text) {
-      const t = $("#input");
-      t.value = (t.value ? t.value.replace(/\s*$/, " ") : "") + r.text;
-      autosize(); t.focus();
-    }
-  } finally { mic.busy = false; btn.textContent = "🎤"; btn.title = "🎤 احكي بدل ما تكتب"; }
-}
-
-function wavFile(chunks, rate) {
-  const n = chunks.reduce((a, c) => a + c.length, 0);
-  const buf = new ArrayBuffer(44 + n * 2), v = new DataView(buf);
-  const str = (o, s) => [...s].forEach((ch, i) => v.setUint8(o + i, ch.charCodeAt(0)));
-  str(0, "RIFF"); v.setUint32(4, 36 + n * 2, true); str(8, "WAVE"); str(12, "fmt ");
-  v.setUint32(16, 16, true); v.setUint16(20, 1, true); v.setUint16(22, 1, true); v.setUint32(24, rate, true);
-  v.setUint32(28, rate * 2, true); v.setUint16(32, 2, true); v.setUint16(34, 16, true); str(36, "data"); v.setUint32(40, n * 2, true);
-  let o = 44;
-  for (const c of chunks) for (const x of c) { v.setInt16(o, Math.max(-1, Math.min(1, x)) * 0x7fff, true); o += 2; }
-  return new Blob([buf], {type: "audio/wav"});
-}
-
 // ------------------------------------------------------------------ sending
 
 async function send(text, files, editId) {
@@ -1002,9 +946,13 @@ const panels = {
         <div class="field"><input type="text" id="gitlab_url" dir="ltr" value="${escapeHtml(st.gitlab_url)}"></div>
         <div class="field"><input type="password" id="gitlab_token" placeholder="glpat-…" value="${st.gitlab_token}"></div></details></div>
       <div class="card"><h4>Kaggle ${mark(c.kaggle)}</h4>
-        <div class="about">من kaggle.com ← Settings ← API ← Create New Token، ينزل kaggle.json فيه username و key.</div>
-        <div class="row"><input type="text" id="kaggle_username" placeholder="username" value="${escapeHtml(st.kaggle_username)}">
-        <input type="password" id="kaggle_key" placeholder="key" value="${st.kaggle_key}"></div></div>
+        <div class="about">اضغط الزر: إذا عندك مفتاح Kaggle على الجهاز بيستخدمه فوراً، وإلا بيفتح صفحة Kaggle وإنت بس اضغط
+          «Create New Token» وNewAl بياخد المفتاح لحاله (من التنزيلات أو الحافظة) وبيتأكد إنو شغال.</div>
+        <div class="row"><button class="primary" id="kgConnect">🔗 ربط Kaggle بضغطة</button><span class="hint" id="kgOut"></span></div>
+        <details><summary class="hint">إدخال يدوي</summary><div class="row">
+          <input type="text" id="kaggle_username" placeholder="username" value="${escapeHtml(st.kaggle_username)}">
+          <input type="password" id="kaggle_key" placeholder="key" value="${st.kaggle_key}">
+          <input type="password" id="kaggle_token" placeholder="أو API token (KGAT_…)" value="${st.kaggle_token || ""}"></div></details></div>
       <div class="card"><h4>Google Drive ${mark(c.drive)}</h4>
         <div class="about">يفتح صفحة تسجيل دخول Google بالمتصفح (عبر rclone المجاني). ${c.rclone ? "" : '<span class="bad">rclone غير موجود</span>'}</div>
         <div class="row"><button id="driveConnect">ربط Google Drive</button><span id="driveOut" class="hint"></span></div></div>
@@ -1017,7 +965,7 @@ const panels = {
       <div class="row"><button class="primary" id="saveConnect">حفظ</button><span id="saved" class="ok"></span></div>`;
     body.querySelector("#saveConnect").onclick = async () => {
       const v = {};
-      for (const k of ["github_token", "gitlab_url", "gitlab_token", "kaggle_username", "kaggle_key"]) v[k] = body.querySelector("#" + k).value.trim();
+      for (const k of ["github_token", "gitlab_url", "gitlab_token", "kaggle_username", "kaggle_key", "kaggle_token"]) v[k] = body.querySelector("#" + k).value.trim();
       await api("/api/settings", v);
       body.querySelector("#saved").textContent = "✓ حُفظ";
       setTimeout(() => panels.connect(body), 600);
@@ -1055,6 +1003,20 @@ const panels = {
       const r = await api("/api/addons/install", {id: "vscode"});
       e.target.disabled = false;
       const o = body.querySelector("#vsOut"); o.className = r.ok ? "ok" : "bad"; o.textContent = r.message;
+    };
+    body.querySelector("#kgConnect").onclick = async e => {
+      const out = body.querySelector("#kgOut");
+      e.target.disabled = true;
+      let r = await api("/api/kaggle/connect", {});
+      out.className = "hint"; out.textContent = r.message;
+      while (r.state === "waiting") {
+        await new Promise(res => setTimeout(res, 2000));
+        r = await api("/api/kaggle/state", {});
+        out.textContent = r.message;
+      }
+      out.className = r.state === "ok" ? "ok" : "bad";
+      e.target.disabled = false;
+      if (r.state === "ok") setTimeout(() => panels.connect(body), 1500);
     };
     body.querySelector("#openVs").onclick = async () => {
       const r = await api("/api/vscode", {});
@@ -1258,7 +1220,7 @@ const panels = {
       box.appendChild(c);
     }
     if (list.some(t => ["queued", "running"].includes(t.status)))
-      setTimeout(() => { if (!$("#panel").hidden && body.dataset.panel === "tasks") panels.tasks(body); }, 3000);
+      setTimeout(() => { if (!$("#panel").hidden && body.isConnected && body.dataset.panel === "tasks") panels.tasks(body); }, 3000);
   },
 
   async project(body) {
@@ -1522,6 +1484,14 @@ function showPanel(name, arg) {
   panels[name](body, arg);
 }
 
+// ⏰ All tasks in one place: the scheduled ones (NewAl answers at a time) and the background coding tasks.
+panels.alltasks = async function (body) {
+  body.innerHTML = '<div id="atSched"></div><hr><div id="atBg"></div>';
+  const a = body.querySelector("#atSched"), b = body.querySelector("#atBg");
+  b.dataset.panel = "tasks";
+  await Promise.all([panels.schedules(a), panels.tasks(b)]);
+};
+
 // ⏰ Scheduled tasks: NewAl answers a request at a time or on a schedule, in the task's own chat.
 const DAYS = ["الإثنين", "الثلاثاء", "الأربعاء", "الخميس", "الجمعة", "السبت", "الأحد"];
 panels.schedules = async function (body) {
@@ -1673,7 +1643,6 @@ document.addEventListener("DOMContentLoaded", () => {
   try { document.documentElement.dataset.theme = localStorage.getItem("theme") || "dark"; } catch (_) {}
   $("#newChat").onclick = () => newChat(false);
   $("#newSpace").onclick = () => showPanel("space", 0);
-  $("#mic").onclick = toggleMic;
   $("#spaceChip").onclick = () => newChat(false);          // leave the project: a new ordinary chat
   $("#tempChat").onclick = () => newChat(!tempMode);
   let searchTimer = null;

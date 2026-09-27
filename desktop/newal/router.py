@@ -143,7 +143,8 @@ def route(text):
             return by_examples(text)[0]
         except Exception:  # noqa: BLE001 - fall through to the model
             pass
-    if catalog.pick("router"):
+    if catalog.pick("router") and not (config.get("one_brain") and catalog.available("coder")):
+        # (With one brain the small router model is not loaded just to route: less RAM, one model in memory.)
         try:
             return by_model(text)
         except Exception:  # noqa: BLE001 - routing must never block an answer

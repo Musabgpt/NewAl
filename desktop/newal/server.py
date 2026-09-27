@@ -94,7 +94,7 @@ def state():
         "connectors": {
             "github": bool(config.get("github_token")),
             "gitlab": bool(config.get("gitlab_token")),
-            "kaggle": bool(config.get("kaggle_username") and config.get("kaggle_key")),
+            "kaggle": connectors.kaggle_connected(),
             "drive": connectors.drive_connected(),
             "rclone": bool(config.find_tool("rclone")),
             "vscode": bool(connectors.vscode_path()),
@@ -109,7 +109,6 @@ def state():
         "browser": bool(browser.find()),
         "brain": speed.state(),
         "notices": schedules.notices(),
-        "voice": _ready("voice"),
         "image": _ready("images"),
         "home": config.HOME,
         "workspace": config.WORKSPACE,
@@ -383,16 +382,6 @@ class Handler(BaseHTTPRequestHandler):
             return self._openai()
         if p == "/api/upload":
             return self._upload()
-        if p == "/api/voice-warm":
-            from . import voice
-            voice.warm()
-            return self._json({"ok": True})
-        if p == "/api/transcribe":
-            from . import voice
-            try:
-                return self._json(voice.transcribe(self._body()))
-            except Exception as e:  # noqa: BLE001 - shown next to the microphone
-                return self._json({"error": str(e)})
         m = re.fullmatch(r"/api/projects/(\d+)/upload", p)
         if m:
             return self._project_upload(int(m.group(1)))
@@ -571,9 +560,13 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(connectors.connect_gitlab())
         if p == "/api/disconnect":
             key = {"github": ("github_token", "github_user"), "gitlab": ("gitlab_token", "gitlab_user"),
-                   "kaggle": ("kaggle_username", "kaggle_key")}.get(body.get("service"), ())
+                   "kaggle": ("kaggle_username", "kaggle_key", "kaggle_token")}.get(body.get("service"), ())
             config.update({k: "" for k in key})
             return self._json({"ok": True})
+        if p == "/api/kaggle/connect":
+            return self._json(connectors.kaggle_connect())
+        if p == "/api/kaggle/state":
+            return self._json(connectors.kaggle_link_state())
         if p == "/api/drive/connect":
             ok, out = connectors.drive_connect()
             return self._json({"ok": ok, "output": out[-1500:]})
@@ -599,7 +592,7 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json({"error": "المجلد غير موجود"}, 404)
             return self._json({"path": agent.zip_folder(folder)})
         if p == "/api/vscode":
-            return self._json({"text": connectors.vscode_open(body.get("path", ""))})
+            return self._json({"text": connectors.vscode("open", body.get("path", ""))})
         self._json({"error": "not found"}, 404)
 
     def do_OPTIONS(self):

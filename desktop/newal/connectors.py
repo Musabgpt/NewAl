@@ -3,8 +3,11 @@
 import base64
 import json
 import os
+import re
 import shutil
 import subprocess
+import threading
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -66,7 +69,9 @@ def shell(command, kind="powershell", cwd=None, timeout=120):
     if kind == "wsl":
         args = ["wsl.exe", "-e", "bash", "-lc", command]
     elif kind == "cmd":
-        args = ["cmd.exe", "/c", command]
+        # UTF-8 code page first: cmd prints Arabic file names in the OEM code page (720/864) otherwise, which
+        # came back as nonsense. One string: cmd /s /c keeps the command's own quotes as they are.
+        args = 'cmd.exe /d /s /c "chcp 65001>nul & %s"' % command if config.IS_WINDOWS else ["bash", "-lc", command]
     elif config.IS_WINDOWS:
         ps = shutil.which("pwsh") or "powershell.exe"
         args = [ps, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command",
@@ -75,6 +80,46 @@ def shell(command, kind="powershell", cwd=None, timeout=120):
         args = ["bash", "-lc", command]      # development on Linux
     code, out = run(args, cwd=cwd, timeout=timeout)
     return "exit code %d\n%s" % (code, clip(out) or "(no output)")
+
+
+VSCODE_ACTIONS = ("open", "goto", "diff", "install_extension", "list_extensions", "new_window")
+
+
+def vscode(action="open", path="", line=0, other="", extension=""):
+    """VS Code from the agent: open a file or folder, jump to a line, compare two files, install or list extensions."""
+    exe = vscode_path()
+    if not exe:
+        return "VS Code غير مثبت. ثبّته من «الإضافات» (زر واحد) أو winget install Microsoft.VisualStudioCode"
+    action = (action or "open").strip().lower()
+    if action not in VSCODE_ACTIONS:
+        return "action غير معروف: %s. المتاح: %s" % (action, ", ".join(VSCODE_ACTIONS))
+
+    def full(p):
+        p = os.path.expandvars(os.path.expanduser(p or ""))
+        return p if os.path.isabs(p) else os.path.join(config.WORKSPACE, p)
+    if action in ("list_extensions", "install_extension"):
+        args = [exe, "--list-extensions", "--show-versions"] if action == "list_extensions" else \
+            [exe, "--install-extension", extension or path, "--force"]
+        if action == "install_extension" and not (extension or path):
+            return "حدد extension (مثلاً ms-python.python)"
+        code, out = run(args, timeout=300)
+        return "exit code %d\n%s" % (code, clip(out) or "(no output)")
+    target = full(path) if path else config.WORKSPACE
+    if action != "new_window" and not os.path.exists(target):
+        return "غير موجود: " + target
+    if action == "goto":
+        args = [exe, "-g", "%s:%d" % (target, int(line or 1))]
+    elif action == "diff":
+        if not other or not os.path.exists(full(other)):
+            return "diff يحتاج ملفين موجودين: path و other"
+        args = [exe, "-d", target, full(other)]
+    elif action == "new_window":
+        args = [exe, "-n", target]
+    else:
+        args = [exe, target]
+    subprocess.Popen(args, creationflags=NO_WINDOW, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                     stderr=subprocess.DEVNULL, shell=exe.endswith(".cmd"))
+    return "تم في VS Code (%s): %s" % (action, target + (":%d" % int(line) if action == "goto" else ""))
 
 
 # ------------------------------------------------------------------ GitHub
@@ -292,11 +337,144 @@ def gitlab_create_issue(project, title, body=""):
 
 # ------------------------------------------------------------------ Kaggle
 
+def kaggle_connected():
+    return bool(config.get("kaggle_token") or (config.get("kaggle_username") and config.get("kaggle_key")))
+
+
 def _kg():
+    """Kaggle's auth header: a new API token (KGAT_…, Bearer) or the legacy username + key (Basic)."""
+    t = config.get("kaggle_token")
+    if t:
+        return {"Authorization": "Bearer " + t}
     u, k = config.get("kaggle_username"), config.get("kaggle_key")
     if not (u and k):
-        raise RuntimeError("اربط Kaggle أولاً من الإعدادات (اسم المستخدم والمفتاح من kaggle.json).")
+        raise RuntimeError("اربط Kaggle أولاً: «🔗 الربط» ← «ربط Kaggle بضغطة».")
     return {"Authorization": "Basic " + base64.b64encode(("%s:%s" % (u, k)).encode()).decode()}
+
+
+# One-click connection: credentials already on the computer are used at once; otherwise Kaggle's settings page
+# opens and NewAl picks up the key the moment the user creates it (kaggle.json in Downloads, or a token copied).
+KAGGLE_SETTINGS = "https://www.kaggle.com/settings/account"
+_kaggle_link = {"state": "", "message": "", "user": ""}
+_TOKEN = re.compile(r"\b(KGAT_[A-Za-z0-9_-]{16,}|[a-f0-9]{32})\b")
+
+
+def _kaggle_found_creds():
+    """Credentials already on this computer (the Kaggle CLI's own files, its environment variables, a downloaded
+    kaggle.json): (kind, value(s), where)."""
+    home = os.path.expanduser("~")
+    if os.environ.get("KAGGLE_API_TOKEN"):
+        return "token", os.environ["KAGGLE_API_TOKEN"].strip(), "KAGGLE_API_TOKEN"
+    if os.environ.get("KAGGLE_USERNAME") and os.environ.get("KAGGLE_KEY"):
+        return "legacy", (os.environ["KAGGLE_USERNAME"], os.environ["KAGGLE_KEY"]), "KAGGLE_KEY"
+    for folder in (os.environ.get("KAGGLE_CONFIG_DIR", ""), os.path.join(home, ".kaggle"),
+                   os.path.join(home, ".config", "kaggle")):
+        if not folder:
+            continue
+        tok = os.path.join(folder, "access_token")
+        if os.path.isfile(tok):
+            with open(tok, encoding="utf-8") as f:
+                t = f.read().strip()
+            if t:
+                return "token", t, tok
+        found = _read_kaggle_json(os.path.join(folder, "kaggle.json"))
+        if found:
+            return "legacy", found, os.path.join(folder, "kaggle.json")
+    for path in _downloaded_kaggle_json():
+        found = _read_kaggle_json(path)
+        if found:
+            return "legacy", found, path
+    return None
+
+
+def _read_kaggle_json(path):
+    try:
+        with open(path, encoding="utf-8") as f:
+            d = json.load(f)
+        return (d["username"], d["key"]) if d.get("username") and d.get("key") else None
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+
+
+def _downloaded_kaggle_json(since=0):
+    folder = os.path.join(os.path.expanduser("~"), "Downloads")
+    try:
+        names = [os.path.join(folder, n) for n in os.listdir(folder) if re.match(r"kaggle( \(\d+\))?\.json$", n)]
+    except OSError:
+        return []
+    return sorted((p for p in names if os.path.getmtime(p) >= since), key=os.path.getmtime, reverse=True)
+
+
+def _kaggle_save(kind, value):
+    if kind == "token":
+        config.update({"kaggle_token": value})
+    else:
+        config.update({"kaggle_username": value[0], "kaggle_key": value[1], "kaggle_token": ""})
+
+
+def kaggle_check():
+    """A real call with the saved credentials: (ok, message)."""
+    try:
+        rs = _api("https://www.kaggle.com/api/v1/kernels/list?mine=true&pageSize=1", _kg(), timeout=20)
+        if rs and not config.get("kaggle_username"):
+            # A token carries no user name; the user's own notebook shows it (the school needs it for its ref).
+            ref = rs[0].get("ref") or ""
+            if "/" in ref:
+                config.update({"kaggle_username": ref.split("/")[0]})
+        return True, "متصل ✓ (%s، %d دفتر)" % (config.get("kaggle_username") or "API token", len(rs or []))
+    except Exception as e:  # noqa: BLE001
+        return False, str(e)[:200]
+
+
+def kaggle_connect(open_page=True):
+    """One click: use credentials already here, else open Kaggle's API settings and wait (up to 5 minutes) for the
+    new kaggle.json in Downloads or a token copied to the clipboard. Returns the state for the UI."""
+    found = _kaggle_found_creds()
+    if found:
+        old = {k: config.get(k) for k in ("kaggle_token", "kaggle_username", "kaggle_key")}
+        _kaggle_save(found[0], found[1])
+        ok, msg = kaggle_check()
+        if ok:
+            _kaggle_link.update(state="ok", message="%s — من %s" % (msg, found[2]))
+            return dict(_kaggle_link)
+        config.update(old)                        # an old or revoked key: fall through to a new one
+    if _kaggle_link.get("state") == "waiting":
+        return dict(_kaggle_link)
+    _kaggle_link.update(state="waiting", message="افتح صفحة Kaggle واضغط «Create New Token»… NewAl بياخده لحاله")
+    started = time.time() - 5
+    if open_page:
+        import webbrowser
+        webbrowser.open(KAGGLE_SETTINGS)
+
+    def watch():
+        from . import wintools
+        seen_clip = ""
+        while time.time() - started < 300 and _kaggle_link["state"] == "waiting":
+            candidates = [("legacy", v, p) for p in _downloaded_kaggle_json(started)
+                          for v in [_read_kaggle_json(p)] if v]
+            if config.IS_WINDOWS:
+                clip_text = wintools.clipboard_get() or ""
+                if clip_text != seen_clip:
+                    seen_clip = clip_text
+                    m = _TOKEN.search(clip_text)
+                    if m:
+                        candidates.append(("token", m.group(1), "الحافظة"))
+            for kind, value, where in candidates:
+                _kaggle_save(kind, value)
+                ok, msg = kaggle_check()
+                if ok:
+                    _kaggle_link.update(state="ok", message="%s — من %s" % (msg, where))
+                    return
+            time.sleep(2)
+        if _kaggle_link["state"] == "waiting":
+            _kaggle_link.update(state="timeout", message="ما وصل مفتاح خلال 5 دقايق. جرّب مرة تانية.")
+
+    threading.Thread(target=watch, daemon=True).start()
+    return dict(_kaggle_link)
+
+
+def kaggle_link_state():
+    return dict(_kaggle_link, connected=kaggle_connected())
 
 
 def kaggle_search(query):
@@ -374,20 +552,11 @@ def vscode_path():
     exe = shutil.which("code")
     if exe:
         return exe
-    for base in (os.environ.get("LOCALAPPDATA", ""), os.environ.get("ProgramFiles", "")):
-        p = os.path.join(base, "Programs" if "Local" in base else "", "Microsoft VS Code", "bin", "code.cmd")
-        if base and os.path.exists(p):
-            return p
+    for base, sub in ((os.environ.get("LOCALAPPDATA", ""), "Programs"), (os.environ.get("ProgramFiles", ""), ""),
+                      (os.environ.get("ProgramFiles(x86)", ""), "")):
+        for name in ("Microsoft VS Code", "Microsoft VS Code Insiders"):
+            p = os.path.join(base, sub, name, "bin", "code-insiders.cmd" if "Insiders" in name else "code.cmd")
+            if base and os.path.exists(p):
+                return p
     return None
 
-
-def vscode_open(path=""):
-    exe = vscode_path()
-    if not exe:
-        return "VS Code غير مثبت أو غير موجود في PATH."
-    target = path or config.WORKSPACE
-    if not os.path.isabs(target):
-        target = os.path.join(config.WORKSPACE, target)
-    subprocess.Popen([exe, target], creationflags=NO_WINDOW, stdin=subprocess.DEVNULL,
-                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, shell=exe.endswith(".cmd"))
-    return "فُتح في VS Code: " + target
