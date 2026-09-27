@@ -291,13 +291,25 @@ function addBot() {
         let args = e.args;
         try { args = JSON.stringify(typeof e.args === "string" ? JSON.parse(e.args) : e.args, null, 1); } catch (_) {}
         const b = box("", "⏳ " + label, args);
+        b.dataset.args = args || "";
         (tools[e.name] = tools[e.name] || []).push(b);
         extras.appendChild(b);
         setStatus(label + "…");
+      } else if (e.state === "output") {
+        // What the command prints, while it runs: the box opens and follows the end of the output.
+        const b = tools[e.name] && tools[e.name][0];
+        if (!b) return;
+        const inner = b.querySelector(".inner");
+        if (!b.dataset.live) { b.dataset.live = "1"; b.open = true; inner.textContent += "\n\n"; }
+        inner.textContent = (inner.textContent + e.text).slice(-20000);
+        inner.scrollTop = inner.scrollHeight;
       } else {
         const b = (tools[e.name] && tools[e.name].shift()) || extras.appendChild(box("", label, ""));
         b.querySelector("summary").textContent = (e.state === "denied" ? "⛔ " : "✅ ") + label;
-        b.querySelector(".inner").textContent += "\n\n→ " + (e.result || "");
+        const inner = b.querySelector(".inner");
+        // The final result replaces the live output (it holds all of it, with the exit code).
+        if (b.dataset.live) inner.textContent = b.dataset.args || "";
+        inner.textContent += "\n\n→ " + (e.result || "");
         b.classList.add(e.state === "denied" ? "fail" : "ok");
       }
       scrollDown();
@@ -357,6 +369,10 @@ function addBot() {
     },
     memory(e) {
       extras.appendChild(box("", `🗂 من الذاكرة (${e.items.length})`, e.items.map(i => `[${i.source}] ${i.text}`).join("\n\n")));
+    },
+    procedure(e) {
+      extras.appendChild(box("", "📘 طريقة نجحت قبل لهدف مشابه", e.items.map(p =>
+        `${p.goal}\n(${p.time})\n` + p.steps.map((s, i) => `${i + 1}. ${s}`).join("\n")).join("\n\n")));
     },
     error(t) {
       if (status) status.remove();
@@ -762,6 +778,7 @@ async function send(text, files, editId) {
       case "lessons": bot.status("📒 يتذكر " + e.items.length + " درس من أغلاط سابقة"); break;
       case "goal_check": bot.verdict({ok: e.done, reason: (e.done ? "🎯 تحقق الهدف. " : "🎯 لم يكتمل بعد، يكمل: ") + (e.missing || "")}); break;
       case "memory": bot.memory(e); break;
+      case "procedure": bot.procedure(e); break;
       case "approve": askApproval(e); break;
       case "done": bot.finish(e.content, e.meta, e.message_id, true); bot.el.dataset.id = e.message_id; end(); break;
       case "cancelled": bot.error("أُوقف"); end(); break;
@@ -1110,7 +1127,8 @@ const panels = {
 
   async memory(body) {
     const s = await refreshState();
-    const [mems, learned] = await Promise.all([api("/api/memories"), api("/api/lessons")]);
+    const [mems, learned, procs, log] = await Promise.all([api("/api/memories"), api("/api/lessons"), api("/api/procedures"),
+                                                          api("/api/audit?n=40")]);
     const ix = s.index;
     body.innerHTML = `<h2>🗂 الذاكرة والمشروع</h2>
       <div class="card"><h4>الذاكرة الطويلة (${mems.length})</h4>
@@ -1121,6 +1139,14 @@ const panels = {
         <div class="about">كل مرة بيغلط بالكود وبيصلّح، بيكتب هون قاعدة حتى ما يرجع يغلطها. ولما شي بيفشل كل المحاولات،
           بيكتب «تجنّب». قبل كل برنامج بيقرأ الدروس اللي بتشبه الطلب.</div>
         <div id="lessonList"></div></div>
+      <div class="card"><h4>📘 طرق الإنجاز (${procs.length})</h4>
+        <div class="about">لما يخلص هدف ويتأكد منه بالأدلة (الملفات موجودة، المخرجات بتبين النتيجة)، بيحفظ هون الخطوات يلي نجحت.
+          المرة الجاية بهدف مشابه بيبدأ منها بدل ما يستكشف من الصفر، وبيرجع يتحقق من كل خطوة.</div>
+        <div id="procList"></div></div>
+      <div class="card"><h4>🧾 سجل الأدوات (آخر ${log.length})</h4>
+        <div class="about">كل أداة شغّلها NewAl على جهازك أو رفضتها أنت، مع وقتها ونتيجتها. الأسرار (التوكنات وكلمات السر) مخفية.
+          الملف: audit.jsonl بمجلد بيانات NewAl.</div>
+        <div id="auditList" class="audit"></div></div>
       <div class="card"><h4>مجلدات المشروع</h4>
         <div class="about">يُفهرس الكود والمستندات فيها (${ix.sources} ملف، ${ix.chunks} مقطع) ليبحث فيها NewAl عند كل سؤال.
         الملفات المرفقة بالمحادثات تُضاف تلقائياً. ${s.models.find(m => m.role === "embed").ready ? "" : '<span class="bad">نزّل نموذج الفهرسة للبحث بالمعنى.</span>'}</div>
@@ -1145,6 +1171,28 @@ const panels = {
       r.querySelector(".hint").textContent = `×${x.seen} · استُخدم ${x.used}`;
       r.querySelector("button").onclick = async () => { await api("/api/lessons", {delete: x.id}); panels.memory(body); };
       ll.appendChild(r);
+    }
+    const pl = body.querySelector("#procList");
+    for (const x of procs.slice().reverse()) {
+      const r = document.createElement("div");
+      r.className = "row";
+      r.innerHTML = '<span dir="auto" style="flex:1"></span><span class="hint"></span><button>🗑</button>';
+      r.querySelector("span").textContent = "✅ " + x.goal;
+      r.querySelector("span").title = x.steps.map((s, i) => `${i + 1}. ${s}`).join("\n");
+      r.querySelector(".hint").textContent = `${x.steps.length} خطوة · استُخدم ${x.used}`;
+      r.querySelector("button").onclick = async () => { await api("/api/procedures", {delete: x.id}); panels.memory(body); };
+      pl.appendChild(r);
+    }
+    const al = body.querySelector("#auditList");
+    const mark = {done: "✅", failed: "❌", denied: "⛔", refused: "⚠"};
+    for (const x of log) {
+      const r = document.createElement("div");
+      r.className = "row";
+      r.innerHTML = '<span class="hint"></span><span dir="ltr" style="flex:1"></span>';
+      r.querySelector(".hint").textContent = `${x.time.slice(5, 16)} ${mark[x.state] || ""}`;
+      r.querySelector("[dir=ltr]").textContent = `${x.tool} ${x.args}`.slice(0, 160);
+      r.title = x.result || "";
+      al.appendChild(r);
     }
     body.querySelector("#memAdd").onclick = async () => {
       const t = body.querySelector("#memText").value.trim();

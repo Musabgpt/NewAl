@@ -215,3 +215,6 @@ button.danger { color: #e66; }
 .gen-images img { width: 100%; border-radius: 12px; cursor: zoom-in; display: block; }
 .gen-images figcaption { font-size: 12px; margin-top: 4px; opacity: .8; }
 .gen-images a { margin-inline-end: 10px; }
+.audit { max-height: 320px; overflow: auto; }
+.audit .row { margin: 2px 0; font-size: 12.5px; flex-wrap: nowrap; }
+.audit .row [dir=ltr] { font-family: Consolas, "Cascadia Mono", monospace; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

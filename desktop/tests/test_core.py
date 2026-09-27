@@ -1928,3 +1928,114 @@ class ServerTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class EvidenceMemoryTest(unittest.TestCase):
+    """Goal mode keeps what it read (plan and checks in one conversation), remembers verified procedures, logs every
+    tool call with secrets masked, and shows command output while it runs."""
+
+    def _goal(self, text, verdicts):
+        from newal import procedures
+        calls = []
+        script = [{"content": "1. write_file done.txt", "tool_calls": []},
+                  {"content": "", "tool_calls": [{"id": "c1", "name": "write_file",
+                                                  "arguments": json.dumps({"path": "done.txt", "content": "hi"})}]},
+                  {"content": "Wrote done.txt.", "tool_calls": []}]
+        verdicts = list(verdicts)
+
+        def chat(role, messages, tools=None, **kw):
+            calls.append({"messages": [dict(m) for m in messages], "tools": tools, "extra": kw.get("extra") or {}})
+            if "response_format" in (kw.get("extra") or {}):
+                return {"content": json.dumps(verdicts.pop(0)), "tps": 1, "tool_calls": []}
+            r = script.pop(0) if script else {"content": "Wrote done.txt again.", "tool_calls": []}
+            return dict(r, tps=1)
+        old = (agent.pool.chat, agent.pool.no_tool_calls, agent.catalog.pick)
+        agent.pool.chat = chat
+        agent.pool.no_tool_calls = lambda role: {"logit_bias": [[7, False]]}
+        agent.catalog.pick = lambda role: "coder"
+        events = []
+        try:
+            t = agent.Turn(None, text, emit=events.append, approve=lambda _: True)
+            answer, info = t._goal([{"role": "system", "content": "s"}, {"role": "user", "content": text}], "coder")
+        finally:
+            agent.pool.chat, agent.pool.no_tool_calls, agent.catalog.pick = old
+        return answer, info, calls, events, procedures
+
+    def test_verified_goal_is_remembered_and_reused(self):
+        text = "create the file done.txt with hi in the workspace folder"
+        answer, info, calls, events, procedures = self._goal(text, [{"done": True, "missing": "done.txt exists"}])
+        self.assertTrue(info["verified"])
+        plan, step = calls[0], calls[1]
+        self.assertEqual(plan["tools"], step["tools"])          # one tool list: the plan's reading is reused
+        self.assertEqual(step["messages"][2]["content"], plan["messages"][-1]["content"])   # the plan request kept
+        self.assertEqual(step["messages"][3], {"role": "assistant", "content": "1. write_file done.txt"})
+        check = calls[-1]
+        self.assertEqual(check["tools"], step["tools"])         # the check continues the same conversation
+        self.assertEqual(check["messages"][:len(calls[-2]["messages"])], calls[-2]["messages"])
+        saved = procedures.all_procedures()
+        self.assertEqual(saved[-1]["goal"], text)
+        self.assertTrue(saved[-1]["steps"][0].startswith("write_file: "))
+        # The same goal again: the procedure goes into the plan request and is shown.
+        answer, info, calls, events, _ = self._goal(text, [{"done": True, "missing": "ok"}])
+        self.assertIn("A procedure that reached a similar goal before", calls[0]["messages"][-1]["content"])
+        self.assertIn("procedure", [e["type"] for e in events])
+        procedures.forget(saved[-1]["id"])
+
+    def test_failed_check_stays_in_the_conversation(self):
+        text = "make the report file for this week"
+        answer, info, calls, events, procedures = self._goal(text, [{"done": False, "missing": "no report yet"},
+                                                                    {"done": True, "missing": "ok"}])
+        self.assertTrue(info["verified"])
+        after = calls[4]["messages"]              # plan, tool step, answer, check (3), then the next step (4)
+        self.assertIn("Check now, before I accept it", after[-3]["content"])
+        self.assertEqual(json.loads(after[-2]["content"])["missing"], "no report yet")
+        self.assertIn("The goal is not reached yet: no report yet", after[-1]["content"])
+        for p in procedures.all_procedures():
+            procedures.forget(p["id"])
+
+    def test_unverified_goal_is_not_remembered(self):
+        from newal import procedures
+        before = len(procedures.all_procedures())
+        self._goal("write notes about nothing", [{"done": False, "missing": "x"}] * 10)
+        self.assertEqual(len(procedures.all_procedures()), before)
+
+    def test_audit_log_masks_secrets(self):
+        from newal import audit
+        config.update({"github_token": "ghp_" + "x" * 36})
+        try:
+            t = agent.Turn(None, "x", approve=lambda _: True)
+            t._tool("run_command", {"command": "echo ghp_" + "x" * 36})
+            t._tool("no_such_tool", {})
+        finally:
+            config.update({"github_token": ""})
+        rows = audit.recent(2)
+        self.assertEqual(rows[0]["state"], "refused")
+        self.assertEqual(rows[1]["tool"], "run_command")
+        self.assertNotIn("x" * 36, json.dumps(rows))
+        self.assertIn("••••", rows[1]["args"])
+
+    def test_command_output_is_shown_while_it_runs(self):
+        from newal import connectors
+        seen = []
+        connectors.live_output(seen.append)
+        try:
+            code, out = connectors.run([sys.executable, "-c", "import sys,time\nfor i in range(3):\n"
+                                        " print('line', i, flush=True); time.sleep(0.4)\nsys.exit(3)"], timeout=30)
+        finally:
+            connectors.live_output(None)
+        self.assertEqual(code, 3)
+        self.assertEqual(out.split(), "line 0 line 1 line 2".split())
+        self.assertGreaterEqual(len(seen), 2)                     # in pieces, not once at the end
+        self.assertEqual("".join(seen).split(), out.split())
+        code, out = connectors.run([sys.executable, "-c", "print('quiet')"], timeout=30)
+        self.assertEqual((code, out.strip()), (0, "quiet"))       # no listener: as before
+
+    def test_tool_results_are_squeezed(self):
+        noisy = "exit code 0\n" + "\x1b[32mok\x1b[0m\n" + "same\n" * 50 + "45%|████  | 4/9\r100%|██████| 9/9\n" + "x" * 9000
+        out = agent.squeeze(noisy, agent.TOOL_RESULT_CHARS)
+        self.assertIn("(the line above 49 more times)", out)
+        self.assertNotIn("\x1b", out)
+        self.assertNotIn("████", out)
+        self.assertLess(len(out), agent.TOOL_RESULT_CHARS + 100)
+        self.assertTrue(out.startswith("exit code 0"))
+        self.assertEqual(agent.squeeze("===== 3 passed in 0.1s ====="), "===== 3 passed in 0.1s =====")

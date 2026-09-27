@@ -8,7 +8,8 @@ import re
 import threading
 import time
 
-from . import browser, catalog, config, connectors, files, kvcache, langs, lessons, memory, router, sandbox, skills, tools, training, web, workspace
+from . import (audit, browser, catalog, config, connectors, files, kvcache, langs, lessons, memory, procedures, router, sandbox,
+               skills, tools, training, web, workspace)
 from .engine import Cancelled, pool
 
 MAX_TOOL_ROUNDS = 6
@@ -177,6 +178,7 @@ class Turn:
         self.approved = set()          # add-ons (MCP servers) the user allowed during this turn
         self.sent = None               # this turn's user message as the model got it (kept for the next turns)
         self.images = []               # pictures made during the turn (🎨 generate_image)
+        self._procedures = []          # goal mode: how a similar verified goal was reached before (procedures.py)
 
     # -------------------------------------------------------------- entry
 
@@ -472,15 +474,26 @@ class Turn:
         against what the tools actually returned; if something is missing the executor continues with that."""
         defs = tools.definitions(tools.goal_names(self.text), with_mcp=tools.mcp_for(self.text) or []) + [CODE_TASK_TOOL]
         steps, checks, seen, per_tool, steps_since_check = 0, 0, {}, {}, 0
+        try:
+            self._procedures = procedures.relevant(self.text)
+        except Exception:  # noqa: BLE001 - a hint, never a blocker
+            self._procedures = []
+        if self._procedures:
+            self.emit({"type": "procedure", "items": [{"goal": p["goal"], "steps": p["steps"], "time": p["time"]}
+                                                      for p in self._procedures]})
         # A short plan first: small models keep to a numbered list far better than to an open goal.
         self.emit({"type": "status", "text": "🎯 يخطط…"})
-        plan = pool.chat(role, messages + [{"role": "user", "content": PLAN_PROMPT}], cancel=self.cancel,
+        ask_plan = {"role": "user", "content": PLAN_PROMPT + procedures.as_prompt(self._procedures)}
+        plan = pool.chat(role, messages + [ask_plan], tools=defs, cancel=self.cancel,
                          max_tokens=400, extra=dict(pool.no_tool_calls(role) or {}, **self._extra(role)))
         plan_text = plan["content"].strip()
         if plan_text:
             self.emit({"type": "tool", "name": "plan", "args": "", "state": "start"})
             self.emit({"type": "tool", "name": "plan", "state": "done", "result": plan_text})
-            messages.append({"role": "assistant", "content": "My plan:\n" + plan_text})
+            # The request and the plan stay in the conversation exactly as the model read and wrote them (with the same
+            # tool list): llama.cpp then continues from what it has read instead of re-reading the plan.
+            messages.append(ask_plan)
+            messages.append({"role": "assistant", "content": plan_text})
             messages.append({"role": "user", "content": "Good. Carry out the plan step by step with the tools."})
         answer, tps = "", 0
         while steps < MAX_GOAL_STEPS:
@@ -543,8 +556,10 @@ class Turn:
             last_missing = verdict.get("missing", "")
             self.emit({"type": "goal_check", "done": verdict.get("done"), "missing": last_missing})
             if verdict.get("done"):
+                self._remember_procedure(answer)
                 return answer, {"tps": tps, "verified": True, "judge": last_missing, "steps": steps}
             messages.append({"role": "assistant", "content": answer})
+            messages += verdict.pop("_exchange", [])     # the check as it was asked in this conversation (cached)
             messages.append({"role": "user", "content": "The goal is not reached yet: %s\nContinue working with the "
                                                         "tools until it is really done (no partial result, nothing "
                                                         "simulated or assumed)." % last_missing})
@@ -866,6 +881,14 @@ class Turn:
         self.tools_used.append({"name": "code_task", "args": task, "result": result[:500]})
         return result
 
+    def _remember_procedure(self, answer):
+        """A goal verified by evidence leaves its working steps for the next similar goal (procedures.py)."""
+        try:
+            if procedures.add(self.text, self.tools_used, answer):
+                self.emit({"type": "status", "text": "📘 حفظت طريقة الإنجاز للمرات الجاية"})
+        except Exception:  # noqa: BLE001 - memory is a bonus
+            pass
+
     def _goal_check(self, goal, messages, answer, role=None, defs=None):
         judge = catalog.pick("judge")
         evidence = "\n\n".join("[%s] %s" % (m["role"], (m.get("content") or "")[-1200:])
@@ -893,6 +916,7 @@ class Turn:
                                                           "json_schema": {"name": "answer", "schema": schema}}))
                 verdict = json.loads(r["content"][r["content"].index("{"):r["content"].rindex("}") + 1])
                 if isinstance(verdict.get("done"), bool):
+                    verdict["_exchange"] = [ask[-1], {"role": "assistant", "content": r["content"]}]
                     return verdict
             except Cancelled:
                 raise
@@ -967,6 +991,7 @@ class Turn:
                    "\nأجب بالعربية." if lang == "Arabic" else ""))
 
     def _tool(self, name, arguments):
+        started = time.time()
         if not name.startswith("mcp__"):
             # Closed world: the call is mapped to a real tool (or refused) before anything runs or is approved.
             real, fixed, error = tools.resolve(name, arguments)
@@ -974,6 +999,7 @@ class Turn:
                 self.emit({"type": "tool", "name": name, "args": arguments, "state": "start"})
                 self.emit({"type": "tool", "name": name, "state": "denied", "result": error})
                 self.tools_used.append({"name": name, "args": arguments, "error": error})
+                self._audit(name, arguments, "refused", error, started)
                 return "Error: " + error
             name, arguments = real, fixed
         self.emit({"type": "tool", "name": name, "args": arguments, "state": "start"})
@@ -982,6 +1008,7 @@ class Turn:
             if server not in self.approved:
                 if not self.approve("السماح لإضافة «%s» بالعمل في هذه المهمة؟\n%s" % (server, tools.describe(name, arguments))):
                     self.emit({"type": "tool", "name": name, "state": "denied", "result": "رفض المستخدم"})
+                    self._audit(name, arguments, "denied", "", started)
                     return "رفض المستخدم استخدام هذه الإضافة."
                 self.approved.add(server)
         if name in tools.TOOLS and tools.needs_approval(name):
@@ -989,14 +1016,24 @@ class Turn:
                 result = "رفض المستخدم تنفيذ هذه الأداة."
                 self.emit({"type": "tool", "name": name, "state": "denied", "result": result})
                 self.tools_used.append({"name": name, "args": arguments, "denied": True})
+                self._audit(name, arguments, "denied", "", started)
                 return result
-        result = tools.call(name, arguments)
+        # What a command prints is shown in the chat while it runs (the model gets it all at the end).
+        connectors.live_output(lambda text: self.emit({"type": "tool", "name": name, "state": "output", "text": text}))
+        try:
+            result = tools.call(name, arguments)
+        finally:
+            connectors.live_output(None)
         self.tools_used.append({"name": name, "args": arguments, "result": result[:500]})
+        self._audit(name, arguments, "failed" if procedures.failed({"result": result}) else "done", result, started)
         self.emit({"type": "tool", "name": name, "state": "done", "result": result[:3000]})
         for img in images_in(result):                # a picture the tool made (🎨): shown under the answer
             self.images.append(img)
             self.emit({"type": "image", "path": img, "caption": "🎨 " + os.path.basename(img)})
         return squeeze(result, None if name in FULL_RESULTS else TOOL_RESULT_CHARS)
+
+    def _audit(self, name, arguments, state, result, started):
+        audit.log(name, arguments, state, result, time.time() - started, self.conv)
 
     def _tools(self, calls):
         """Results of one step's tool calls, in order. Calls that only read (searches, pages, files) run at the same

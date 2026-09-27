@@ -2,6 +2,7 @@
 
 import json
 import os
+import re
 import shutil
 import sys
 import threading
@@ -116,6 +117,23 @@ SECRETS = ("github_token", "gitlab_token", "kaggle_key", "kaggle_token", "contex
 
 def get(key):
     return _settings.get(key, DEFAULTS.get(key))
+
+
+# Tokens by their well-known shapes (GitHub, GitLab, Hugging Face, OpenAI-style keys, Kaggle JSON), and passwords
+# in URLs: masked in anything NewAl writes to its own logs and notes.
+_TOKEN_SHAPES = re.compile(r"\b(?:gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|glpat-[A-Za-z0-9_\-]{16,}|"
+                           r"hf_[A-Za-z0-9]{20,}|sk-[A-Za-z0-9_\-]{20,})\b|(?<=://)[^/\s:@]+:[^/\s@]+(?=@)|"
+                           r"(?<=\"key\": \")[0-9a-f]{24,}(?=\")")
+
+
+def redact(text):
+    """The text with the user's secrets (settings) and anything shaped like a token replaced by ••••."""
+    text = str(text)
+    for k in SECRETS:
+        v = str(_settings.get(k) or "")
+        if len(v) >= 6:
+            text = text.replace(v, "••••")
+    return _TOKEN_SHAPES.sub("••••", text)
 
 
 def all_settings(hide_secrets=True):

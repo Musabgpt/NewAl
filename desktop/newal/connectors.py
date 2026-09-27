@@ -34,8 +34,21 @@ def _api(url, token_header=None, method="GET", body=None, raw=False, timeout=30)
         raise RuntimeError("HTTP %d: %s" % (e.code, e.read().decode("utf-8", "replace")[:300]))
 
 
+_live = threading.local()
+
+
+def live_output(fn):
+    """While fn is set (by the turn running a tool, in its own thread), run() hands it the program's output as it
+    comes, for the chat to show live; the model still gets the whole output at the end. None switches it off."""
+    _live.fn = fn
+
+
 def run(args, cwd=None, timeout=120, env=None):
     """Runs a program; returns (exit code, output)."""
+    dec = _decode_mixed if isinstance(args, str) and args.startswith("cmd.exe /d /u") else _decode
+    sink = getattr(_live, "fn", None)
+    if sink:
+        return _run_live(args, cwd, timeout, env, dec, sink)
     try:
         p = subprocess.run(args, cwd=cwd or config.WORKSPACE, capture_output=True, timeout=timeout,
                            stdin=subprocess.DEVNULL, creationflags=NO_WINDOW, env=env)
@@ -43,9 +56,48 @@ def run(args, cwd=None, timeout=120, env=None):
         return -1, "انتهت المهلة (%d ث)" % timeout
     except FileNotFoundError as e:
         return -1, "البرنامج غير موجود: %s" % e
-    dec = _decode_mixed if isinstance(args, str) and args.startswith("cmd.exe /d /u") else _decode
     out = dec(p.stdout) + dec(p.stderr)
     return p.returncode, out
+
+
+def _run_live(args, cwd, timeout, env, dec, sink):
+    """run() with the output passed on while the program runs (stdout and stderr together, in the order written)."""
+    try:
+        p = subprocess.Popen(args, cwd=cwd or config.WORKSPACE, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                             stdin=subprocess.DEVNULL, creationflags=NO_WINDOW, env=env)
+    except FileNotFoundError as e:
+        return -1, "البرنامج غير موجود: %s" % e
+    chunks, pending, last = [], [], [0.0]
+
+    def flush(force=False):
+        if pending and (force or time.time() - last[0] > 0.3):
+            try:
+                sink(dec(b"".join(pending)))
+            except Exception:  # noqa: BLE001 - showing output must never break the command
+                pass
+            pending.clear()
+            last[0] = time.time()
+
+    def reader():
+        while True:
+            b = p.stdout.read1(4096) if hasattr(p.stdout, "read1") else p.stdout.read(4096)
+            if not b:
+                break
+            chunks.append(b)
+            pending.append(b)
+            flush()
+        flush(True)
+
+    t = threading.Thread(target=reader, daemon=True)
+    t.start()
+    try:
+        p.wait(timeout)
+    except subprocess.TimeoutExpired:
+        p.kill()
+        t.join(5)
+        return -1, "انتهت المهلة (%d ث)" % timeout + ("\n" + dec(b"".join(chunks)) if chunks else "")
+    t.join(10)
+    return p.returncode, dec(b"".join(chunks))
 
 
 _UTF16_RUN = re.compile(rb"(?:[\x01-\xff][\x00\x06]){3,}")

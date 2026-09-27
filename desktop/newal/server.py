@@ -14,7 +14,7 @@ import urllib.request
 import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-from . import addons, agent, browser, catalog, config, connectors, diagnose, kvcache, lessons, memory, phone, router, sandbox, schedules, school, skills, speed, tasks, training, updater, workspace
+from . import addons, agent, audit, browser, catalog, config, connectors, diagnose, kvcache, lessons, memory, phone, procedures, router, sandbox, schedules, school, skills, speed, tasks, training, updater, workspace
 from .engine import Cancelled, pool
 
 UI_DIR = os.path.join(config.BUNDLE, "ui")
@@ -347,6 +347,11 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(addons.setup_status())
         if p == "/api/lessons":
             return self._json(lessons.all_lessons())
+        if p == "/api/procedures":
+            return self._json(procedures.all_procedures())
+        if p == "/api/audit":
+            n = qs.get("n", ["60"])[0]
+            return self._json(audit.recent(min(int(n), 500) if n.isdigit() else 60))
         if p == "/api/school":
             return self._json(school.status())
         if p == "/api/tasks":
@@ -534,6 +539,10 @@ class Handler(BaseHTTPRequestHandler):
             if body.get("delete"):
                 lessons.forget(int(body["delete"]))
             return self._json(lessons.all_lessons())
+        if p == "/api/procedures":
+            if body.get("delete"):
+                procedures.forget(int(body["delete"]))
+            return self._json(procedures.all_procedures())
         if p == "/api/phone":
             return self._json(phone.configure(bool(body.get("enabled")), bool(body.get("new_key"))))
         if p == "/api/addons/setup_all":
