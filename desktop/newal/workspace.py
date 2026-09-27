@@ -127,6 +127,17 @@ def repo_map(root, limit=6000):
     return "\n".join(lines)
 
 
+def has_code(root):
+    """Whether the folder holds Python source (where a first pytest file makes sense)."""
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = [d for d in dirnames if d not in IGNORED and not d.startswith(".")]
+        if any(n.endswith(".py") for n in filenames):
+            return True
+        if dirpath.count(os.sep) - root.count(os.sep) > 3:
+            dirnames[:] = []
+    return False
+
+
 def instructions(root):
     """The project's own instructions for coding agents (AGENTS.md, as Codex reads it), else the README top."""
     for name in ("AGENTS.md", "agents.md", "CLAUDE.md", ".github/copilot-instructions.md"):

@@ -62,8 +62,10 @@ def run_chat(job, body):
         uid = memory.add_message(conv, "user", text, {"attachments": [os.path.basename(p) for p in attachments],
                                                       "paths": attachments})
         job.emit({"type": "start", "conv": conv, "user_id": uid})
+        project = body.get("project") if body.get("project") and os.path.isdir(body.get("project")) else None
         turn = agent.Turn(conv, text, attachments, emit=job.emit, approve=job.approve, cancel=job.cancel,
-                          mode=body.get("mode", "auto"), think=bool(body.get("think")))
+                          mode=body.get("mode", "auto"), think=bool(body.get("think")), plan=bool(body.get("plan")),
+                          project=project)
         answer, meta = turn.run()
         mid = memory.add_message(conv, "assistant", answer, meta)
         job.emit({"type": "done", "conv": conv, "message_id": mid, "meta": meta, "content": answer})

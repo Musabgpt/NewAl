@@ -1000,6 +1000,98 @@ class OneBrainTest(unittest.TestCase):
         self.assertEqual([r for _, r in seen], ["coder", "coder", "coder"])
 
 
+class SmarterLoopTest(unittest.TestCase):
+    def test_lessons_by_meaning(self):
+        from newal import lessons, memory
+        if os.path.exists(lessons.PATH):
+            os.remove(lessons.PATH)
+        lessons.add("fix", "On Windows open text files with encoding='utf-8' so Arabic text reads correctly.",
+                    "read a csv with arabic names", "UnicodeDecodeError: 'charmap'")
+        lessons.add("fix", "Convert input() strings to int before doing arithmetic with them.", "calculator", "")
+        # a stand-in for the embedding model: the Arabic request "means" the same as the first lesson
+        topic = lambda t: [1.0, 0.0, 0.0] if re.search(r"utf|عربي|arabic", t, re.I) else \
+            [0.0, 1.0, 0.0] if re.search(r"int|حاسبة", t) else [0.0, 0.0, 1.0]
+        old = (memory.can_embed, memory._embed)
+        memory.can_embed = lambda: True
+        memory._embed = lambda texts, query=False: [topic(t) for t in texts]
+        try:
+            found = lessons.relevant("اقرأ ملف فيه أسماء بالعربي")
+            again = lessons.relevant("اعملي آلة حاسبة")
+            none = lessons.relevant("قصيدة عن البحر")
+        finally:
+            memory.can_embed, memory._embed = old
+            os.remove(lessons.PATH)
+        self.assertEqual([x["text"][:10] for x in found], ["On Windows"])
+        self.assertEqual([x["text"][:7] for x in again], ["Convert"])
+        self.assertEqual(none, [])
+        self.assertNotIn("vec", found[0])
+
+    def test_search_when_the_same_error_returns(self):
+        answers = ["```python\nprint(undefined_name)\n```", "```python\nprint(undefined_name )\n```",
+                   "```python\nundefined_name = 1\nprint(undefined_name)\n```"]
+        prompts = []
+        old = (agent.pool.chat, catalog.pick, web.search, agent._safe_read)
+        agent.pool.chat = lambda role, messages, **kw: (prompts.append(messages[-1]["content"]), {"content": answers.pop(0), "tps": 1})[1]
+        catalog.pick = lambda role: None
+        web.search = lambda q, n=6: [{"title": "NameError fix", "url": "https://stackoverflow.com/q/1", "snippet": "define it first"}]
+        agent._safe_read = lambda url, q: "Define the variable before using it."
+        config.update({"web": True})
+        events = []
+        try:
+            t = agent.Turn(None, "print a value", emit=events.append)
+            answer, info = t._code([{"role": "user", "content": "print a value"}], "coder")
+        finally:
+            agent.pool.chat, catalog.pick, web.search, agent._safe_read = old
+        self.assertTrue(info["verified"])
+        self.assertNotIn("What others found", prompts[1])        # first failure: no search yet
+        self.assertIn("What others found for this error", prompts[2])
+        self.assertIn("stackoverflow.com", prompts[2])
+        self.assertTrue(any(e.get("name") == "web_search" and e.get("state") == "start" and "NameError" in e.get("args", "")
+                            for e in events))
+
+    def test_plan_first_changes_nothing(self):
+        from newal import workspace
+        root = ProjectModeTest.make(self)
+        call = lambda n, a: {"id": "", "name": n, "arguments": json.dumps(a)}
+        replies = [{"content": "", "tool_calls": [call("read_file", {"path": "shop.py"})]},
+                   {"content": "", "tool_calls": [call("edit_file", {"path": "shop.py", "old": "- 1", "new": ""})]},
+                   {"content": "1. غيّر shop.py\n2. شغّل الاختبارات", "tool_calls": []}]
+        offered = []
+        old = (agent.pool.chat, catalog.pick)
+        agent.pool.chat = lambda role, messages, tools=None, **kw: (offered.append([d["function"]["name"] for d in tools or []]),
+                                                                    dict(replies.pop(0), tps=1))[1]
+        catalog.pick = lambda role: None
+        try:
+            t = agent.Turn(None, "fix the total", mode="project", plan=True, project=root)
+            answer, info = t._project([{"role": "user", "content": "fix the total"}], "coder")
+        finally:
+            agent.pool.chat, catalog.pick = old
+        self.assertTrue(info["plan"])
+        self.assertIn("غيّر shop.py", answer)
+        self.assertNotIn("edit_file", offered[0])
+        self.assertNotIn("run", offered[0])
+        self.assertIn("read_file", offered[0])
+        with open(os.path.join(root, "shop.py")) as f:
+            self.assertIn("- 1", f.read())                        # nothing changed
+
+    def test_tests_first_hint(self):
+        from newal import workspace
+        root = tempfile.mkdtemp()
+        with open(os.path.join(root, "app.py"), "w") as f:
+            f.write("def add(a, b):\n    return a + b\n")
+        seen = []
+        old = (agent.pool.chat, catalog.pick)
+        agent.pool.chat = lambda role, messages, **kw: (seen.append(messages[-1]["content"]), {"content": "ok", "tool_calls": [], "tps": 1})[1]
+        catalog.pick = lambda role: None
+        config.update({"tests_first": True})
+        try:
+            agent.Turn(None, "add subtraction", mode="project", project=root)._project(
+                [{"role": "user", "content": "add subtraction"}], "coder")
+        finally:
+            agent.pool.chat, catalog.pick = old
+        self.assertIn("no tests yet", seen[0])
+
+
 class ServerTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):

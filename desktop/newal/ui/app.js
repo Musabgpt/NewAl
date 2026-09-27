@@ -272,6 +272,14 @@ function actions(el, text, meta, id) {
   if (meta.feedback === true) up.classList.add("picked");
   if (meta.feedback === false) down.classList.add("picked");
   btn("↻", "إعادة التوليد", () => regenerate(id));
+  if (meta.plan) {
+    const go = btn("▶ نفّذ الخطة", "ينفّذ الخطة اللي كتبها على المشروع", () => {
+      document.querySelector("input[name=mode][value=project]").checked = true;
+      $("#planFirst").checked = false;
+      send("نفّذ الخطة اللي كتبتها.", []);
+    });
+    go.className = "undo";
+  }
   if (meta.checkpoint) {
     const u = btn("↩ تراجع عن تعديلات المشروع", "يرجّع كل الملفات اللي غيّرها بهالرد متل ما كانت", async b => {
       if (!confirm("ترجيع الملفات اللي تغيرت بهالرد متل ما كانت؟")) return;
@@ -344,7 +352,8 @@ async function send(text, files, editId) {
   const bot = addBot();
   bot.status("يوجّه الطلب…");
   const mode = document.querySelector("input[name=mode]:checked").value;
-  const r = await api("/api/chat", {conv, text, attachments: files, mode, think: $("#think").checked, edit_from: editId || null});
+  const plan = mode === "project" && $("#planFirst").checked;
+  const r = await api("/api/chat", {conv, text, attachments: files, mode, think: $("#think").checked, plan, edit_from: editId || null});
   job = r.job;
   setBusy(true);
   const es = new EventSource("/api/chat/stream?job=" + job);

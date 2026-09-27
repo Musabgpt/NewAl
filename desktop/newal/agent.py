@@ -95,8 +95,9 @@ def _system(route):
 
 class Turn:
     def __init__(self, conv, text, attachments=(), emit=None, approve=None, cancel=None, mode="auto", think=False,
-                 project=None):
+                 project=None, plan=False):
         self.conv = conv
+        self.plan = plan               # project mode: explore and write a plan only, change nothing
         self.project = project         # project mode: this folder instead of the open project (background tasks)
         self.text = text
         self.attachments = list(attachments)
@@ -394,6 +395,10 @@ class Turn:
         if docs:
             notes.append(docs)
         symbols = workspace.repo_map(root)
+        if self.plan:
+            notes.append(PLAN_ONLY)
+        elif not proj.test_cmd and config.get("tests_first") and workspace.has_code(root):
+            notes.append(TESTS_FIRST)
         head = ("Project folder: %s\nTest command: %s\nFiles:\n%s\n%s\n%s\n\nTask:\n"
                 % (root, proj.test_cmd or "(none found: run the program itself to check)", tree,
                    ("\nFunctions and classes by file:\n" + symbols + "\n") if symbols else "",
@@ -402,7 +407,9 @@ class Turn:
         from . import mcp
         web_defs = tools.definitions(["web_search", "read_url"]) if config.get("web") else []
         defs = proj.definitions() + web_defs + (mcp.manager.definitions(only=["docs"]) if "docs" in mcp.manager.enabled() else [])
-        steps, checks, reviews, failures, verified, answer, tps = 0, 0, 0, [], None, "", 0
+        if self.plan:        # looking only: nothing that changes or runs anything
+            defs = [d for d in defs if d["function"]["name"] not in READ_ONLY_BLOCKED]
+        steps, checks, reviews, failures, verified, answer, tps, searched = 0, 0, 0, [], None, "", 0, False
         while steps < MAX_PROJECT_STEPS:
             self.emit({"type": "status", "text": "🧑‍💻 خطوة %d…" % (steps + 1)})
             compact(messages, keep=8, budget_chars=context_chars(role))
@@ -429,8 +436,9 @@ class Turn:
                 self.emit({"type": "draft_reset"})
                 continue
             answer = r["content"].strip()
-            if not proj.changed():
+            if self.plan or not proj.changed():
                 break
+            proj.test_cmd = proj.test_cmd or workspace.test_command(root)      # tests the agent wrote first
             if proj.test_cmd and checks < MAX_PROJECT_CHECKS:
                 # The agent says it is done: the project's own tests decide.
                 checks += 1
@@ -443,10 +451,14 @@ class Turn:
                 if not ok:
                     verified = False
                     failures.append("check %d: %s" % (checks, error_line(out)))
+                    found = ""
+                    if not searched and repeated_error(failures):
+                        searched = True
+                        found = self._search_error(error_line(out), proj.test_cmd)
                     messages.append({"role": "assistant", "content": answer})
                     messages.append({"role": "user", "content": "The project's tests fail:\n%s\n\nFix the code (change "
                                                                 "a test only if the test itself is wrong), then run the "
-                                                                "tests again." % out[-3000:]})
+                                                                "tests again.%s" % (out[-3000:], "\n\n" + found if found else "")})
                     self.emit({"type": "draft_reset"})
                     continue
                 verified = True
@@ -477,6 +489,9 @@ class Turn:
         if failures and verified is not None:
             threading.Thread(target=self._learn, args=(self.text, failures, diff[:4000], verified, ""),
                              daemon=True).start()
+        if self.plan:
+            return answer or "ما قدرت كمّل الخطة خلال %d خطوة." % steps, {"tps": tps, "steps": steps, "plan": True,
+                                                                        "project": root}
         return answer or "ما قدرت كمّل خلال %d خطوة." % steps, {
             "tps": tps, "verified": verified, "steps": steps, "attempts": checks or 1,
             "checkpoint": proj.id if changed else None, "files": changed, "project": root}
@@ -500,9 +515,35 @@ class Turn:
         except Exception:  # noqa: BLE001 - a failed review never blocks the result
             return {"ok": True, "problems": []}
 
+    def _search_error(self, error, hint=""):
+        """What others found for an error that keeps coming back: the error text searched on the web
+        (StackOverflow, GitHub issues, docs) and the best pages read, for the next fix."""
+        query = error_query(error, hint)
+        if not query or not config.get("web"):
+            return ""
+        self.emit({"type": "tool", "name": "web_search", "args": query, "state": "start"})
+        try:
+            results = web.search(query, n=6)
+        except Exception:  # noqa: BLE001
+            results = []
+        good = sorted(results, key=lambda x: 0 if re.search(r"stackoverflow|github\.com|docs\.|learn\.microsoft|"
+                                                            r"python\.org|mozilla", x["url"]) else 1)[:2]
+        from concurrent.futures import ThreadPoolExecutor
+        with ThreadPoolExecutor(2) as ex:
+            pages = list(ex.map(lambda x: _safe_read(x["url"], query), good))
+        parts = ["[%s](%s)\n%s" % (x["title"], x["url"], (p or x["snippet"])[:1400]) for x, p in zip(good, pages)]
+        self.emit({"type": "tool", "name": "web_search", "state": "done",
+                   "result": "\n".join("%s — %s" % (x["title"], x["url"]) for x in good) or "لا نتائج"})
+        if not parts:
+            return ""
+        self.tools_used.append({"name": "web_search", "args": query, "result": parts[0][:300]})
+        return "What others found for this error (web search):\n\n" + "\n\n".join(parts)
+
     def _project_tool(self, proj, name, arguments):
         self.emit({"type": "tool", "name": name, "args": arguments, "state": "start"})
-        if name in proj.TOOLS:
+        if self.plan and name in READ_ONLY_BLOCKED:
+            result = "Plan mode: nothing is changed or run now. Finish the plan."
+        elif name in proj.TOOLS:
             result = proj.call(name, arguments)
         elif name.startswith("mcp__"):
             result = tools.call(name, arguments)
@@ -640,7 +681,7 @@ class Turn:
         limit = max(1, int(config.get("max_fix_attempts") or 5))
         history = []                  # (attempt, short error) so the same mistake is not repeated
         used = {x["id"] for x in known}
-        last, prog, folder = None, None, None
+        last, prog, folder, searched = None, None, None, False
         for attempt in range(1, limit + 1):
             prog = program(answer, prog)
             if not prog:
@@ -697,6 +738,12 @@ class Turn:
             history.append("attempt %d: %s" % (attempt, ("wrong result: " + (verdict.get("reason") or "?")[:250]) if ok
                                                 else (error_line(output) or _last_line(output))))
             fix = self._fix_prompt(request, code, problem, history)
+            if not searched and not ok and repeated_error(history):
+                # The same error came back after a fix: look up what others found for it.
+                searched = True
+                found = self._search_error(error_line(output), lang)
+                if found:
+                    fix += "\n\n" + found
             if not docs and API_ERROR.search(problem):
                 # Wrong use of a library (a renamed function, a missing argument): its current documentation
                 # usually holds the fix. Looked up once per task.
@@ -872,6 +919,14 @@ MAX_GOAL_STEPS = 25
 MAX_PROJECT_STEPS = 60
 MAX_PROJECT_CHECKS = 5
 MAX_REVIEWS = 2
+PLAN_ONLY = ("Plan only, change nothing now. Explore with list_files, search and read_file, then reply (without a tool "
+             "call) with a numbered plan in the user's language: which files change and how, what new files are needed, "
+             "how the result will be tested, and any risk or question. Keep it short and concrete. The user reads the "
+             "plan and then asks you to carry it out.")
+READ_ONLY_BLOCKED = {"edit_file", "write_file", "run", "start_server", "stop_server"}
+TESTS_FIRST = ("This project has no tests yet. Unless the task is not about how the code behaves (docs, config, "
+               "styling), first write a small pytest file in tests/ for exactly what the task asks for, run it and see it "
+               "fail, then change the code until it passes. Keep the tests: they check this and later changes.")
 REVIEW_PROMPT = ("You review a code change before it is handed to the user. Compare it with the task: is every part of the "
                  "task done, is anything broken, half-finished, or left over (debug prints, commented-out code, TODOs)? "
                  "Report only real problems, not style or taste. JSON: ok (true when it can be handed over) and "
@@ -1193,6 +1248,31 @@ def writes_program(arguments):
     except ValueError:
         return False
     return str(a.get("path", "")).lower().endswith(CODE_EXT) and len(a.get("content", "")) > 200
+
+
+def repeated_error(history):
+    """True when the newest failure has the same error as an earlier one (a fix did not help)."""
+    last = [h.split(": ", 1)[-1].strip() for h in history]
+    return len(last) >= 2 and last[-1] != "" and last[-1] in last[:-1]
+
+
+def error_query(error, hint=""):
+    """A web search query for an error line: without the user's paths, line numbers, addresses and quoted local
+    values, which nobody else has."""
+    q = re.sub(r"^\s*(?:FAILED|ERROR)\s+\S+\s+-\s+", "", error or "")
+    if re.match(r"\s*(?:AssertionError|assert\b)", q):
+        return ""                        # the project's own expectations: nothing about them on the web
+    q = re.sub(r'File "[^"]*"|[A-Za-z]:\\[^\s:"\']+|(?:/[\w.-]+){2,}|line \d+|0x[0-9a-fA-F]+|:\d+(?::\d+)?', " ", q)
+    q = re.sub(r"'[^']{25,}'|\"[^\"]{25,}\"", " ", q)
+    q = re.sub(r"(['\"])\s*\1", " ", q)
+    q = re.sub(r"\s+", " ", q).strip(" :,.-")
+    if len(q) < 8 or not re.search(r"error|exception|fail|cannot|can't|not found|undefined|invalid|denied|refused|"
+                                    r"unsupported|expected|unexpected", q, re.I):
+        return ""
+    lang = {"python": "python", "node": "javascript", "powershell": "powershell"}.get(hint.split()[0] if hint else "", "")
+    if not lang and hint:
+        lang = "python" if re.search(r"python|pytest", hint) else "javascript" if re.search(r"npm|node", hint) else ""
+    return (q[:160] + (" " + lang if lang and lang not in q.lower() else "")).strip()
 
 
 def context_chars(role):

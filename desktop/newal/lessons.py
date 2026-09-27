@@ -44,7 +44,7 @@ def error_kind(text):
 
 
 def all_lessons():
-    return _load()
+    return [{k: v for k, v in x.items() if k != "vec"} for x in _load()]
 
 
 def add(kind, text, about, error=""):
@@ -71,22 +71,67 @@ def add(kind, text, about, error=""):
         return lesson
 
 
+# Cosine similarity (Qwen3-Embedding 0.6B) for a lesson to count as related. Measured with Arabic requests against
+# English lessons: related 0.52-0.73, unrelated at most 0.43.
+MEANING_MIN = 0.48
+
+
+def _unit(v):
+    n = sum(x * x for x in v) ** 0.5 or 1.0
+    return [x / n for x in v]
+
+
+def _with_vectors(items):
+    """Adds an embedding to the lessons that have none yet (saved, so each is embedded once)."""
+    from . import memory
+    todo = [x for x in items if not x.get("vec")]
+    if todo:
+        vecs = memory._embed(["%s\n%s" % (x["text"], x.get("about", "")) for x in todo])
+        for x, v in zip(todo, vecs):
+            x["vec"] = [round(f, 5) for f in _unit(v)]
+        with _lock:
+            by_id = {x["id"]: x for x in todo}
+            fresh = _load()
+            for x in fresh:
+                if x["id"] in by_id:
+                    x["vec"] = by_id[x["id"]]["vec"]
+            _save(fresh)
+    return items
+
+
 def relevant(request, error="", k=3, skip=()):
-    """Lessons for this request (and error), best first."""
-    rw = _words(request) | _words(error)
+    """Lessons for this request (and error), best first: by meaning when the search model is there (an Arabic
+    request finds a lesson written in English), else by shared words; the same exception type counts extra."""
+    from . import memory
     kind = error_kind(error)
+    items = [x for x in _load() if x["id"] not in skip]
+    if not items:
+        return []
     scored = []
-    for x in _load():
-        if x["id"] in skip:
-            continue
-        lw = _words(x["about"]) | _words(x["text"])
-        s = len(rw & lw) / (len(lw) or 1)
+    semantic = False
+    if memory.can_embed():
+        try:
+            items = _with_vectors(items)
+            q = _unit(memory._embed([(request[:1500] + "\n" + error[-600:]).strip()], query=True)[0])
+            semantic = True
+        except Exception:  # noqa: BLE001 - fall back to words
+            semantic = False
+    rw = _words(request) | _words(error)
+    for x in items:
+        if semantic:
+            s = sum(a * b for a, b in zip(q, x["vec"]))
+            ok = s >= MEANING_MIN
+        else:
+            lw = _words(x["about"]) | _words(x["text"])
+            s = len(rw & lw) / (len(lw) or 1)
+            ok = s >= 0.2
         if kind and x.get("error") == kind:
             s += 0.5
-        if s >= 0.2:
+            ok = True
+        if ok:
             scored.append((s + 0.02 * min(x.get("seen", 1), 5), x))
     scored.sort(key=lambda p: -p[0])
-    return [x for _, x in scored[:k]]
+    return [{k2: v for k2, v in x.items() if k2 != "vec"} for _, x in scored[:k]]
 
 
 def mark_used(ids):
