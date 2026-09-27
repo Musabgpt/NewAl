@@ -74,7 +74,8 @@ BRAIN = ("You are NewAl, a capable assistant and expert software engineer runnin
          "and end it with a small self-test (asserts) that prints the results. When the task needs several files, write "
          "every file in its own block with its path on the fence line (```python app/main.py), add pytest tests in tests/, "
          "and give the command that checks it on its own line: RUN: python -m pytest -q. Explain in a few short lines, "
-         "without repeating the code.\n"
+         "without repeating the code. Data files (CSV, Excel, JSON) are loaded from the path given with pandas; charts are "
+         "saved with matplotlib as PNG files in the current folder (never plt.show()) and the key numbers printed.\n"
          "Plans, reviews and comparisons: find root causes, compare options honestly, and give precise, actionable steps.")
 SHARED_ROUTES = ("chat", "tools", "code", "analyze")
 
@@ -181,12 +182,12 @@ class Turn:
     def _run(self):
         started = time.time()
         self._look()
-        route = self.mode if self.mode in router.ROUTES + ("goal", "project") else router.route(self.text)
+        route = self.mode if self.mode in router.ROUTES + ("goal", "project", "research") else router.route(self.text)
         if route == "code" and self.mode == "auto" and MULTI_STEP.search(self.text):
             # "write X, build an exe, push it to GitHub" is a task, not one program: a single script cannot
             # push without the user's credentials. Goal mode has git_push, run_command and code_task for it.
             route = "goal"
-        role = catalog.pick(config.get("goal_model") if route == "goal" else "coder" if route == "project"
+        role = catalog.pick(config.get("goal_model") if route == "goal" else "coder" if route in ("project", "research")
                             else router.ROLE_OF[route])
         if config.get("one_brain") and catalog.available("coder"):
             role = "coder"          # one brain: Qwen3.6 answers every kind of request
@@ -198,6 +199,8 @@ class Turn:
         meta = {"route": route, "role": role, "model": catalog.MODELS[role]["title"]}
         if route == "project":
             answer, info = self._project(messages, role)
+        elif route == "research":
+            answer, info = self._research(messages, role)
         elif route == "goal":
             answer, info = self._goal(messages, role)
         elif route == "code":
@@ -288,6 +291,10 @@ class Turn:
         if notes_text:
             user = notes_text + "My message:\n" + self.text
         for path in self.attachments:
+            if path.lower().endswith(DATA_EXT):
+                # A table is analysed by a program, not read by the model: its path and its first rows only.
+                user += "\n\n[Data file: %s]\n%s" % (path, data_preview(path))
+                continue
             text = files.extract(path)
             user += "\n\n[File: %s]\n%s" % (os.path.basename(path), connectors.clip(text, 16000) or "(لا نص فيه)")
         msgs.append({"role": "user", "content": user})
@@ -603,6 +610,59 @@ class Turn:
             "checkpoint": proj.id if changed else None, "files": changed, "project": root}
 
 
+    def _research(self, messages, role):
+        """🔬 Deep research: the question split into several searches, many pages read in parallel, then one report
+        with sources. Slower than a normal answer (minutes on a laptop), meant for questions that need it."""
+        import json
+        from concurrent.futures import ThreadPoolExecutor
+        question = self.text
+        self.emit({"type": "status", "text": "🔬 يخطط للبحث…"})
+        try:
+            plan = pool.complete_json(role, [
+                {"role": "system", "content": "Plan a web research. Reply with JSON: 3 to 5 short search queries that together "
+                                              "cover the question (keep names and dates; mix the question's language and "
+                                              "English)."},
+                {"role": "user", "content": question[:1500]}],
+                {"type": "array", "items": {"type": "string"}, "minItems": 2, "maxItems": 5}, max_tokens=200)
+            queries = [q.strip() for q in plan if isinstance(q, str) and q.strip()][:5]
+        except Exception:  # noqa: BLE001
+            queries = []
+        queries = queries or [plain_query(question)]
+        self.emit({"type": "tool", "name": "plan", "args": "", "state": "start"})
+        self.emit({"type": "tool", "name": "plan", "state": "done", "result": "\n".join("🔎 " + q for q in queries)})
+        results, seen = [], set()
+        with ThreadPoolExecutor(5) as ex:
+            for found in ex.map(lambda q: _safe_search(q, 6), queries):
+                for x in found:
+                    if x["url"] not in seen:
+                        seen.add(x["url"])
+                        results.append(x)
+        results = results[:12]
+        if not results:
+            return "ما لقيت نتائج بحث (تأكد من النت).", {}
+        self.emit({"type": "tool", "name": "web_search", "args": " | ".join(queries), "state": "start"})
+        self.emit({"type": "status", "text": "🔬 يقرأ %d صفحة…" % min(6, len(results))})
+        with ThreadPoolExecutor(6) as ex:
+            pages = list(ex.map(lambda x: _safe_read(x["url"], question, 1500), results[:6]))
+        parts = []
+        for i, x in enumerate(results):
+            body = pages[i] if i < len(pages) and pages[i] else x.get("snippet", "")
+            parts.append("[%d] %s\n%s\n%s" % (i + 1, x["title"], x["url"], body))
+        self.emit({"type": "tool", "name": "web_search", "state": "done",
+                   "result": "\n".join("[%d] %s — %s" % (i + 1, x["title"], x["url"]) for i, x in enumerate(results))})
+        self.tools_used.append({"name": "web_search", "args": " | ".join(queries), "result": "%d sources" % len(results)})
+        lang = "Arabic" if web.is_arabic(question) else "the language of my question"
+        messages[-1] = dict(messages[-1], content=messages[-1]["content"] + (
+            "\n\nResearch sources fetched just now (%s):\n\n%s\n\nWrite a well-structured research report in %s: a short "
+            "summary first, then sections with headings, a comparison table where it helps, and a conclusion. Use only "
+            "facts from the sources and cite them as [n]; say where they disagree or where information is missing."
+            % (datetime.date.today().isoformat(), "\n\n".join(parts), lang)))
+        self.sent = messages[-1]["content"]
+        self.emit({"type": "status", "text": "🔬 يكتب التقرير…"})
+        defs, extra = self._answer_opts(role, "chat")
+        r = pool.chat(role, messages, tools=defs, on_delta=self._delta, cancel=self.cancel, extra=extra, max_tokens=4096)
+        return r["content"].strip(), {"tps": r["tps"], "sources": len(results)}
+
     def _review(self, task, diff, tested):
         brain = catalog.pick("judge")
         if not brain or not diff.strip():
@@ -861,6 +921,11 @@ class Turn:
                 ok, output, timed_out, folder = run_boxed(prog) if boxed else run_program(prog)
             info["run_output"] = output[-2000:]
             info["attempts"] = attempt
+            made = images_in(output)
+            if made:
+                info["images"] = made           # charts and pictures the program saved: shown under the answer
+                for img in made:
+                    self.emit({"type": "image", "path": img, "caption": "📊 " + os.path.basename(img)})
             if MISSING_RUNTIME.search(output):
                 # Fixing the code cannot help when Python/Node itself is missing.
                 self.emit({"type": "run", "lang": lang, "ok": False, "attempt": attempt, "output": output[-1500:]})
@@ -1177,6 +1242,37 @@ _WEB_ONLY = re.compile(r"أخبار|اخبار|سعر|أسعار|طقس|news|pri
 WEB_PAGE_CHARS = 900          # per page read for an answer: ~1000 tokens in all with the snippets (~35 s on a laptop)
 
 
+DATA_EXT = (".csv", ".tsv", ".xlsx", ".xls", ".json", ".parquet")
+IMAGE_OUT = (".png", ".jpg", ".jpeg", ".svg", ".gif")
+
+
+def data_preview(path, rows=25):
+    """The first lines of a data file (the model writes the program that reads all of it)."""
+    try:
+        if path.lower().endswith((".xlsx", ".xls")):
+            return "(Excel file: read it with pandas.read_excel)"
+        if path.lower().endswith(".parquet"):
+            return "(Parquet file: read it with pandas.read_parquet)"
+        with open(path, encoding="utf-8", errors="replace") as f:
+            head = [next(f, "") for _ in range(rows)]
+        size = os.path.getsize(path)
+        return "First lines (%d KB in all):\n%s" % (size // 1024, connectors.clip("".join(head), 4000))
+    except OSError as e:
+        return "(could not read: %s)" % e
+
+
+def images_in(output):
+    """Pictures a run saved: "image: <path>" lines added by run_code."""
+    return [m.strip() for m in re.findall(r"^image: (.+)$", output or "", re.M) if os.path.exists(m.strip())][:8]
+
+
+def _safe_search(query, n=6):
+    try:
+        return web.search(query, n=n)
+    except Exception:  # noqa: BLE001
+        return []
+
+
 def _safe_read(url, question, max_chars=1500):
     try:
         return web.read(url, question, max_chars=max_chars)
@@ -1269,7 +1365,9 @@ def run_code(runner, code, timeout=60):
         return False, "%s غير مثبت على الجهاز" % runner, False
     code_, out = connectors.run(args, cwd=folder, timeout=timeout)
     timed_out = code_ == -1 and "انتهت المهلة" in out
-    return code_ == 0, "$ %s\n%s\n(exit code %d)" % (os.path.basename(path), connectors.clip(out, 4000), code_), timed_out
+    pics = "".join("\nimage: " + os.path.join(folder, f) for f in sorted(os.listdir(folder))
+                   if f.lower().endswith(IMAGE_OUT))
+    return code_ == 0, "$ %s\n%s\n(exit code %d)%s" % (os.path.basename(path), connectors.clip(out, 4000), code_, pics), timed_out
 
 
 # ------------------------------------------------------------------ programs: one block or a project
@@ -1409,7 +1507,9 @@ def run_program(prog, timeout=90):
             code_, out = connectors.run(argv, cwd=folder, timeout=timeout)
     timed_out = code_ == -1 and "انتهت المهلة" in out
     shown = " ".join(os.path.basename(a) if i == 0 else a for i, a in enumerate(argv))
-    return code_ == 0, "$ %s\n%s\n(exit code %d)" % (shown, connectors.clip(out, 4000), code_), timed_out, folder
+    pics = "".join("\nimage: " + os.path.join(root, f) for root, _, fs in os.walk(folder) for f in sorted(fs)
+                   if f.lower().endswith(IMAGE_OUT) and f not in prog["files"])
+    return code_ == 0, "$ %s\n%s\n(exit code %d)%s" % (shown, connectors.clip(out, 4000), code_, pics), timed_out, folder
 
 
 def run_boxed(prog):

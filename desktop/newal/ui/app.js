@@ -5,7 +5,7 @@ const api = (path, body) => fetch(path, body === undefined ? {} : {method: "POST
   .then(r => r.json());
 
 let conv = null, job = null, attachments = [], state = null;
-const ROUTE_LABEL = {code: "💻 برمجة", tools: "🛠 أدوات", analyze: "🧠 تحليل", chat: "💬 محادثة", goal: "🎯 هدف", project: "🧑‍💻 مشروع"};
+const ROUTE_LABEL = {research: "🔬 بحث معمّق", code: "💻 برمجة", tools: "🛠 أدوات", analyze: "🧠 تحليل", chat: "💬 محادثة", goal: "🎯 هدف", project: "🧑‍💻 مشروع"};
 const TOOL_LABEL = {
   web_search: "🔎 بحث بالنت", read_url: "🌐 قراءة صفحة", weather: "⛅ الطقس", currency: "💱 عملات",
   current_time: "🕒 الوقت", library_docs: "📚 توثيق المكتبة", list_files: "📁 ملفات المشروع", search: "🔎 بحث بالكود",
@@ -296,6 +296,7 @@ function addBot() {
       paint();
       enhance(content);
       if (live) canvasFollow(text);
+      if (!live) for (const p of (meta || {}).images || []) this.image({path: p, caption: "📊 " + p.split(/[\\/]/).pop()});
       meta = meta || {};
       if (!route.textContent && meta.route) route.textContent = `${ROUTE_LABEL[meta.route] || meta.route} · ${meta.model || ""}`;
       if (draft) draft.querySelector("summary").textContent = "⚙ مسودات الكود";

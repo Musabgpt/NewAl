@@ -1554,6 +1554,60 @@ class SpeedTest(unittest.TestCase):
         self.assertEqual(speed.state()["state"], "ready")
 
 
+class FeaturesTest(unittest.TestCase):
+    def test_deep_research(self):
+        searched, read, prompts = [], [], []
+        old = (agent.pool.complete_json, agent.pool.chat, agent.web.search, agent._safe_read)
+        agent.pool.complete_json = lambda role, msgs, schema, **kw: ["سعر الذهب اليوم", "gold price today"]
+        agent.web.search = lambda q, n=6: (searched.append(q), [{"title": "T " + q, "url": "https://x/" + q, "snippet": "s"}])[1]
+        agent._safe_read = lambda url, q, n=1500: (read.append(url), "page " + url)[1]
+        agent.pool.chat = lambda role, messages, **kw: (prompts.append(messages[-1]["content"]), {"content": "تقرير [1][2]", "tps": 1})[1]
+        try:
+            t = agent.Turn(None, "كم سعر الذهب؟", mode="research")
+            answer, info = t._research([{"role": "user", "content": "كم سعر الذهب؟"}], "coder")
+        finally:
+            agent.pool.complete_json, agent.pool.chat, agent.web.search, agent._safe_read = old
+        self.assertEqual(searched, ["سعر الذهب اليوم", "gold price today"])
+        self.assertEqual(len(read), 2)
+        self.assertEqual(info["sources"], 2)
+        self.assertIn("[2] T gold price today", prompts[0])
+        self.assertIn("cite them as [n]", prompts[0])
+        self.assertEqual(t.sent, prompts[0])
+
+    def test_charts_a_program_saves_are_shown(self):
+        code = ("open('chart.png', 'wb').write(b'\\x89PNG fake')\nprint('total', 42)\nassert 42 == 42\n")
+        ok, out, slow = agent.run_code("python", code)
+        self.assertTrue(ok, out)
+        imgs = agent.images_in(out)
+        self.assertEqual([os.path.basename(p) for p in imgs], ["chart.png"])
+        events = []
+        old = agent.pool.chat
+        agent.pool.chat = lambda role, messages, **kw: {"content": "```python\n" + code + "```", "tps": 1}
+        try:
+            answer, info = agent.Turn(None, "chart", emit=events.append)._code([{"role": "user", "content": "chart"}], "coder")
+        finally:
+            agent.pool.chat = old
+        self.assertTrue(info["verified"])
+        self.assertEqual(len(info["images"]), 1)
+        self.assertTrue(any(e["type"] == "image" for e in events))
+
+    def test_data_file_goes_as_path_and_preview(self):
+        path = os.path.join(HOME, "sales.csv")
+        with open(path, "w", encoding="utf-8") as f:
+            f.write("month,amount\n" + "".join("m%d,%d\n" % (i, i * 10) for i in range(500)))
+        t = agent.Turn(None, "حلل المبيعات", attachments=[path])
+        old = catalog.available
+        catalog.available = lambda role: False
+        try:
+            msgs = t._context("code", "coder")
+        finally:
+            catalog.available = old
+        user = msgs[-1]["content"]
+        self.assertIn("[Data file: %s]" % path, user)
+        self.assertIn("m3,30", user)
+        self.assertNotIn("m400,4000", user)          # not the whole table
+
+
 class ServerTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
