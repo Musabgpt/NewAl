@@ -119,6 +119,15 @@ class AgentTest(unittest.TestCase):
         ok, out, slow = agent.run_code("python", "import time\ntime.sleep(10)", timeout=2)
         self.assertTrue(slow)
 
+    def test_multi_step_code_requests_are_goals(self):
+        self.assertTrue(agent.MULTI_STEP.search("create a calculator app, build an exe and push it to GitHub"))
+        self.assertTrue(agent.MULTI_STEP.search("اكتب آلة حاسبة وارفعها على جيتهب"))
+        self.assertFalse(agent.MULTI_STEP.search("اكتب دالة بايثون تحسب المضروب"))
+
+    def test_error_line_prefers_the_real_error(self):
+        out = "Traceback...\nfatal: could not read Username for 'https://github.com'\nIf you see 'done', it worked\n(exit code 1)"
+        self.assertIn("fatal:", agent.error_line(out))
+
     def test_risky_code_is_spotted(self):
         self.assertTrue(agent.RISKY.search("import shutil\nshutil.rmtree('x')"))
         self.assertTrue(agent.RISKY.search("Remove-Item -Recurse C:\\x"))

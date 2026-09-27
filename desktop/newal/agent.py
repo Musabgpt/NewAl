@@ -74,6 +74,10 @@ class Turn:
     def run(self):
         started = time.time()
         route = self.mode if self.mode in router.ROUTES + ("goal",) else router.route(self.text)
+        if route == "code" and MULTI_STEP.search(self.text):
+            # "write X, build an exe, push it to GitHub" is a task, not one program: a single script cannot
+            # push without the user's credentials. Goal mode has git_push, run_command and code_task for it.
+            route = "goal"
         role = catalog.pick(config.get("goal_model") if route == "goal" else router.ROLE_OF[route])
         if not role:
             raise RuntimeError("لا يوجد نموذج منزّل. افتح «النماذج» ونزّل الموجّه ونموذج الأدوات على الأقل.")
@@ -376,6 +380,7 @@ class Turn:
                 break                 # nothing runnable (HTML, SQL, a snippet): answer as written
             lang, code = block
             if block == last_block:
+                info["note"] = "same_code"
                 break                 # the model returned the same code again: stop looping
             last_block = block
             if re.search(r"\binput\s*\(|Read-Host|readline\(", code):
@@ -431,8 +436,10 @@ class Turn:
                           cancel=self.cancel, max_tokens=3072)
             answer = r["content"].strip() or answer
         if info.get("verified") is False:
-            answer += ("\n\n> ⚠️ جرّبت الكود %d مرات وما زال فيه مشكلة. آخر خطأ:\n> `%s`"
-                       % (info["attempts"], _last_line(info.get("run_output", ""))[:300]))
+            why = error_line(info.get("run_output", "")) or info.get("judge", "")
+            answer += ("\n\n> ⚠️ جرّبت الكود %d مرات وما زال فيه مشكلة%s. آخر خطأ:\n> `%s`"
+                       % (info["attempts"], " (أعاد النموذج نفس الكود)" if info.get("note") == "same_code" else "",
+                          why[:300]))
         return answer, info
 
     def _fix_prompt(self, request, code, problem, history=()):
@@ -525,6 +532,8 @@ CODE_TASK_TOOL = {"type": "function", "function": {
                    "required": ["task"]}}}
 
 
+MULTI_STEP = re.compile(r"github|gitlab|push|commit|deploy|publish|upload|\bexe\b|executable|installer|pyinstaller|"
+                        r"ارفع|رفع|انشر|نشر|ثبت|ثبّت|حوله لبرنامج|ملف تنفيذي|درايف|drive", re.I)
 WEB_TOOLS = {"web_search", "read_url", "weather", "currency"}
 BROWSER_WORDS = re.compile(r"متصفح|browser|سجل دخول|login|اضغط على|click|عبّي|عبي النموذج|form|احجز|playwright", re.I)
 
@@ -608,6 +617,15 @@ def install_package(module):
         return False
     code_, _ = connectors.run([exe, "-m", "pip", "install", "--disable-pip-version-check", "-q", name], timeout=300)
     return code_ == 0
+
+
+def error_line(output):
+    """The most telling line of a failed run: the exception/error line, else the last line."""
+    lines = [l.strip() for l in output.splitlines() if l.strip() and not l.startswith("(exit code")]
+    for l in reversed(lines):
+        if re.search(r"Error|Exception|error:|fatal:|failed|denied|not found|No such|غير", l):
+            return l
+    return lines[-1] if lines else ""
 
 
 def _last_line(text):
