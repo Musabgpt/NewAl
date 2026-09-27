@@ -14,7 +14,10 @@ const TOOL_LABEL = {
   git_clone: "git clone", git_push: "git push", gitlab_projects: "GitLab", gitlab_read: "GitLab",
   gitlab_issues: "GitLab", gitlab_create_issue: "GitLab", drive_list: "Google Drive", drive_download: "Google Drive",
   drive_upload: "Google Drive", kaggle_search: "Kaggle", kaggle_download: "Kaggle", kaggle_notebooks: "Kaggle",
-  vscode_open: "VS Code", code_task: "💻 كتابة وتجربة برنامج",
+  vscode_open: "VS Code", code_task: "💻 كتابة وتجربة برنامج", plan: "📋 الخطة", find_files: "🔍 بحث عن ملفات",
+  system_info: "💻 معلومات الجهاز", open_target: "↗ فتح", clipboard_get: "📋 الحافظة", clipboard_set: "📋 نسخ",
+  screenshot: "📸 لقطة شاشة", notify: "🔔 إشعار", download_file: "⬇ تنزيل", zip_path: "🗜 ضغط", unzip_path: "🗜 فك ضغط",
+  schedule_task: "⏰ جدولة",
 };
 
 // ------------------------------------------------------------------ conversations

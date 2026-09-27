@@ -223,7 +223,17 @@ class Turn:
         """Works toward a goal with every tool: after the executor says it is done, the judge checks the goal
         against what the tools actually returned; if something is missing the executor continues with that."""
         defs = tools.definitions(tools.goal_names(self.text), with_mcp=tools.mcp_for(self.text) or []) + [CODE_TASK_TOOL]
-        steps, checks, seen = 0, 0, {}
+        steps, checks, seen, per_tool = 0, 0, {}, {}
+        # A short plan first: small models keep to a numbered list far better than to an open goal.
+        self.emit({"type": "status", "text": "🎯 يخطط…"})
+        plan = pool.chat(role, messages + [{"role": "user", "content": PLAN_PROMPT}], cancel=self.cancel,
+                         max_tokens=400, extra=dict(pool.no_tool_calls(role) or {}, **self._extra(role)))
+        plan_text = plan["content"].strip()
+        if plan_text:
+            self.emit({"type": "tool", "name": "plan", "args": "", "state": "start"})
+            self.emit({"type": "tool", "name": "plan", "state": "done", "result": plan_text})
+            messages.append({"role": "assistant", "content": "My plan:\n" + plan_text})
+            messages.append({"role": "user", "content": "Good. Carry out the plan step by step with the tools."})
         answer, tps = "", 0
         while steps < MAX_GOAL_STEPS:
             self.emit({"type": "status", "text": "🎯 خطوة %d…" % (steps + 1)})
@@ -246,8 +256,12 @@ class Turn:
                 for i, c in enumerate(r["tool_calls"]):
                     key = (c["name"], c["arguments"])
                     seen[key] = seen.get(key, 0) + 1
+                    per_tool[c["name"]] = per_tool.get(c["name"], 0) + 1
                     if seen[key] > 2:
                         result = "You already ran exactly this twice with the same result. Try a different approach."
+                    elif c["name"] in ("web_search", "read_url") and per_tool[c["name"]] > MAX_SEARCHES:
+                        result = ("You have searched %d times: that is enough. Stop searching and do the next step of "
+                                  "your plan with the other tools (e.g. code_task to build it yourself)." % MAX_SEARCHES)
                     elif c["name"] == "code_task":
                         result = self._code_task(c["arguments"])
                     else:
@@ -529,6 +543,10 @@ def search_queries(question):
         return fallback
 
 
+PLAN_PROMPT = ("Before acting, write a short plan for this goal: at most 6 numbered steps, each naming the tool you "
+               "will use (run_command, code_task, write_file, web_search, github_*, ...). Prefer building things "
+               "yourself with code_task over searching for existing ones. Plan only, no tool calls.")
+MAX_SEARCHES = 3
 GOAL_THINKING = 160            # tokens of thinking before each goal step (~6 s): better choices, still moving
 MAX_GOAL_STEPS = 25
 MAX_GOAL_CHECKS = 4

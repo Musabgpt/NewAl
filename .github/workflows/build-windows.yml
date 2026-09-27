@@ -81,7 +81,13 @@ jobs:
           Invoke-WebRequest "https://bootstrap.pypa.io/get-pip.py" -OutFile get-pip.py
           bin/python/python.exe get-pip.py --no-warn-script-location -q
           bin/python/python.exe -m pip --version
-          bin/python/python.exe -c "import json, sqlite3, urllib.request; print('bundled python ok')"
+          # The embeddable build has no tkinter: copy it from the full Python so GUI programs (calculators,
+          # small tools) can be tested and built.
+          $base = python -c "import sys; print(sys.base_prefix)"
+          Copy-Item "$base/DLLs/_tkinter.pyd", "$base/DLLs/tcl86t.dll", "$base/DLLs/tk86t.dll" bin/python -Force
+          Copy-Item "$base/Lib/tkinter" bin/python/tkinter -Recurse -Force
+          Copy-Item "$base/tcl" bin/python/tcl -Recurse -Force
+          bin/python/python.exe -c "import json, sqlite3, urllib.request, tkinter; print('bundled python ok, tk', tkinter.TkVersion)"
           Get-ChildItem bin | Format-Table Name, Length
 
       - name: Check every DLL the engine needs is shipped or part of Windows
