@@ -332,7 +332,10 @@ def _rclone(args, timeout=600):
 
 
 def drive_connected():
-    return os.path.exists(RCLONE_CONF) and ("[%s]" % config.get("drive_remote")) in open(RCLONE_CONF, encoding="utf-8").read()
+    if not os.path.exists(RCLONE_CONF):
+        return False
+    with open(RCLONE_CONF, encoding="utf-8") as f:
+        return ("[%s]" % config.get("drive_remote")) in f.read()
 
 
 def drive_connect():

@@ -119,8 +119,10 @@ def step_speed():
     out = pool._post(s, "/v1/chat/completions", body)
     t = out.get("timings", {})
     gen, pp = t.get("predicted_per_second", 0), t.get("prompt_per_second", 0)
-    return gen >= 3, "%s: تحميل %.0f ث · قراءة %.0f كلمة/ث (%d كلمة) · كتابة %.1f كلمة/ث · ذاكرة %d tokens" % (
-        catalog.MODELS[role]["title"], load, pp, t.get("prompt_n", 0), gen, s.context())
+    mtp = (" · MTP: تخمين صح %d%%" % round(100 * t["draft_n_accepted"] / t["draft_n"])) if t.get("draft_n") else \
+        (" · MTP مطفي" if not s.mtp else "")
+    return gen >= 3, "%s: تحميل %.0f ث · قراءة %.0f كلمة/ث (%d كلمة) · كتابة %.1f كلمة/ث · ذاكرة %d tokens%s" % (
+        catalog.MODELS[role]["title"], load, pp, t.get("prompt_n", 0), gen, s.context(), mtp)
 
 
 def step_code():
@@ -129,7 +131,7 @@ def step_code():
         return None, "العقل مش منزّل"
     t = agent.Turn(None, "Write a Python function fib(n) returning the n-th Fibonacci number (fib(0)=0, fib(1)=1) "
                          "and check it with asserts for n = 0..10.", mode="code")
-    answer, info = t._code([{"role": "system", "content": agent._system("code")},
+    answer, info = t._code([{"role": "system", "content": agent._system("code", catalog.pick("coder"))},
                             {"role": "user", "content": t.text}], catalog.pick("coder"))
     return bool(info.get("verified")), "حلقة البرمجة: %s بعد %s محاولة" % (
         "نجحت" if info.get("verified") else "ما نجحت. رأي الحَكَم: %s. آخر تشغيل: %s" % (

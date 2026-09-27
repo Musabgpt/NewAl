@@ -1,5 +1,6 @@
 """Runs the models: one llama-server process per role, kept while they fit in the RAM budget."""
 
+import collections
 import json
 import os
 import socket
@@ -110,6 +111,11 @@ reset_dll_search()
 
 
 SPEC_TYPES = ("ngram-mod",)  # drafts from text already seen: helps when a fix rewrites a long program
+# Multi-token prediction with the brain's own MTP heads. Measured on Qwen3.6-35B-A3B (4-core AVX2 CPU), words/s
+# for code / Arabic: none 6.1 / 6.3, 1 draft 8.0 / 7.3, 2 drafts 8.5 / 6.6, 3 drafts 9.5 / 6.2, and 3 drafts kept
+# only while the model is at least 60% sure 9.7 / 7.4 (drafts long in code, short in prose): that one.
+MTP_ARGS = ["--spec-type", "draft-mtp", "--spec-draft-n-max", "3", "--spec-draft-p-min", "0.6"]
+_mtp_broken = set()          # roles whose engine did not start with MTP (an older llama.cpp): run without it
 MIN_CONTEXT = 16384        # tokens; goal mode with tool lists and results needs room (RAM cost ~1 GB per model)
 
 
@@ -138,6 +144,8 @@ class Server:
         self.proc = None
         self.used = time.time()
         self.log_path = os.path.join(config.LOGS, "llama-%s.log" % role)
+        self.path = catalog.path(role)
+        self.mtp = False
 
     @property
     def url(self):
@@ -156,14 +164,31 @@ class Server:
     def ram_gb(self):
         extra = catalog.MODELS["vision"]["size"] / 1e9 if self.vision() else 0
         kv = self.context() * self.model.get("kv_bytes_per_token", 65536) / 1e9 if self.model["kind"] == "chat" else 0
-        return self.model["size"] / 1e9 * 1.1 + 0.3 + extra + kv
+        return catalog.size_on_disk(self.role) / 1e9 * 1.1 + 0.3 + extra + kv
+
+    def use_mtp(self):
+        return (self.model["kind"] == "chat" and catalog.mtp(self.role) and config.get("mtp")
+                and self.role not in _mtp_broken)
 
     def start(self, timeout=900):
+        self.mtp = self.use_mtp()
+        try:
+            self._start(timeout)
+        except RuntimeError:
+            if not self.mtp:
+                raise
+            # This llama.cpp cannot draft with MTP: the same file runs as a normal model.
+            _mtp_broken.add(self.role)
+            self.mtp = False
+            self.port = _free_port()
+            self._start(timeout)
+
+    def _start(self, timeout):
         exe = config.find_tool("llama-server")
         if not exe:
             raise RuntimeError("llama-server غير موجود. أعد تثبيت NewAl.")
         kind = self.model["kind"]
-        args = [exe, "-m", catalog.path(self.role), "--host", "127.0.0.1", "--port", str(self.port),
+        args = [exe, "-m", self.path, "--host", "127.0.0.1", "--port", str(self.port),
                 "-t", str(config.threads()), "--no-webui"]
         if kind == "chat":
             # One slot with the whole context: with automatic slots llama-server splits -c between them
@@ -180,7 +205,9 @@ class Server:
         if self.vision():
             args += ["--mmproj", catalog.path("vision")]       # the brain reads screenshots
         spec = config.get("spec_type")
-        if kind == "chat" and self.role == "coder" and spec in SPEC_TYPES:
+        if self.mtp:
+            args += MTP_ARGS
+        elif kind == "chat" and self.role == "coder" and spec in SPEC_TYPES:
             args += ["--spec-type", spec]                      # chosen by the speed test on this computer
         adapter = os.path.join(config.ADAPTERS, self.role + ".gguf")
         if kind == "chat" and os.path.exists(adapter):
@@ -230,6 +257,17 @@ class Pool:
         self.servers = {}
         self.lock = threading.RLock()
         self.listeners = []
+        # The last model calls with llama.cpp's own timings: what each one read (and found already cached) and wrote.
+        # The self-test and the speed report read it; nothing depends on it.
+        self.calls = collections.deque(maxlen=200)
+
+    def _record(self, role, kind, timings, seconds):
+        t = timings or {}
+        self.calls.append({"role": role, "kind": kind, "at": time.time(), "seconds": round(seconds, 2),
+                           "prompt": t.get("prompt_n", 0), "cached": t.get("cache_n", 0),
+                           "prompt_ms": round(t.get("prompt_ms", 0)), "generated": t.get("predicted_n", 0),
+                           "gen_ms": round(t.get("predicted_ms", 0)),
+                           "drafted": t.get("draft_n", 0), "accepted": t.get("draft_n_accepted", 0)})
 
     def notify(self, text):
         for fn in list(self.listeners):
@@ -248,9 +286,11 @@ class Pool:
             raise RuntimeError("نموذج %s غير منزّل بعد. افتح «النماذج» ونزّله." % catalog.MODELS[role]["title"])
         with self.lock:
             s = self.servers.get(actual)
-            if s and s.alive():
+            if s and s.alive() and s.path == catalog.path(actual):
                 s.used = time.time()
                 return s
+            if s:
+                s.stop()               # its file was replaced (a faster download): start the new one
             s = Server(actual)
             self._make_room(s.ram_gb())
             self.notify("تحميل %s…" % s.model["title"])
@@ -299,18 +339,26 @@ class Pool:
                 "top_p": 0.95, "min_p": 0.05, "repeat_penalty": 1.05, "timings_per_token": False}
         if tools:
             body["tools"] = tools
-        if s.model["file"].lower().startswith("qwen3"):
-            body["chat_template_kwargs"] = {"enable_thinking": False}     # thinking only when asked for
+        qwen = s.model["file"].lower().startswith("qwen3")
+        if qwen:
+            # Thinking only when asked for. preserve_thinking: earlier answers are written back exactly as the model
+            # wrote them (with their <think></think>), so llama.cpp finds them in its cache instead of re-reading
+            # the last answer at every question (Qwen3.6's template drops those tags from older answers otherwise).
+            body["chat_template_kwargs"] = {"enable_thinking": False, "preserve_thinking": True}
         if s.model["file"].startswith("LFM"):
             # LFM2.5 thinks before every answer and every tool call (5-15 s each on a laptop CPU). Off unless the
             # caller asks: the router already decides when tools are needed. (Per request, llama.cpp >= b9982.)
             body["thinking_budget_tokens"] = 0
         if extra:
+            extra = dict(extra)
+            if qwen and "chat_template_kwargs" in extra:
+                body["chat_template_kwargs"] = dict(body["chat_template_kwargs"], **extra.pop("chat_template_kwargs"))
             body.update(extra)
         req = urllib.request.Request(s.url + "/v1/chat/completions", json.dumps(body).encode("utf-8"),
                                      {"Content-Type": "application/json"})
-        content, reasoning, calls, tps = [], [], {}, 0.0
+        content, reasoning, calls, tps, timings = [], [], {}, 0.0, {}
         strip = ThinkStripper()
+        started = time.time()
         try:
             resp = urllib.request.urlopen(req, timeout=1800)
         except urllib.error.HTTPError as e:
@@ -330,7 +378,8 @@ class Pool:
                 except ValueError:
                     continue
                 if ev.get("timings"):
-                    tps = ev["timings"].get("predicted_per_second", tps)
+                    timings = ev["timings"]
+                    tps = timings.get("predicted_per_second", tps)
                 for ch in ev.get("choices") or []:
                     d = ch.get("delta") or {}
                     if d.get("reasoning_content"):
@@ -351,8 +400,9 @@ class Pool:
                         c["name"] += fn.get("name") or ""
                         c["arguments"] += fn.get("arguments") or ""
         s.used = time.time()
+        self._record(s.role, "chat", timings, time.time() - started)
         return {"content": "".join(content), "reasoning": "".join(reasoning),
-                "tool_calls": [calls[i] for i in sorted(calls)], "tps": tps, "role": s.role}
+                "tool_calls": [calls[i] for i in sorted(calls)], "tps": tps, "role": s.role, "timings": timings}
 
     def complete_json(self, role, messages, schema, max_tokens=60):
         """A short answer constrained to a JSON schema (used by the router and the judge)."""
@@ -364,7 +414,9 @@ class Pool:
             body["chat_template_kwargs"] = {"enable_thinking": False}     # thinking only when asked for
         if s.model["file"].startswith("LFM"):
             body["reasoning_format"] = "none"
+        started = time.time()
         out = self._post(s, "/v1/chat/completions", body)
+        self._record(s.role, "json", out.get("timings"), time.time() - started)
         text = out["choices"][0]["message"].get("content") or ""
         if not text.strip() and "reasoning_format" not in body:
             # LFM2.5: the reasoning parser swallows the answer and skips the grammar.
@@ -393,17 +445,24 @@ class Pool:
 
     def no_tool_calls(self, role):
         """Request options that stop a model from starting a tool call (an answer is wanted)."""
-        ids = self.special_token_ids(role, ["<|tool_call_start|>", "<tool_call>"])
+        try:
+            ids = self.special_token_ids(role, ["<|tool_call_start|>", "<tool_call>"])
+        except Exception:  # noqa: BLE001 - the model is not there (yet): nothing to ban
+            return None
         return {"logit_bias": [[i, False] for i in ids]} if ids else None
 
     def embed(self, texts):
         s = self.get("embed")
+        started = time.time()
         out = self._post(s, "/v1/embeddings", {"input": texts})
+        self._record(s.role, "embed", None, time.time() - started)
         return [d["embedding"] for d in sorted(out["data"], key=lambda d: d["index"])]
 
     def rerank(self, query, docs):
         s = self.get("rerank")
+        started = time.time()
         out = self._post(s, "/v1/rerank", {"query": query, "documents": docs})
+        self._record(s.role, "rerank", None, time.time() - started)
         scores = [0.0] * len(docs)
         for r in out.get("results", []):
             scores[r["index"]] = r["relevance_score"]

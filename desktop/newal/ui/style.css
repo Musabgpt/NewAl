@@ -44,7 +44,12 @@ header button { background: none; border: 0; font-size: 18px; }
 #loaded { display: flex; gap: 6px; flex-wrap: wrap; }
 .pill { font-size: 12px; padding: 2px 8px; border-radius: 99px; background: var(--card); border: 1px solid var(--line);
   color: var(--muted); }
-.pill.on { color: var(--good); border-color: var(--good); }
+.pill.on { color: var(--good); border-color: var(--good); cursor: pointer; }
+.pill.busy { color: var(--warn); border-color: var(--warn); cursor: pointer; }
+.pill.bad { color: var(--bad); border-color: var(--bad); cursor: pointer; }
+table.calls { border-collapse: collapse; width: 100%; font-size: 13px; }
+table.calls th, table.calls td { border-bottom: 1px solid var(--line); padding: 4px 6px; text-align: start; white-space: nowrap; }
+table.calls th { color: var(--muted); font-weight: 500; }
 #notice { padding: 8px 14px; background: #3a3217; color: var(--warn); font-size: 14px; }
 #notice button { margin-inline-start: 8px; }
 

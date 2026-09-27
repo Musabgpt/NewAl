@@ -210,6 +210,17 @@ def connected():
     return out
 
 
+def brain_names():
+    """The brain's fixed tool list: the everyday and desktop tools plus every connected service. It changes only when a
+    service is connected or removed, so the start of every request stays the same and llama.cpp keeps it read (a list
+    picked per question made each question re-read the tools and the whole conversation)."""
+    names = list(GROUPS["base"][1]) + list(GROUPS["desktop"][1])
+    for key in connected():
+        if key not in ("base", "desktop"):
+            names += [n for n in GROUPS[key][1] if n not in names]
+    return names
+
+
 def goal_names(text=""):
     """Goal-mode tools: the everyday ones, plus a connected service's tools when the goal mentions it.
     (Every tool description costs prompt tokens: all of them at once were ~9k tokens.)"""

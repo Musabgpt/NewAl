@@ -449,9 +449,26 @@ async function refreshState() {
   state = await api("/api/state");
   const loaded = $("#loaded");
   loaded.innerHTML = "";
+  const b = state.brain || {};
+  if (b.state === "loading" || b.state === "warming" || b.state === "error") {
+    // The brain loads and reads its instructions in advance when NewAl opens: the first answer is then immediate.
+    const p = document.createElement("span");
+    p.className = "pill" + (b.state === "error" ? " bad" : " busy");
+    p.textContent = b.state === "error" ? "⚠ العقل: " + b.message : "⏳ " + b.message;
+    p.title = "العقل بيتحضّر مرة وحدة لما يفتح البرنامج: بعدها أول جواب فوري";
+    p.onclick = () => showPanel("speed");
+    loaded.appendChild(p);
+    if (b.state !== "error" && !refreshState.pending) {
+      refreshState.pending = true;
+      setTimeout(() => { refreshState.pending = false; refreshState(); }, 2500);
+    }
+  }
   for (const m of state.models.filter(m => state.loaded.includes(m.role))) {
     const p = document.createElement("span");
     p.className = "pill on"; p.textContent = m.label.split(" ")[0] + " " + m.title;
+    if (m.role === "coder" && m.mtp) p.textContent += " ⚡";
+    if (m.role === "coder" && b.state === "ready") p.title = "جاهز: قرأ التعليمات مسبقاً (" + b.seconds + " ث)";
+    p.onclick = () => showPanel("speed");
     loaded.appendChild(p);
   }
   showUpdate(state.update);
@@ -486,7 +503,9 @@ const panels = {
       const loaded = s.loaded.includes(m.role);
       c.innerHTML = `<h4><span>${m.label} — ${escapeHtml(m.title)}</span><span class="hint">${gb(m.size)}</span></h4>
         <div class="about">${escapeHtml(m.about)}</div>
-        <div class="row">${m.ready ? '<span class="ok">✓ جاهز</span>' + (loaded ? ' <span class="pill on">محمّل</span> <button data-unload>تفريغ</button>' : "") :
+        ${m.upgrade && m.state !== "downloading" ? `<div class="row"><button class="primary" data-dl>⚡ نزّل نسخة العقل الأسرع (MTP، ${gb(m.size)})</button>
+          <span class="hint">نفس النموذج مع رؤوس التوليد المسرّع: الكود أسرع ~58% والعربي ~17%. النسخة الحالية بتضل شغالة لحتى يخلص التنزيل، وبعدها بتنمسح لتوفر المساحة.</span></div>` : ""}
+        <div class="row">${m.ready && m.state !== "downloading" ? '<span class="ok">✓ جاهز</span>' + (m.mtp ? ' <span class="pill on">⚡ MTP</span>' : "") + (loaded ? ' <span class="pill on">محمّل</span> <button data-unload>تفريغ</button>' : "") :
           m.state === "downloading" ? `<span>⬇ ${pct.toFixed(1)}% ${m.speed ? "· " + (m.speed / 1e6).toFixed(1) + " MB/s" : ""}</span>` :
           `<button data-dl>⬇ تنزيل</button>${m.have ? `<span class="hint">(${pct.toFixed(0)}% محفوظ، يكمل من حيث توقف)</span>` : ""}`}
           ${m.error ? `<span class="bad">${escapeHtml(m.error)}</span>` : ""}</div>
@@ -861,6 +880,16 @@ const panels = {
       <div class="field"><label>طول السياق (tokens)</label><select id="context">${[4096, 8192, 16384, 32768].map(n => `<option ${n == s.context ? "selected" : ""}>${n}</option>`).join("")}</select>
         <span class="hint">أكبر = يتذكر محادثات أطول لكن أبطأ ويستهلك ذاكرة أكثر. يُطبَّق عند إعادة تحميل النماذج.</span></div>
       <div class="field"><label>المظهر</label><select id="theme"><option value="dark">داكن</option><option value="light">فاتح</option></select></div>
+      <h3>⚡ السرعة</h3>
+      <div class="field"><label><input type="checkbox" id="preload" ${s.preload ? "checked" : ""}> حمّل العقل أول ما يفتح NewAl وخليه يقرأ تعليماته مسبقاً (أول جواب فوري بدل ما يستنى دقيقة)</label></div>
+      <div class="field"><label><input type="checkbox" id="mtp" ${s.mtp ? "checked" : ""}> التوليد المسرّع MTP: العقل بيخمّن الكلمات الجاية وبيتحقق منها دفعة وحدة (الكود أسرع ~58%، العربي ~17%)</label>
+        <span class="hint">بيشتغل مع نسخة العقل الأسرع (من 🧠 النماذج). التفاصيل والقياسات: القائمة ← ⚡ السرعة.</span></div>
+      <h3>🙋 تعليمات مخصصة</h3>
+      <div class="field"><label>شو لازم NewAl يعرف عنك؟</label>
+        <textarea id="about_me" rows="3" dir="auto" placeholder="مثلاً: اسمي مصعب، مبرمج بايثون، بشتغل على ويندوز…">${escapeHtml(s.about_me || "")}</textarea></div>
+      <div class="field"><label>كيف بدك يرد عليك؟</label>
+        <textarea id="answer_style" rows="3" dir="auto" placeholder="مثلاً: باللهجة السورية، جواب مختصر، مع أمثلة كود…">${escapeHtml(s.answer_style || "")}</textarea>
+        <span class="hint">بيتحطوا مع تعليماته الثابتة: بيقرأهم مرة وحدة، وما بيبطّؤوا الأجوبة.</span></div>
       <div class="row"><button class="primary" id="saveSettings">حفظ</button><button id="speed">⚡ ضبط السرعة لجهازك</button><span id="speedOut" class="hint"></span></div>
       <h3>🩺 فحص شامل</h3>
       <p class="hint">بيجرّب كل شي على جهازك (الجهاز، البرنامج، النماذج، سرعة العقل، حلقة البرمجة، العيون، وضع المشروع، النت،
@@ -882,6 +911,8 @@ const panels = {
         max_fix_attempts: +body.querySelector("#max_fix_attempts").value,
         threads: +body.querySelector("#threads").value, ram_budget_gb: +body.querySelector("#ram_budget_gb").value,
         context: +body.querySelector("#context").value,
+        preload: body.querySelector("#preload").checked, mtp: body.querySelector("#mtp").checked,
+        about_me: body.querySelector("#about_me").value, answer_style: body.querySelector("#answer_style").value,
       });
       const t = body.querySelector("#theme").value;
       try { localStorage.setItem("theme", t); } catch (_) {}
@@ -893,7 +924,8 @@ const panels = {
       const r = await api("/api/speed", {});
       body.querySelector("#speedOut").textContent = r.error ? r.error :
         "الأسرع: " + r.best + " أنوية — " + Object.entries(r.results).map(([t, v]) => `${t}: ${v} كلمة/ث`).join("، ") +
-        (r.spec ? ` · التصليح: بدون تسريع ${r.spec.speeds.none}، مع ngram ${r.spec.speeds["ngram-mod"]} كلمة/ث ← ${r.spec.chosen === "none" ? "بدون" : "مع تسريع"}` : "");
+        (r.spec && r.spec.chosen === "mtp" ? " · العقل بيكتب بالتوليد المسرّع MTP" :
+         r.spec ? ` · التصليح: بدون تسريع ${r.spec.speeds.none}، مع ngram ${r.spec.speeds["ngram-mod"]} كلمة/ث ← ${r.spec.chosen === "none" ? "بدون" : "مع تسريع"}` : "");
       body.querySelector("#threads").value = r.best || 0;
     };
     body.querySelector("#openHome").onclick = e => { e.preventDefault(); api("/api/open", {path: state.home}); };
@@ -978,6 +1010,51 @@ const panels = {
     };
     body.querySelector("#openTrain").onclick = () => api("/api/open", {path: s.home + (s.home.includes("\\") ? "\\" : "/") + "training"});
   },
+};
+
+panels.speed = async function (body) {
+  const r = await api("/api/speed-report");
+  const b = r.state || {};
+  const p = r.power || {};
+  const brainLine = !r.brain ? "ما في عقل منزّل بعد" :
+    b.state === "ready" ? `✓ ${escapeHtml(r.brain)} محمّل وقرأ تعليماته مسبقاً (${b.seconds} ث)` :
+    b.state === "loading" || b.state === "warming" ? "⏳ " + escapeHtml(b.message) :
+    b.state === "error" ? "⚠ " + escapeHtml(b.message) : escapeHtml(r.brain) + " بيتحمّل مع أول سؤال";
+  const rows = (r.calls || []).slice().reverse().map(c => `<tr><td>${new Date(c.at * 1000).toLocaleTimeString()}</td>
+      <td>${escapeHtml(c.title)}</td><td>${{chat: "جواب", json: "حكم/قرار", embed: "بحث", rerank: "ترتيب"}[c.kind] || c.kind}</td>
+      <td>${c.kind === "embed" || c.kind === "rerank" ? "" : c.prompt + (c.cached ? ` <span class="hint">(+${c.cached} من الذاكرة)</span>` : "")}</td>
+      <td>${c.read_tps || ""}</td><td>${c.generated || ""}</td><td>${c.write_tps || ""}</td>
+      <td>${c.drafted ? Math.round(100 * c.accepted / c.drafted) + "%" : ""}</td><td>${c.seconds}</td></tr>`).join("");
+  body.innerHTML = `<h2>⚡ السرعة</h2>
+    <div class="card"><h4>🧠 العقل</h4><div class="about">${brainLine}</div>
+      <div class="row">${r.mtp ? '<span class="pill on">⚡ التوليد المسرّع MTP شغّال</span>' :
+        r.upgrade ? '<button class="primary" id="spUpgrade">⚡ نزّل نسخة العقل الأسرع (MTP)</button><span class="hint">الكود أسرع ~58% والعربي ~17% على معالج متل تبعك</span>' :
+        '<span class="hint">التوليد المسرّع MTP مطفي</span>'}
+        <button id="spWarm">🔥 سخّن العقل هلق</button></div></div>
+    <div class="card"><h4>🔌 الطاقة والمعالج</h4>
+      <div class="about">${escapeHtml(r.cpu || "")} · ${r.threads} أنوية للكتابة</div>
+      ${p.on_battery ? '<div class="bad">🔋 اللابتوب شغّال عالبطارية: المعالج بيبطّئ حاله كتير. وصّل الشاحن لأقصى سرعة.</div>' : ""}
+      ${p.saver ? '<div class="bad">🍃 «موفّر الطاقة» شغّال: طفّيه لأقصى سرعة.</div>' : ""}
+      ${p.plan !== undefined ? `<div class="row"><span class="hint">وضع الطاقة: ${escapeHtml(p.plan || "?")}</span>
+        <button id="spHigh">⚡ أداء عالي</button><button id="spBalanced">↩ متوازن</button><span class="hint" id="spPowerOut"></span></div>` : ""}</div>
+    <h3>آخر الاستدعاءات</h3>
+    <p class="hint">«قرأ» = كلمات جديدة قرأها (والباقي من الذاكرة المؤقتة: مجاني)، «كتب» = كلمات الجواب. على معالج لابتوب:
+      القراءة ~28 كلمة/ث والكتابة 6–10 كلمة/ث، يعني أهم شي إنه ما يعيد قراءة شي.</p>
+    <div style="overflow-x:auto"><table class="calls"><tr><th>الوقت</th><th>النموذج</th><th>النوع</th><th>قرأ</th><th>كلمة/ث</th>
+      <th>كتب</th><th>كلمة/ث</th><th>تخمين صح</th><th>ث</th></tr>${rows || '<tr><td colspan="9" class="hint">ما في استدعاءات بعد</td></tr>'}</table></div>`;
+  const up = body.querySelector("#spUpgrade");
+  if (up) up.onclick = async () => { await api("/api/models/download", {role: "coder"}); showPanel("models"); };
+  body.querySelector("#spWarm").onclick = async () => { await api("/api/speed-report", {action: "warm"}); setTimeout(() => panels.speed(body), 800); };
+  const power = async high => {
+    const x = await api("/api/speed-report", {action: high ? "power_high" : "power_balanced"});
+    body.querySelector("#spPowerOut").textContent = x.ok ? "✓" : "ما زبط: " + (x.message || "");
+    setTimeout(() => panels.speed(body), 600);
+  };
+  if (body.querySelector("#spHigh")) {
+    body.querySelector("#spHigh").onclick = () => power(true);
+    body.querySelector("#spBalanced").onclick = () => power(false);
+  }
+  if ((b.state === "loading" || b.state === "warming")) setTimeout(() => { if (!$("#panel").hidden && body.dataset.panel === "speed") panels.speed(body); }, 2500);
 };
 
 function showPanel(name) {

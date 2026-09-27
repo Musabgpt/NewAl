@@ -78,18 +78,22 @@ DEFAULTS = {
     "context7_key": "",           # optional free key for the library-docs add-on (a higher daily limit)
     "drive_remote": "gdrive",
     "api_port": 8766,
-    "review_changes": True,
-    "tests_first": True,
-    "sandbox_risky": True,
-    "check_updates": True,        # look for a newer NewAl build on GitHub every few hours        # risky generated code runs in Windows Sandbox (when Windows has it) instead of asking          # project mode: a project without tests gets a small pytest file first       # project mode: review the diff against the task before handing it over
+    "review_changes": True,       # project mode: review the diff against the task before handing it over
+    "tests_first": True,          # project mode: a project without tests gets a small pytest file first
+    "sandbox_risky": True,        # risky generated code runs in Windows Sandbox (when Windows has it) instead of asking
+    "check_updates": True,        # look for a newer NewAl build on GitHub every few hours
     "spec_type": "",              # speculative decoding for the brain ("ngram-mod"), kept only when measured faster
+    "mtp": True,                  # the brain drafts with its own MTP heads (when its file has them)
+    "preload": True,              # load the brain when NewAl opens and let it read the system prompts in advance
+    "about_me": "",               # custom instructions (like ChatGPT's): what NewAl should know about the user
+    "answer_style": "",           # ... and how they want answers
     "school_enabled": False,      # Kaggle School: hard tasks go to Kaggle's GPUs every week
     "school_hours": 30,           # GPU hours per week it may use (Kaggle gives ~30)
     "project_path": "",           # the folder project mode (🧑‍💻) works in
     "recent_projects": [],
     "phone_access": False,        # the page on a phone next to the computer (QR code + key)
     "phone_port": 8767,
-    "phone_key": "",             # OpenAI-compatible endpoint for VS Code extensions
+    "phone_key": "",              # the phone's key (in its QR code)
 }
 
 _lock = threading.Lock()

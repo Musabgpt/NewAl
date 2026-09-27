@@ -600,7 +600,8 @@ class ProjectModeTest(unittest.TestCase):
         workspace.test_command = lambda r: "python -m unittest discover -s tests -q"
         events = []
         try:
-            t = agent.Turn(None, "fix the total", emit=events.append, mode="project")
+            # 💭: the review also runs when the tests passed (without it, passing tests are the check)
+            t = agent.Turn(None, "fix the total", emit=events.append, mode="project", think=True)
             answer, info = t._project([{"role": "user", "content": "fix the total"}], "coder")
         finally:
             agent.pool.chat, agent.pool.complete_json, catalog.pick, workspace.test_command = old
@@ -1038,7 +1039,7 @@ class SmarterLoopTest(unittest.TestCase):
 
     def test_search_when_the_same_error_returns(self):
         answers = ["```python\nprint(undefined_name)\n```", "```python\nprint(undefined_name )\n```",
-                   "```python\nundefined_name = 1\nprint(undefined_name)\n```"]
+                   "```python\nundefined_name = 1\nprint(undefined_name)\nassert undefined_name == 1\n```"]
         prompts = []
         old = (agent.pool.chat, catalog.pick, web.search, agent._safe_read)
         agent.pool.chat = lambda role, messages, **kw: (prompts.append(messages[-1]["content"]), {"content": answers.pop(0), "tps": 1})[1]
@@ -1255,7 +1256,9 @@ class SandboxTest(unittest.TestCase):
             sandbox.available, sandbox.run, agent.pool.chat, catalog.pick = old
         self.assertEqual(asked, [])
         self.assertEqual(len(boxed), 1)
-        self.assertTrue(info["verified"])
+        # it ran cleanly but checks nothing itself: accepted, not claimed as verified
+        self.assertIsNone(info["verified"])
+        self.assertEqual(info["note"], "ran_ok")
 
 
 class UpdateAndDiagnoseTest(unittest.TestCase):
@@ -1317,6 +1320,238 @@ class UpdateAndDiagnoseTest(unittest.TestCase):
     def test_selftest_image_is_shipped(self):
         from newal import diagnose
         self.assertTrue(diagnose.asset("selftest-error.png"))
+
+
+class SpeedTest(unittest.TestCase):
+    """What keeps the brain fast on a CPU: nothing it already read is sent differently, and nothing is asked twice."""
+
+    def test_history_window_moves_in_jumps(self):
+        # under the budget: everything, from the first message
+        self.assertEqual(agent.window_start([100] * 10, 5000), 0)
+        # over it: the start jumps by half the budget and then stays put while the conversation grows
+        starts = [agent.window_start([1000] * n, 8000) for n in range(1, 30)]
+        self.assertEqual(starts[:8], [0] * 8)
+        changes = sum(1 for a, b in zip(starts, starts[1:]) if a != b)
+        self.assertLessEqual(changes, 6)                  # not one move per message (29 messages)
+        for n, st in zip(range(1, 30), starts):
+            self.assertLessEqual((n - st) * 1000, 8000)   # always within the budget
+        self.assertEqual(agent.window_start([20000], 8000), 1)   # one message bigger than the window
+
+    def test_earlier_turns_are_sent_as_they_were(self):
+        conv = memory.new_conversation()
+        memory.add_message(conv, "user", "first", {"sent": "Notes...\n\nMy message:\nfirst"})
+        memory.add_message(conv, "assistant", "answer one")
+        memory.add_message(conv, "user", "second")
+        old = catalog.available
+        catalog.available = lambda role: False
+        try:
+            t = agent.Turn(conv, "second")
+            msgs = t._context("chat", "coder")
+        finally:
+            catalog.available = old
+        self.assertEqual(msgs[1]["content"], "Notes...\n\nMy message:\nfirst")   # not the shorter shown text
+        self.assertEqual(msgs[2]["content"], "answer one")
+        self.assertEqual(msgs[-1]["content"], "second")
+        self.assertEqual(t.sent, "second")
+
+    def test_one_prompt_and_tool_list_for_every_kind_of_request(self):
+        config.update({"one_brain": True, "about_me": "", "answer_style": ""})
+        prompts = {r: agent._system(r, "coder") for r in ("chat", "tools", "code", "analyze")}
+        self.assertEqual(len(set(prompts.values())), 1)
+        self.assertIn("Code:", prompts["chat"])
+        self.assertNotEqual(agent._system("project", "coder"), prompts["chat"])       # long tasks keep their own
+        self.assertEqual(agent._system("chat", "agent"), agent._system("chat", "agent"))
+        self.assertNotIn("Code:", agent._system("chat", "agent"))                     # a small model: as before
+        self.assertEqual(tools.brain_names(), tools.brain_names())
+        self.assertTrue({"web_search", "run_command", "clipboard_get"} <= set(tools.brain_names()))
+        config.update({"about_me": "اسمي مصعب", "answer_style": "مختصر"})
+        try:
+            self.assertIn("اسمي مصعب", agent._system("chat", "coder"))
+            self.assertIn("مختصر", agent._system("code", "coder"))
+        finally:
+            config.update({"about_me": "", "answer_style": ""})
+
+    def test_chat_sends_the_same_tools_but_no_tool_calls(self):
+        seen = []
+        old = (agent.pool.chat, agent.pool.no_tool_calls)
+        agent.pool.no_tool_calls = lambda role: {"logit_bias": [[7, False]]}
+        agent.pool.chat = lambda role, messages, tools=None, **kw: (seen.append((tools, kw.get("extra"))),
+                                                                   {"content": "أهلاً", "tps": 1})[1]
+        config.update({"one_brain": True})
+        try:
+            t = agent.Turn(None, "مرحبا")
+            answer, _ = t._agent([{"role": "system", "content": "s"}, {"role": "user", "content": "مرحبا"}], "coder", "chat")
+        finally:
+            agent.pool.chat, agent.pool.no_tool_calls = old
+        self.assertEqual(answer, "أهلاً")
+        tools_sent, extra = seen[0]
+        self.assertEqual(tools_sent, agent.brain_tools())                 # the shared list, in its fixed order
+        self.assertEqual({d["function"]["name"] for d in tools_sent}, set(tools.brain_names()))
+        self.assertEqual(extra["logit_bias"], [[7, False]])
+        self.assertFalse(extra["chat_template_kwargs"]["enable_thinking"])
+
+    def test_passing_asserts_replace_the_judge(self):
+        judged = []
+        old = (agent.pool.chat, agent.Turn._verdict)
+        agent.pool.chat = lambda role, messages, **kw: {"content": "```python\ndef sq(x):\n    return x * x\nassert sq(3) == 9\n"
+                                                                   "print('ok')\n```", "tps": 1}
+        agent.Turn._verdict = lambda self, *a: (judged.append(a), {"ok": True, "reason": "judge"})[1]
+        try:
+            answer, info = agent.Turn(None, "square")._code([{"role": "user", "content": "square"}], "coder")
+            self.assertTrue(info["verified"])
+            self.assertEqual(judged, [])                     # its own asserts were the check
+            # 💭: the judge looks as well
+            answer, info = agent.Turn(None, "square", think=True)._code([{"role": "user", "content": "square"}], "coder")
+            self.assertEqual(len(judged), 1)
+        finally:
+            agent.pool.chat, agent.Turn._verdict = old
+
+    def test_self_tested(self):
+        py = {"project": False, "lang": "python", "files": {}}
+        self.assertTrue(agent.self_tested(py, "assert f(2) == 4\nprint('ok')", "ok"))
+        self.assertTrue(agent.self_tested(py, "def test():\n    assert f(1)\ntest()", ""))
+        self.assertFalse(agent.self_tested(py, "print(f(2))", "4"))
+        js = {"project": False, "lang": "node", "files": {}}
+        self.assertTrue(agent.self_tested(js, "const assert = require('assert');\nassert.strictEqual(f(), 1)", ""))
+        self.assertFalse(agent.self_tested(js, "console.assert(f() === 1)", "Assertion failed"))   # it only printed
+        self.assertTrue(agent.self_tested({"project": True, "tests": True, "lang": "python", "files": {}}, "", ""))
+
+    def test_search_words_without_the_brain(self):
+        self.assertEqual(agent.plain_query("شو آخر أخبار الذكاء الاصطناعي هالأسبوع؟"), "آخر أخبار الذكاء الاصطناعي هذا الأسبوع")
+        self.assertEqual(agent.plain_query("مين ربح مباراة برشلونة امبارح"), "ربح مباراة برشلونة أمس")
+        asked = []
+        old = (agent.pool.complete_json, catalog.available)
+        agent.pool.complete_json = lambda *a, **k: asked.append(a) or ["x"]
+        catalog.available = lambda role: role == "coder"
+        try:
+            self.assertEqual(agent.search_queries("شو سعر الذهب اليوم؟"), ["سعر الذهب اليوم"])
+        finally:
+            agent.pool.complete_json, catalog.available = old
+        self.assertEqual(asked, [])                          # no model call for the search words
+
+    def test_background_work_waits_for_a_quiet_moment(self):
+        import threading
+        import time
+        done = threading.Event()
+        old = agent.IDLE_SECONDS
+        agent.IDLE_SECONDS = 0.5
+        try:
+            with agent._later_lock:
+                agent._active[0] += 1                        # a question is being answered
+            agent.later(done.set)
+            self.assertFalse(done.wait(1.0))
+            with agent._later_lock:
+                agent._active[0] -= 1
+                agent._active[1] = time.time()
+            self.assertTrue(done.wait(8))
+        finally:
+            agent.IDLE_SECONDS = old
+
+    def test_mtp_file_and_older_file(self):
+        from newal import engine
+        models = config.MODELS
+        main = os.path.join(models, catalog.MODELS["coder"]["file"])
+        old_file = os.path.join(models, catalog.MODELS["coder"]["legacy"][0]["file"])
+        for p in (main, old_file):
+            if os.path.exists(p):
+                os.remove(p)
+        try:
+            with open(old_file, "wb") as f:
+                f.write(b"GGUF" + b"\0" * 16)
+            self.assertTrue(catalog.available("coder"))
+            self.assertTrue(catalog.legacy("coder"))
+            self.assertFalse(catalog.mtp("coder"))
+            self.assertEqual(catalog.path("coder"), old_file)
+            st = {m["role"]: m for m in catalog.status()}["coder"]
+            self.assertTrue(st["ready"] and st["upgrade"])
+            with open(main, "wb") as f:
+                f.write(b"GGUF" + b"\0" * 16)
+            self.assertEqual(catalog.path("coder"), main)
+            self.assertTrue(catalog.mtp("coder"))
+            self.assertFalse(catalog.legacy("coder"))
+            config.update({"mtp": True})
+            srv = engine.Server("coder")
+            self.assertTrue(srv.use_mtp())
+            # an engine that cannot draft with MTP starts again without it
+            tried = []
+
+            def fake_start(self_, timeout):
+                tried.append(self_.mtp)
+                if self_.mtp:
+                    raise RuntimeError("failed to create MTP context")
+            real = engine.Server._start
+            engine.Server._start = fake_start
+            try:
+                srv.start()
+            finally:
+                engine.Server._start = real
+                engine._mtp_broken.discard("coder")
+            self.assertEqual(tried, [True, False])
+            config.update({"mtp": False})
+            self.assertFalse(engine.Server("coder").use_mtp())
+            config.update({"mtp": True})
+        finally:
+            for p in (main, old_file):
+                if os.path.exists(p):
+                    os.remove(p)
+
+    def test_thinking_kwargs_keep_earlier_answers_exact(self):
+        from newal import engine
+        sent = []
+
+        class Resp:
+            def __init__(self):
+                self.lines = [b'data: {"choices":[{"delta":{"content":"hi"}}]}\n', b"data: [DONE]\n"]
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+            def __iter__(self):
+                return iter(self.lines)
+
+        class Srv:
+            role = "coder"
+            url = "http://x"
+            model = catalog.MODELS["coder"]
+            used = 0
+
+            def vision(self):
+                return False
+        old = (engine.pool.get, engine.urllib.request.urlopen)
+        engine.pool.get = lambda role: Srv()
+        engine.urllib.request.urlopen = lambda req, timeout=0: (sent.append(json.loads(req.data)), Resp())[1]
+        try:
+            engine.pool.chat("coder", [{"role": "user", "content": "x"}],
+                             extra={"chat_template_kwargs": {"enable_thinking": True}, "thinking_budget_tokens": 5})
+        finally:
+            engine.pool.get, engine.urllib.request.urlopen = old
+        kw = sent[0]["chat_template_kwargs"]
+        self.assertEqual(kw, {"enable_thinking": True, "preserve_thinking": True})
+        self.assertEqual(sent[0]["thinking_budget_tokens"], 5)
+        self.assertEqual(engine.pool.calls[-1]["role"], "coder")
+
+    def test_warm_up_reads_the_shared_start(self):
+        from newal import speed
+        calls = []
+        old = (speed.pool.get, speed.pool.chat, catalog.available, config.get("preload"))
+        speed.pool.get = lambda role: calls.append(("get", role))
+        speed.pool.chat = lambda role, messages, tools=None, **kw: calls.append(("chat", role, messages[0]["content"],
+                                                                                 len(tools or [])))
+        catalog.available = lambda role: role == "coder"
+        config.update({"preload": True, "one_brain": True})
+        try:
+            speed.warm_up(wait=True)
+        finally:
+            speed.pool.get, speed.pool.chat, catalog.available = old[:3]
+            config.update({"preload": old[3]})
+        self.assertEqual(calls[0], ("get", "coder"))
+        chat = [c for c in calls if c[0] == "chat"]
+        self.assertEqual(chat[0][2], agent._system("chat", "coder"))
+        self.assertEqual(chat[0][3], len(tools.brain_names()))
+        self.assertEqual(speed.state()["state"], "ready")
 
 
 class ServerTest(unittest.TestCase):

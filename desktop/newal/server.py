@@ -14,7 +14,7 @@ import urllib.request
 import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-from . import addons, agent, browser, catalog, config, connectors, diagnose, lessons, memory, phone, router, sandbox, school, skills, tasks, training, updater, workspace
+from . import addons, agent, browser, catalog, config, connectors, diagnose, lessons, memory, phone, router, sandbox, school, skills, speed, tasks, training, updater, workspace
 from .engine import Cancelled, pool
 
 UI_DIR = os.path.join(config.BUNDLE, "ui")
@@ -59,14 +59,18 @@ def run_chat(job, body):
         msgs = memory.messages(conv)
         if not msgs:
             memory.rename(conv, _title(text))
-        uid = memory.add_message(conv, "user", text, {"attachments": [os.path.basename(p) for p in attachments],
-                                                      "paths": attachments})
+        umeta = {"attachments": [os.path.basename(p) for p in attachments], "paths": attachments}
+        uid = memory.add_message(conv, "user", text, umeta)
         job.emit({"type": "start", "conv": conv, "user_id": uid})
         project = body.get("project") if body.get("project") and os.path.isdir(body.get("project")) else None
         turn = agent.Turn(conv, text, attachments, emit=job.emit, approve=job.approve, cancel=job.cancel,
                           mode=body.get("mode", "auto"), think=bool(body.get("think")), plan=bool(body.get("plan")),
                           project=project)
         answer, meta = turn.run()
+        if turn.sent and turn.sent != text:
+            # The question as the model got it (with its notes and files): the next turns send it again exactly like
+            # this, so llama.cpp finds the whole conversation in its cache.
+            memory.update_message(uid, meta=dict(umeta, sent=turn.sent))
         mid = memory.add_message(conv, "assistant", answer, meta)
         job.emit({"type": "done", "conv": conv, "message_id": mid, "meta": meta, "content": answer})
     except Cancelled:
@@ -98,15 +102,26 @@ def state():
         "sandbox": sandbox.available(),
         "update": updater.status(),
         "browser": bool(browser.find()),
+        "brain": speed.state(),
         "home": config.HOME,
         "workspace": config.WORKSPACE,
         "api": "http://127.0.0.1:%d/v1" % config.get("api_port"),
     }
 
 
+def speed_info():
+    brain = speed.brain()
+    return {"state": speed.state(), "calls": speed.report(), "power": speed.power(), "cpu": speed.cpu_name(),
+            "threads": config.threads(), "brain": catalog.MODELS[brain]["title"] if brain else "",
+            "mtp": bool(brain and catalog.mtp(brain) and config.get("mtp")), "upgrade": bool(brain and catalog.legacy(brain)),
+            "preload": bool(config.get("preload"))}
+
+
 def tune_speed():
-    """Tries thread counts on the router model and keeps the fastest."""
-    role = catalog.pick("agent") or catalog.pick("router")
+    """Tries thread counts on this computer and keeps the fastest: on a small model when one is downloaded (quicker),
+    else on the brain itself (one-brain mode)."""
+    small = catalog.available("agent") or catalog.available("router")
+    role = (catalog.pick("agent") or catalog.pick("router")) if small else speed.brain()
     if not role:
         return {"error": "نزّل نموذجاً أولاً"}
     cores = os.cpu_count() or 4
@@ -115,14 +130,17 @@ def tune_speed():
         config.update({"threads": t})
         pool.unload(role)
         r = pool.chat(role, [{"role": "user", "content": "Count from 1 to 60 separated by commas."}],
-                      max_tokens=96, temperature=0)
+                      max_tokens=96 if small else 48, temperature=0)
         results[t] = round(r["tps"], 1)
     best = max(results, key=results.get)
     config.update({"threads": best})
     pool.stop_all()
-    report = {"results": results, "best": best}
-    if catalog.available("coder"):
+    report = {"results": results, "best": best, "model": catalog.MODELS[role]["title"]}
+    if catalog.mtp("coder") and config.get("mtp"):
+        report["spec"] = {"chosen": "mtp"}         # the brain drafts with its own MTP heads: faster than ngram
+    elif catalog.available("coder"):
         report["spec"] = tune_spec()
+    speed.warm_up()                                 # the engines restarted: read the instructions again
     return report
 
 
@@ -281,7 +299,10 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(memory.conversations())
         m = re.fullmatch(r"/api/conversations/(\d+)/messages", p)
         if m:
-            return self._json(memory.messages(int(m.group(1))))
+            out = memory.messages(int(m.group(1)))
+            for x in out:
+                x["meta"].pop("sent", None)          # for the model only
+            return self._json(out)
         if p == "/api/chat/stream":
             return self._stream(qs.get("job", [""])[0])
         if p == "/api/memories":
@@ -298,6 +319,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(tasks.listing())
         if p == "/api/diagnose":
             return self._json(diagnose.status())
+        if p == "/api/speed-report":
+            return self._json(speed_info())
         if p == "/api/app-update":
             return self._json(updater.status())
         if p == "/api/project":
@@ -363,18 +386,30 @@ class Handler(BaseHTTPRequestHandler):
             return self._json({"ok": True})
         if p == "/api/models/download":
             for role in body.get("roles") or [body.get("role")]:
-                if role in catalog.MODELS and not catalog.available(role):
-                    catalog.download(role)
+                if role in catalog.MODELS and (not catalog.available(role) or catalog.legacy(role)):
+                    catalog.download(role)          # also the faster file of a model an older version downloaded
             return self._json({"ok": True})
         if p == "/api/models/unload":
             pool.unload(body.get("role"))
             return self._json({"ok": True})
         if p == "/api/settings":
-            before = (config.get("brain_context"), config.get("context"))
+            engine_keys = ("brain_context", "context", "mtp", "threads")
+            prompt_keys = ("about_me", "answer_style", "one_brain")
+            before = [config.get(k) for k in engine_keys + prompt_keys]
             config.update(body)
-            if (config.get("brain_context"), config.get("context")) != before:
-                pool.stop_all()              # a new context size needs the engines restarted
+            after = [config.get(k) for k in engine_keys + prompt_keys]
+            if after[:len(engine_keys)] != before[:len(engine_keys)]:
+                pool.stop_all()              # a new context size or drafting needs the engines restarted
+            if after != before:
+                speed.warm_up()              # the new start of every request is read in advance again
             return self._json(config.all_settings())
+        if p == "/api/speed-report":
+            act = body.get("action")
+            if act in ("power_high", "power_balanced"):
+                return self._json(speed.set_power(act == "power_high"))
+            if act == "warm":
+                speed.warm_up()
+            return self._json(speed_info())
         if p == "/api/memories":
             if body.get("delete"):
                 memory.forget(int(body["delete"]))

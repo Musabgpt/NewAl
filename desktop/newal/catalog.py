@@ -19,9 +19,14 @@ MODELS = {
     },
     "coder": {
         "title": "Qwen3.6-35B-A3B", "label": "🧠 العقل والمبرمج", "kind": "chat",
-        "file": "Qwen3.6-35B-A3B-UD-IQ3_S.gguf", "size": 13676723168,
-        "url": HF + "unsloth/Qwen3.6-35B-A3B-GGUF/resolve/main/Qwen3.6-35B-A3B-UD-IQ3_S.gguf",
-        "about": "العقل: يخطط ويبرمج ويجرّب ويصلح ويحكم (MoE: 3B نشط من 35B، 73% في SWE-bench)",
+        # The same model with its multi-token-prediction heads (MTP): it drafts the next words itself and checks
+        # them in one pass. Measured on a 4-core AVX2 CPU: code 6.1 -> 9.7 words/s, Arabic 6.3 -> 7.4.
+        "file": "Qwen3.6-35B-A3B-MTP-UD-IQ3_S.gguf", "size": 15346432288, "mtp": True,
+        "url": HF + "unsloth/Qwen3.6-35B-A3B-MTP-GGUF/resolve/main/Qwen3.6-35B-A3B-UD-IQ3_S.gguf",
+        # Downloaded by earlier versions: still used as it is (without MTP) until the faster file is downloaded.
+        "legacy": [{"file": "Qwen3.6-35B-A3B-UD-IQ3_S.gguf", "size": 13676723168}],
+        "about": "العقل: يخطط ويبرمج ويجرّب ويصلح ويحكم (MoE: 3B نشط من 35B، 73% في SWE-bench). "
+                 "مع التوليد المسرّع MTP: يكتب الكود أسرع ~58% والعربي ~17%",
         # KV cache per token of context: only 10 of its 40 layers use attention, with 2 KV heads of 256 (f16).
         "kv_bytes_per_token": 10 * 2 * 256 * 2 * 2,
     },
@@ -69,18 +74,44 @@ FALLBACK = {
 }
 
 
-def path(role):
-    return os.path.join(config.MODELS, MODELS[role]["file"])
-
-
-def available(role):
+def _is_gguf(p):
     # Downloads land in <file>.part and are renamed when complete, so an existing GGUF file is whole.
-    p = path(role)
     try:
         with open(p, "rb") as f:
             return f.read(4) == b"GGUF"
     except OSError:
         return False
+
+
+def path(role):
+    """The file serving a role: its current file, else one an earlier version downloaded, else where it will go."""
+    main = os.path.join(config.MODELS, MODELS[role]["file"])
+    if _is_gguf(main):
+        return main
+    for old in MODELS[role].get("legacy", []):
+        p = os.path.join(config.MODELS, old["file"])
+        if _is_gguf(p):
+            return p
+    return main
+
+
+def available(role):
+    return _is_gguf(path(role))
+
+
+def legacy(role):
+    """True when the role runs on an older file and a better one can be downloaded (the brain without MTP)."""
+    return available(role) and not _is_gguf(os.path.join(config.MODELS, MODELS[role]["file"]))
+
+
+def mtp(role):
+    """Whether the file serving `role` has multi-token-prediction heads (llama.cpp can draft with them)."""
+    return bool(MODELS[role].get("mtp")) and _is_gguf(os.path.join(config.MODELS, MODELS[role]["file"]))
+
+
+def size_on_disk(role):
+    p = path(role)
+    return os.path.getsize(p) if os.path.exists(p) else MODELS[role]["size"]
 
 
 def sees(role):
@@ -116,16 +147,20 @@ def status():
     need = needed()
     for role, m in MODELS.items():
         p = _progress.get(role, {})
-        have = os.path.getsize(path(role)) if os.path.exists(path(role)) else 0
-        part = path(role) + ".part"
-        if os.path.exists(part):
-            have = max(have, os.path.getsize(part))
+        main = os.path.join(config.MODELS, m["file"])
+        downloading = p.get("state") == "downloading"
+        have = os.path.getsize(main) if os.path.exists(main) else 0
+        if os.path.exists(main + ".part"):
+            have = max(have, os.path.getsize(main + ".part"))
+        if not have and not downloading and available(role):
+            have = m["size"]                       # an older file serves the role: shown as ready
         out.append({
             "role": role, "title": m["title"], "label": m["label"], "about": m["about"],
             "size": m["size"], "have": have, "ready": available(role), "required": role in need,
             "optional": bool(m.get("optional")) or (bool(config.get("one_brain")) and role in ("agent", "router")),
             "state": p.get("state", "ready" if available(role) else "missing"),
             "error": p.get("error", ""), "speed": p.get("speed", 0), "url": m["url"], "file": m["file"],
+            "upgrade": legacy(role), "mtp": mtp(role),
         })
     return out
 
@@ -140,7 +175,7 @@ def download(role):
 
 def _download(role):
     m = MODELS[role]
-    dest = path(role)
+    dest = os.path.join(config.MODELS, m["file"])          # the current file, also when an older one serves the role
     part = dest + ".part"
     try:
         for attempt in range(6):
@@ -173,6 +208,17 @@ def _download(role):
             raise OSError("التنزيل لم يكتمل")
         os.replace(part, dest)
         _progress[role] = {"state": "ready"}
+        for old in m.get("legacy", []):
+            # The new file contains the whole model: the older copy is only wasted disk space now.
+            try:
+                os.remove(os.path.join(config.MODELS, old["file"]))
+            except OSError:
+                pass
+        if role == "coder":
+            # The engine switches to the new file at the next request (never in the middle of an answer),
+            # and the brain is warmed again in the background.
+            from . import speed
+            speed.warm_up()
     except Exception as e:  # noqa: BLE001 - reported to the UI
         _progress[role] = {"state": "error", "error": _explain(e)}
 

@@ -11,7 +11,9 @@ from . import browser, catalog, config, connectors, files, langs, lessons, memor
 from .engine import Cancelled, pool
 
 MAX_TOOL_ROUNDS = 6
-HISTORY_CHARS = 6000       # earlier turns sent with each request (~2k tokens: a CPU reads ~60-100 tokens/s)
+HISTORY_CHARS = 6000       # earlier turns sent to a small model (~2k tokens)
+BRAIN_HISTORY_CHARS = 16000  # the brain: kept in its cache between questions, so a longer window costs nothing per turn
+NOTES_K, NOTE_CHARS = 3, 700   # memory notes per question: every 1000 characters is ~15 s of reading on a laptop CPU
 
 PERSONA = ("You are NewAl, a capable offline assistant running on the user's Windows computer. "
            "Answer in the user's language (Arabic dialects included) unless asked otherwise. Be accurate and direct; "
@@ -58,6 +60,29 @@ LESSON_PROMPT = ("A program failed and was then fixed. Write ONE general rule (E
 JUDGE = ("You are an analyst and reviewer. Think carefully, find root causes, compare options honestly, and turn vague "
          "ideas or errors into precise, actionable instructions. Answer in the user's language, using Markdown.")
 
+# One brain: chat, tools, code and analysis share ONE system prompt and ONE tool list. The start of every request is then
+# the same, so llama.cpp reads it once (at start-up, see speed.py) and every question after that only costs its own
+# words. With a prompt per kind of request, each switch (chat -> code -> chat) re-read the whole conversation: on a
+# laptop CPU Qwen3.6 reads ~28 tokens/s, so a 2000-token conversation cost 70 s before the first word.
+BRAIN = ("You are NewAl, a capable assistant and expert software engineer running privately on the user's Windows 11 "
+         "computer. Answer in the user's language (Arabic dialects included) unless asked otherwise. Be accurate, direct "
+         "and brief: no filler and no restating the question; use Markdown. Never invent facts: when you are not sure or "
+         "the answer depends on recent events, say so or use the tools.\n"
+         "Code: write complete, working code in fenced blocks with the language tag (```python, ```powershell, "
+         "```javascript, ```html, ```c, ```cpp, ```csharp, ```java, ```go, ```rust, ```typescript). Code you write is run "
+         "automatically to test it: give one complete program in a single block that runs on its own without user input, "
+         "and end it with a small self-test (asserts) that prints the results. When the task needs several files, write "
+         "every file in its own block with its path on the fence line (```python app/main.py), add pytest tests in tests/, "
+         "and give the command that checks it on its own line: RUN: python -m pytest -q. Explain in a few short lines, "
+         "without repeating the code.\n"
+         "Plans, reviews and comparisons: find root causes, compare options honestly, and give precise, actionable steps.")
+SHARED_ROUTES = ("chat", "tools", "code", "analyze")
+
+
+def unified(role, route):
+    """True when this request uses the brain's shared prompt and tool list (one-brain mode)."""
+    return role == "coder" and bool(config.get("one_brain")) and route in SHARED_ROUTES
+
 IMAGE_EXT = (".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp")
 LOOK_PROMPT = ("Write out this image for a programmer who cannot see it. If it shows text (an error, a traceback, code, a "
                "terminal, a message box), copy that text exactly, line by line, keeping file paths, line numbers and "
@@ -79,20 +104,48 @@ RUNNABLE = {"python": "python", "py": "python", "powershell": "powershell", "ps1
 RUNNABLE.update(langs.FENCES)            # C, C++, C#, Java, Go, Rust, TypeScript
 
 
-def _system(route):
+def _system(route, role=None):
     # The date only: the system prompt must stay the same all day so llama.cpp can reuse what it already read
     # (a clock in it made every new message re-read the whole conversation).
     now = datetime.datetime.now().strftime("%A %Y-%m-%d")
-    base = {"code": CODER, "analyze": JUDGE, "goal": GOAL, "project": PROJECT}.get(route, PERSONA)
+    base = BRAIN if unified(role, route) else {"code": CODER, "analyze": JUDGE, "goal": GOAL, "project": PROJECT}.get(route, PERSONA)
     if route == "goal":
         from . import mcp
         extra = [k for k in tools.connected() if k not in ("base", "desktop")] + ["add-on " + k for k in mcp.manager.enabled()]
         base += " Connected services and add-ons: %s." % (", ".join(extra) or "none")
     home = os.path.expanduser("~")
     folders = ", ".join("%s: %s" % (n, os.path.join(home, n)) for n in ("Downloads", "Desktop", "Documents", "Pictures"))
+    about = custom_instructions()
     return ("%s\nToday: %s. OS: %s. User folders: %s. NewAl workspace: %s. Anything about this computer "
             "(files, disk, memory, network, processes, programs, settings) is found by running PowerShell with "
-            "run_command, never guessed." % (base, now, platform.platform(terse=True), folders, config.WORKSPACE))
+            "run_command, never guessed.%s" % (base, now, platform.platform(terse=True), folders, config.WORKSPACE,
+                                               "\n\n" + about if about else ""))
+
+
+def custom_instructions():
+    """What the user wrote about themselves and how they want answers (⚙ الإعدادات). In the system prompt: it stays
+    the same between questions, so it is read once."""
+    parts = []
+    if (config.get("about_me") or "").strip():
+        parts.append("About the user (from their settings):\n" + config.get("about_me").strip()[:1500])
+    if (config.get("answer_style") or "").strip():
+        parts.append("How the user wants answers:\n" + config.get("answer_style").strip()[:1500])
+    return "\n\n".join(parts)
+
+
+def brain_tools():
+    """The brain's tool list: the same for every request (see BRAIN), so llama.cpp keeps it read."""
+    return tools.definitions(tools.brain_names())
+
+
+def warm_prompts(role):
+    """What a model reads in advance (speed.warm_up): the start that every request shares. A question then only costs
+    its own words (llama.cpp keeps a checkpoint where the user's message starts)."""
+    hello = {"role": "user", "content": "hi"}
+    if unified(role, "chat"):
+        return [{"messages": [{"role": "system", "content": _system("chat", role)}, hello], "tools": brain_tools(),
+                 "extra": pool.no_tool_calls(role)}]
+    return [{"messages": [{"role": "system", "content": _system("chat", role)}, hello]}]
 
 
 class Turn:
@@ -111,10 +164,21 @@ class Turn:
         self.think = think
         self.tools_used = []
         self.approved = set()          # add-ons (MCP servers) the user allowed during this turn
+        self.sent = None               # this turn's user message as the model got it (kept for the next turns)
 
     # -------------------------------------------------------------- entry
 
     def run(self):
+        with _later_lock:
+            _active[0] += 1
+        try:
+            return self._run()
+        finally:
+            with _later_lock:
+                _active[0] -= 1
+                _active[1] = time.time()
+
+    def _run(self):
         started = time.time()
         self._look()
         route = self.mode if self.mode in router.ROUTES + ("goal", "project") else router.route(self.text)
@@ -186,35 +250,33 @@ class Turn:
     # -------------------------------------------------------------- context
 
     def _context(self, route, role):
-        # The system prompt stays the same between turns so llama-server can reuse its cache; per-question
-        # context (memory notes, files) goes into the user message instead.
-        system = _system(route)
+        # llama.cpp re-reads everything after the first difference from what it read last time, and a laptop CPU reads
+        # Qwen3.6 at ~28 tokens/s. So: the system prompt never changes during the day, earlier turns are sent exactly
+        # as they were sent (with the notes they had), and the window over a long conversation moves in big jumps
+        # instead of one message per turn. Only this turn's own words are new.
+        system = _system(route, role)
         try:
-            notes = memory.search(self.text, k=4)
+            notes = memory.search(self.text, k=NOTES_K)
         except Exception:  # noqa: BLE001 - memory is a bonus, never a blocker
             notes = []
         notes_text = ""
         if notes:
             self.emit({"type": "memory", "items": [{"source": n["source"], "text": n["text"][:200]} for n in notes]})
             notes_text = "Notes from my long-term memory and project files that may help:\n" + "\n---\n".join(
-                "[%s]\n%s" % (os.path.basename(n["source"]) if n["kind"] == "chunk" else "memory", n["text"][:1200])
+                "[%s]\n%s" % (os.path.basename(n["source"]) if n["kind"] == "chunk" else "memory", n["text"][:NOTE_CHARS])
                 for n in notes) + "\n\n"
         msgs = [{"role": "system", "content": system}]
-        # Answers that worked for similar requests go into this message, not in front of the history: anything
+        # An answer that worked for a similar request goes into this message, not in front of the history: anything
         # that changes near the start makes llama.cpp re-read the whole conversation.
-        shown = training.examples(role, self.text)
+        shown = training.examples(role, self.text, k=1)
         if shown:
-            notes_text = "Answers that worked for similar requests before:\n" + "\n\n".join(
-                "Request: %s\nAnswer:\n%s" % (ask[:600], ans[:1800]) for ask, ans in shown) + "\n\n" + notes_text
-        history = [m for m in memory.messages(self.conv) if m["role"] in ("user", "assistant")]
-        budget = HISTORY_CHARS
-        kept = []
-        for m in reversed(history[:-1]):             # the last one is this turn's user message
-            if budget - len(m["content"]) < 0:
-                break
-            budget -= len(m["content"])
-            kept.append({"role": m["role"], "content": m["content"]})
-        msgs += reversed(kept)
+            notes_text = "An answer that worked for a similar request before:\n" + "\n\n".join(
+                "Request: %s\nAnswer:\n%s" % (ask[:400], ans[:900]) for ask, ans in shown) + "\n\n" + notes_text
+        history = [m for m in memory.messages(self.conv) if m["role"] in ("user", "assistant")][:-1]  # not this turn's
+        items = [{"role": m["role"], "content": (m.get("meta") or {}).get("sent") or m["content"]} for m in history]
+        start = window_start([len(x["content"]) for x in items],
+                             BRAIN_HISTORY_CHARS if unified(role, route) else HISTORY_CHARS)
+        msgs += items[start:]
         user = self.text
         found = skills.relevant(self.text) if route in ("tools", "goal", "code", "analyze", "project") else []
         if found:
@@ -226,6 +288,7 @@ class Turn:
             text = files.extract(path)
             user += "\n\n[File: %s]\n%s" % (os.path.basename(path), connectors.clip(text, 16000) or "(لا نص فيه)")
         msgs.append({"role": "user", "content": user})
+        self.sent = user              # stored with the question: the next turns send it again exactly like this
         return msgs
 
     def _delta(self, kind, text):
@@ -242,17 +305,28 @@ class Turn:
 
     # -------------------------------------------------------------- plain answer (judge)
 
+    def _answer_opts(self, role, route):
+        """tools/extra for an answer without tool calls: in one-brain mode the shared tool list is still sent (the
+        start of the request stays the same as every other request) and the tool-call token is banned."""
+        if unified(role, route):
+            return brain_tools(), dict(pool.no_tool_calls(role) or {}, **self._extra(role))
+        return None, self._extra(role)
+
     def _plain(self, messages, role):
-        r = pool.chat(role, messages, on_delta=self._delta, cancel=self.cancel, extra=self._extra(role))
+        defs, extra = self._answer_opts(role, "analyze")
+        r = pool.chat(role, messages, tools=defs, on_delta=self._delta, cancel=self.cancel, extra=extra)
         return r["content"].strip(), {"tps": r["tps"]}
 
     # -------------------------------------------------------------- agent with tools
 
     def _agent(self, messages, role, route="tools"):
         context = " ".join(m["content"] for m in messages[-4:] if m["role"] == "user")
+        shared = unified(role, route)
         if route == "chat":
-            # Plain conversation: no tool list (saves ~1500 prompt tokens) and no needless searches.
-            r = pool.chat(role, messages, on_delta=self._delta, cancel=self.cancel, extra=dict(pool.no_tool_calls(role) or {}, **self._extra(role)))
+            # Plain conversation: no tool calls and no needless searches. A small model gets no tool list (~1500
+            # prompt tokens saved); the brain gets its usual one, already in its cache.
+            r = pool.chat(role, messages, tools=brain_tools() if shared else None, on_delta=self._delta,
+                          cancel=self.cancel, extra=dict(pool.no_tool_calls(role) or {}, **self._extra(role)))
             if not TOOL_MARKUP.search(r["content"]):
                 return r["content"].strip(), {"tps": r["tps"]}
             # The model wanted a tool after all: go through the tools path.
@@ -263,32 +337,41 @@ class Turn:
             found = self._web_context(self.text)
             if found:
                 messages[-1] = dict(messages[-1], content=messages[-1]["content"] + "\n\n" + found)
-                # The usual persona says "when unsure, use the tools", which makes LFM2.5 ask for yet another
-                # search; here the searching is done, so the system prompt says to answer from the results.
-                messages[0] = dict(messages[0], content=messages[0]["content"].replace(PERSONA, WEB_PERSONA))
+                self.sent = messages[-1]["content"]
+                if not shared:
+                    # The usual persona says "when unsure, use the tools", which makes LFM2.5 ask for yet another
+                    # search; here the searching is done, so the system prompt says to answer from the results.
+                    # (Not for the brain: its system prompt stays the same, the results say to answer from them.)
+                    messages[0] = dict(messages[0], content=messages[0]["content"].replace(PERSONA, WEB_PERSONA))
                 # LFM2.5 without thinking asks for yet another search instead of answering, even with no
                 # tools offered and when told not to: its tool-call token is banned for this answer.
-                r = pool.chat(role, messages, on_delta=self._delta, cancel=self.cancel, extra=dict(pool.no_tool_calls(role) or {}, **self._extra(role)))
+                r = pool.chat(role, messages, tools=brain_tools() if shared else None, on_delta=self._delta,
+                              cancel=self.cancel, extra=dict(pool.no_tool_calls(role) or {}, **self._extra(role)))
                 return r["content"].strip(), {"tps": r["tps"]}
-        names = tools.select(context)
-        if is_local(self.text):
-            # About this computer: only the tools that can see it (a free choice sent LFM2.5 to the web 12 times
-            # for "what is my computer's name").
-            names = [n for n in names if n not in WEB_TOOLS]
-        defs = tools.definitions(names, with_mcp=tools.mcp_for(self.text) or [])
+        mcp_names = tools.mcp_for(self.text)
+        if shared:
+            defs = brain_tools()
+            if mcp_names:
+                from . import mcp
+                defs = defs + mcp.manager.definitions(only=mcp_names)
+        else:
+            names = tools.select(context)
+            if is_local(self.text):
+                # About this computer: only the tools that can see it (a free choice sent LFM2.5 to the web 12 times
+                # for "what is my computer's name").
+                names = [n for n in names if n not in WEB_TOOLS]
+            defs = tools.definitions(names, with_mcp=mcp_names or [])
         seen = set()
         r = None
         if web.is_arabic(self.text):
             messages[-1] = dict(messages[-1], content=messages[-1]["content"] + "\n\n(أجب بالعربية)")
+            self.sent = messages[-1]["content"]
         for _ in range(MAX_TOOL_ROUNDS):
             r = pool.chat(role, messages, tools=defs, on_delta=self._delta, cancel=self.cancel,
                           extra=self._extra(role))
             if not r["tool_calls"]:
                 return r["content"].strip(), {"tps": r["tps"]}
-            messages.append({"role": "assistant", "content": r["content"] or "",
-                             "tool_calls": [{"id": c["id"] or "call_%d" % i, "type": "function",
-                                             "function": {"name": c["name"], "arguments": c["arguments"] or "{}"}}
-                                            for i, c in enumerate(r["tool_calls"])]})
+            messages.append(assistant_turn(r, "call_%d"))
             repeated = True
             for i, c in enumerate(r["tool_calls"]):
                 key = (c["name"], c["arguments"])
@@ -300,7 +383,8 @@ class Turn:
                 break
         # Out of rounds: answer with what was found.
         messages.append({"role": "user", "content": "Answer my question now using the tool results above."})
-        r = pool.chat(role, messages, on_delta=self._delta, cancel=self.cancel)
+        r = pool.chat(role, messages, tools=defs if shared else None, on_delta=self._delta, cancel=self.cancel,
+                      extra=pool.no_tool_calls(role) if shared else None)
         return r["content"].strip(), {"tps": r["tps"]}
 
     # -------------------------------------------------------------- goal: act, check, correct until done
@@ -309,7 +393,7 @@ class Turn:
         """Works toward a goal with every tool: after the executor says it is done, the judge checks the goal
         against what the tools actually returned; if something is missing the executor continues with that."""
         defs = tools.definitions(tools.goal_names(self.text), with_mcp=tools.mcp_for(self.text) or []) + [CODE_TASK_TOOL]
-        steps, checks, seen, per_tool = 0, 0, {}, {}
+        steps, checks, seen, per_tool, steps_since_check = 0, 0, {}, {}, 0
         # A short plan first: small models keep to a numbered list far better than to an open goal.
         self.emit({"type": "status", "text": "🎯 يخطط…"})
         plan = pool.chat(role, messages + [{"role": "user", "content": PLAN_PROMPT}], cancel=self.cancel,
@@ -324,21 +408,22 @@ class Turn:
         while steps < MAX_GOAL_STEPS:
             self.emit({"type": "status", "text": "🎯 خطوة %d…" % (steps + 1)})
             compact(messages, budget_chars=context_chars(role))
+            # Thinking costs ~20 s per step on a laptop: only after the goal check found something missing (the plan
+            # already did the thinking for the first steps), or always with 💭.
+            budget = GOAL_THINKING if (checks and not steps_since_check) else 0
             try:
                 r = pool.chat(role, messages, tools=defs, on_delta=self._delta, cancel=self.cancel,
-                              extra=self._extra(role, budget=GOAL_THINKING), max_tokens=2048)
+                              extra=self._extra(role, budget=budget), max_tokens=2048)
             except RuntimeError as e:
                 if "exceed" not in str(e):
                     raise
                 compact(messages, keep=2, budget_chars=context_chars(role) // 3)      # squeeze harder once
                 r = pool.chat(role, messages, tools=defs, on_delta=self._delta, cancel=self.cancel,
-                              extra=self._extra(role, budget=GOAL_THINKING), max_tokens=2048)
+                              extra=self._extra(role, budget=budget), max_tokens=2048)
             tps = r["tps"] or tps
+            steps_since_check += 1
             if r["tool_calls"]:
-                messages.append({"role": "assistant", "content": r["content"] or "",
-                                 "tool_calls": [{"id": c["id"] or "call_%d_%d" % (steps, i), "type": "function",
-                                                 "function": {"name": c["name"], "arguments": c["arguments"] or "{}"}}
-                                                for i, c in enumerate(r["tool_calls"])]})
+                messages.append(assistant_turn(r, "call_%d_%%d" % steps))
                 for i, c in enumerate(r["tool_calls"]):
                     key = (c["name"], c["arguments"])
                     seen[key] = seen.get(key, 0) + 1
@@ -373,6 +458,7 @@ class Turn:
             messages.append({"role": "assistant", "content": answer})
             messages.append({"role": "user", "content": "The goal is not reached yet: %s\nContinue working with the "
                                                         "tools until it is done." % verdict.get("missing", "")})
+            steps_since_check = 0
             self.emit({"type": "draft_reset"})
         return answer or "توقفت بعد %d خطوة بدون إكمال الهدف." % steps, {"tps": tps, "verified": False, "steps": steps}
 
@@ -421,24 +507,26 @@ class Turn:
         if self.plan:        # looking only: nothing that changes or runs anything
             defs = [d for d in defs if d["function"]["name"] not in READ_ONLY_BLOCKED]
         steps, checks, reviews, failures, verified, answer, tps, searched = 0, 0, 0, [], None, "", 0, False
+        think_next = True              # the first step plans the change
         while steps < self.max_steps:
             self.emit({"type": "status", "text": "🧑‍💻 خطوة %d…" % (steps + 1)})
             compact(messages, keep=8, budget_chars=context_chars(role))
+            # Thinking before a step costs ~20 s on a laptop: on the first step and after a failed check, not before
+            # every file read (always with 💭).
+            budget = GOAL_THINKING if think_next else 0
+            think_next = False
             try:
                 r = pool.chat(role, messages, tools=defs, on_delta=self._delta, cancel=self.cancel,
-                              extra=self._extra(role, budget=GOAL_THINKING), max_tokens=4096)
+                              extra=self._extra(role, budget=budget), max_tokens=4096)
             except RuntimeError as e:
                 if "exceed" not in str(e):
                     raise
                 compact(messages, keep=2, budget_chars=context_chars(role) // 3)     # squeeze harder once
                 r = pool.chat(role, messages, tools=defs, on_delta=self._delta, cancel=self.cancel,
-                              extra=self._extra(role, budget=GOAL_THINKING), max_tokens=4096)
+                              extra=self._extra(role, budget=budget), max_tokens=4096)
             tps = r["tps"] or tps
             if r["tool_calls"]:
-                messages.append({"role": "assistant", "content": r["content"] or "",
-                                 "tool_calls": [{"id": c["id"] or "call_%d_%d" % (steps, i), "type": "function",
-                                                 "function": {"name": c["name"], "arguments": c["arguments"] or "{}"}}
-                                                for i, c in enumerate(r["tool_calls"])]})
+                messages.append(assistant_turn(r, "call_%d_%%d" % steps))
                 for i, c in enumerate(r["tool_calls"]):
                     result = self._project_tool(proj, c["name"], c["arguments"])
                     messages.append({"role": "tool", "tool_call_id": c["id"] or "call_%d_%d" % (steps, i),
@@ -470,10 +558,14 @@ class Turn:
                     messages.append({"role": "user", "content": "The project's tests fail:\n%s\n\nFix the code (change "
                                                                 "a test only if the test itself is wrong), then run the "
                                                                 "tests again.%s" % (out[-3000:], "\n\n" + found if found else "")})
+                    think_next = True
                     self.emit({"type": "draft_reset"})
                     continue
                 verified = True
-            if config.get("review_changes") and reviews < MAX_REVIEWS:
+            # A second look at the diff: when no tests checked the change, or always with 💭 (it re-reads the task and
+            # the whole diff, a minute or more on a laptop).
+            if (config.get("review_changes") and reviews < (DEEP_REVIEWS if self.think else MAX_REVIEWS)
+                    and (verified is not True or self.think)):
                 # Tests pass (or there are none): a second look at the diff against the task catches what tests
                 # do not cover - a part of the task left out, a half-finished change, a debug leftover.
                 reviews += 1
@@ -486,6 +578,7 @@ class Turn:
                     messages.append({"role": "user", "content": "A review of your change against the task found:\n- %s\n"
                                                                 "Fix these, check again, then give the summary."
                                                                 % "\n- ".join(v["problems"][:6])})
+                    think_next = True
                     self.emit({"type": "draft_reset"})
                     continue
             break
@@ -498,8 +591,7 @@ class Turn:
         if verified is False:
             answer += "\n\n> ⚠️ اختبارات المشروع ما زالت تفشل: `%s`" % failures[-1].split(": ", 1)[-1][:300]
         if failures and verified is not None:
-            threading.Thread(target=self._learn, args=(self.text, failures, diff[:4000], verified, ""),
-                             daemon=True).start()
+            later(self._learn, self.text, failures, diff[:4000], verified, "")
         if self.plan:
             return answer or "ما قدرت كمّل الخطة خلال %d خطوة." % steps, {"tps": tps, "steps": steps, "plan": True,
                                                                         "project": root}
@@ -612,7 +704,7 @@ class Turn:
         coder = catalog.pick("coder")
         self.emit({"type": "tool", "name": "code_task", "args": task, "state": "start"})
         self.emit({"type": "status", "text": "💻 %s يكتب البرنامج…" % catalog.MODELS[coder]["title"]})
-        msgs = [{"role": "system", "content": _system("code")}, {"role": "user", "content": task}]
+        msgs = [{"role": "system", "content": _system("code", coder)}, {"role": "user", "content": task}]
         answer, info = self._code(msgs, coder)
         block = runnable_block(answer)
         result = "verified: %s\n%s\nLast run output:\n%s\n\nProgram:\n%s" % (
@@ -657,13 +749,14 @@ class Turn:
                 if x["url"] not in seen:
                     seen.add(x["url"])
                     results.append(x)
-        results = results[:6]
+        results = results[:4]
         if not results:
             self.emit({"type": "tool", "name": "web_search", "state": "done", "result": "لا نتائج"})
             return ""
-        top = results[:3]
+        # Two pages read, the others by their snippets: every 1000 characters here is ~15 s of reading on a laptop.
+        top = results[:2] if not self.think else results[:3]
         with ThreadPoolExecutor(3) as ex:
-            pages = list(ex.map(lambda x: _safe_read(x["url"], question), top))
+            pages = list(ex.map(lambda x: _safe_read(x["url"], question, WEB_PAGE_CHARS), top))
         parts = []
         for i, x in enumerate(results):
             body = pages[i] if i < len(pages) and pages[i] else x["snippet"]
@@ -708,7 +801,9 @@ class Turn:
         written down afterwards. The user sees one final answer; the attempts are in a collapsed box."""
         request = messages[-1]["content"]
         extra = []
-        docs = self._docs(request)
+        # Current library docs up front only with 💭: they are thousands of words to read (a minute or more on a
+        # laptop). Without it they are looked up when a run fails on a library's API (below).
+        docs = self._docs(request) if self.think else ""
         if docs:
             extra.append(docs)
         known = lessons.relevant(request)
@@ -717,9 +812,13 @@ class Turn:
             extra.append(lessons.as_prompt(known))
         if extra:
             messages = messages[:-1] + [dict(messages[-1], content=request + "\n\n" + "\n\n".join(extra))]
+            if request == self.sent:             # this turn's question (not a code_task of a goal)
+                self.sent = messages[-1]["content"]
         verify = config.get("verify_code")
         kind = "draft" if verify else "content"
-        r = pool.chat(role, messages, on_delta=lambda k, t: self._delta(kind if k == "content" else k, t),
+        defs, opts = self._answer_opts(role, "code")
+        r = pool.chat(role, messages, tools=defs, extra=opts,
+                      on_delta=lambda k, t: self._delta(kind if k == "content" else k, t),
                       cancel=self.cancel, max_tokens=4096)
         answer = r["content"].strip()
         info = {"tps": r["tps"], "attempts": 1}
@@ -771,7 +870,20 @@ class Turn:
                 info["note"] = "long_running"
                 break
             if ok:
-                verdict = self._verdict(request, code, output)
+                tested = self_tested(prog, code, output)
+                if tested and not self.think:
+                    # Its own asserts or tests ran and passed: that is the check. The judge would re-read the
+                    # request, the code and the output (half a minute to a minute on a laptop) to say the same.
+                    verdict = {"ok": True, "reason": tested}
+                elif not tested and not self.think and prog["lang"] != "browser":
+                    # Ran without errors but checks nothing itself: accepted as it is, marked as not verified.
+                    self.emit({"type": "run", "lang": lang, "ok": True, "attempt": attempt,
+                               "output": output[-2000:] + "\n\n▶ اشتغل بدون أخطاء (ما فيه اختبارات تتحقق من النتيجة)"})
+                    info["verified"] = None
+                    info["note"] = "ran_ok"
+                    break
+                else:
+                    verdict = self._verdict(request, code, output)
                 self.emit({"type": "run", "lang": lang, "ok": bool(verdict.get("ok")), "attempt": attempt,
                            "output": output[-2000:] + "\n\n🧠 " + verdict.get("reason", "")})
                 if verdict.get("ok"):
@@ -815,13 +927,14 @@ class Turn:
             self.emit({"type": "draft_reset"})
             # Only the original request and the latest attempt go back to the coder: short and focused.
             retry = messages + [{"role": "assistant", "content": answer}, {"role": "user", "content": fix}]
-            r = pool.chat(role, retry, on_delta=lambda k, t: self._delta("draft" if k == "content" else k, t),
+            r = pool.chat(role, retry, tools=defs, extra=opts,
+                          on_delta=lambda k, t: self._delta("draft" if k == "content" else k, t),
                           cancel=self.cancel, max_tokens=4096)
             answer = r["content"].strip() or answer
         lessons.mark_used(used)
         if prog and prog["project"]:
             answer = project_answer(answer, prog)
-            if info.get("verified") and folder:
+            if (info.get("verified") or info.get("note") == "ran_ok") and folder:
                 info["project"] = save_project(folder, request)
                 answer += "\n\n📁 المشروع كامل ومجرّب، محفوظ في: `%s`" % info["project"]
         if info.get("verified") is False:
@@ -831,8 +944,7 @@ class Turn:
                        % (info["attempts"], " (أعاد النموذج نفس الكود)" if info.get("note") == "same_code" else "",
                           why[:300]))
         if history and info.get("verified") is not None:
-            threading.Thread(target=self._learn, args=(request, history, code, info.get("verified"),
-                                                       info.get("run_output", "")), daemon=True).start()
+            later(self._learn, request, history, code, info.get("verified"), info.get("run_output", ""))
         return answer, info
 
     def _learn(self, request, history, final_code, solved, last_output):
@@ -949,12 +1061,28 @@ QUERY_SHOTS = [("شو آخر أخبار الذكاء الاصطناعي هالأ
                ("كم سعر الدولار بتركيا", ["سعر الدولار في تركيا", "USD to TRY exchange rate"])]
 
 
+_QUESTION_WORDS = re.compile(r"[؟?!.،,:]|(?<!\w)(?:شو|ايش|إيش|قديش|كيف|مين|ليش|وين|هل|بدي|اعرف|أعرف|قلي|قللي|"
+                             r"خبرني|احكيلي|لو سمحت|please|tell me|what|who|how|is there)(?!\w)", re.I)
+_DIALECT = {"هالأسبوع": "هذا الأسبوع", "هالاسبوع": "هذا الأسبوع", "هالشهر": "هذا الشهر", "هالسنة": "هذه السنة",
+            "هلق": "الآن", "هلأ": "الآن", "امبارح": "أمس", "مبارح": "أمس", "بكرا": "غداً", "بكرة": "غداً"}
+
+
+def plain_query(question):
+    """Search words from a question, without a model: question words and dialect out, the rest kept."""
+    q = question
+    for a, b in _DIALECT.items():
+        q = q.replace(a, b)
+    q = re.sub(r"\s+", " ", _QUESTION_WORDS.sub(" ", q)).strip()
+    return q or question.strip()
+
+
 def search_queries(question):
     """Short keyword queries (question language + English): search engines return nothing for long
-    dialect questions like «شو آخر أخبار ... هالأسبوع؟». Written by the always-loaded router (~2 s)."""
+    dialect questions like «شو آخر أخبار ... هالأسبوع؟». Written by the small router model when it is downloaded
+    (~2 s); the brain is not asked (it would first read the request: 5-10 s on a laptop), the words are cut instead."""
     import json
-    fallback = [re.sub(r"[؟?!.]|\b(شو|ايش|إيش|قديش|كيف|مين)\b", " ", question).strip()]
-    writer = catalog.pick("router") or (catalog.pick("coder") if config.get("one_brain") else None)
+    fallback = [plain_query(question)]
+    writer = catalog.pick("router") if (catalog.available("router") or catalog.available("agent")) else None
     if not writer:
         return fallback
     msgs = [{"role": "system", "content": QUERY_SYSTEM}]
@@ -978,7 +1106,8 @@ GOAL_THINKING = 160            # tokens of thinking before each goal step (~6 s)
 MAX_GOAL_STEPS = 25
 MAX_PROJECT_STEPS = 60
 MAX_PROJECT_CHECKS = 5
-MAX_REVIEWS = 2
+MAX_REVIEWS = 1                # a second one (to confirm the fix) only with 💭
+DEEP_REVIEWS = 2
 PAGE_PROMPT = ("This is a screenshot of a web page being built. Describe what it shows: the visible text, the layout and "
                "anything that looks broken (overlapping, empty areas, error messages, unstyled content). Then answer: %s")
 PLAN_ONLY = ("Plan only, change nothing now. Explore with list_files, search and read_file, then reply (without a tool "
@@ -1042,9 +1171,12 @@ def is_local(text):
 _WEB_ONLY = re.compile(r"أخبار|اخبار|سعر|أسعار|طقس|news|price|weather", re.I)
 
 
-def _safe_read(url, question):
+WEB_PAGE_CHARS = 900          # per page read for an answer: ~1000 tokens in all with the snippets (~35 s on a laptop)
+
+
+def _safe_read(url, question, max_chars=1500):
     try:
-        return web.read(url, question, max_chars=1500)
+        return web.read(url, question, max_chars=max_chars)
     except Exception:  # noqa: BLE001 - a page that fails is just skipped
         return ""
 
@@ -1421,6 +1553,99 @@ def compact(messages, keep=6, budget_chars=24000):
             messages[i] = dict(messages[i], content=c[:1500] + "\n…[اختُصر]")
             total -= len(c) - 1500
     return messages
+
+
+def assistant_turn(r, id_format):
+    """The model's tool-call turn as it goes back into the conversation, with its thinking: the template then writes
+    it exactly as the model wrote it and llama.cpp finds it in its cache (preserve_thinking)."""
+    msg = {"role": "assistant", "content": r["content"] or "",
+           "tool_calls": [{"id": c["id"] or id_format % i, "type": "function",
+                           "function": {"name": c["name"], "arguments": c["arguments"] or "{}"}}
+                          for i, c in enumerate(r["tool_calls"])]}
+    if r.get("reasoning"):
+        msg["reasoning_content"] = r["reasoning"]
+    return msg
+
+
+_ASSERTS = {
+    "python": re.compile(r"^\s*assert\b|\bassert\w*\(|unittest", re.M),
+    "node": re.compile(r"\bassert(?:\.\w+)?\s*\(|console\.assert\s*\("),
+    "typescript": re.compile(r"\bassert(?:\.\w+)?\s*\(|console\.assert\s*\("),
+    "rust": re.compile(r"\bassert(?:_eq|_ne)?!\s*\("),
+    "c": re.compile(r"\bassert\s*\("), "cpp": re.compile(r"\bassert\s*\("),
+    "csharp": re.compile(r"Debug\.Assert|Trace\.Assert|throw new Exception"),
+    "go": re.compile(r"\bpanic\s*\(|t\.(?:Error|Fatal)"),
+    "java": re.compile(r"throw new (?:AssertionError|RuntimeException)"),
+    "powershell": re.compile(r"\bthrow\b"),
+}
+
+
+def self_tested(prog, code, output):
+    """Why a program that ran without errors checked its own result ("" when it did not): its tests passed, or its
+    asserts ran (a failed assert stops the program with an error)."""
+    if prog["project"] and prog.get("tests"):
+        return "اختبارات المشروع نجحت"
+    if "Assertion failed" in output:
+        return ""                                    # console.assert only prints
+    rx = _ASSERTS.get(prog["lang"])
+    return "اختباراته (assert) نجحت" if rx and rx.search(code) else ""
+
+
+_later = []                    # [(fn, args)] model work that can wait
+_later_lock = threading.Lock()
+_later_event = threading.Event()
+_active = [0, 0.0]             # turns running now, when the last one ended
+IDLE_SECONDS = 45
+
+
+def later(fn, *args):
+    """Runs model work that can wait (writing down a lesson) when nobody is waiting for an answer. The brain answers
+    one request at a time, so a lesson written right after an answer made the next question wait behind it."""
+    with _later_lock:
+        _later.append((fn, args))
+        if len(_later) == 1 and not getattr(later, "started", False):
+            later.started = True
+            threading.Thread(target=_idle_worker, daemon=True).start()
+    _later_event.set()
+
+
+def _idle_worker():
+    while True:
+        _later_event.wait()
+        while _active[0] or time.time() - _active[1] < IDLE_SECONDS:
+            time.sleep(3)
+        with _later_lock:
+            job = _later.pop(0) if _later else None
+            if not _later:
+                _later_event.clear()
+        if job:
+            try:
+                job[0](*job[1])
+            except Exception:  # noqa: BLE001 - background work never breaks anything
+                pass
+
+
+def window_start(lengths, budget):
+    """Where the part of a conversation sent to the model starts (index into its messages, oldest first).
+
+    It moves forward in jumps of half the budget, measured from the start of the conversation, so it stays put for
+    several turns: llama.cpp reuses everything before the first change, and a window that slid by one message each
+    turn made every answer of a long conversation re-read all of it."""
+    total = sum(lengths)
+    if total <= budget:
+        return 0
+    step = max(1, budget // 2)
+    starts, acc, mark = [0], 0, step
+    for i, n in enumerate(lengths):
+        acc += n
+        if acc >= mark:
+            starts.append(i + 1)
+            while mark <= acc:
+                mark += step
+    for st in starts:
+        if sum(lengths[st:]) <= budget:
+            return st
+    return len(lengths)
 
 
 def error_line(output):

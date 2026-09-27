@@ -93,6 +93,13 @@ def _build():
     _index = [(r, t, cached[t]) for r, t in items]
 
 
+def warm():
+    """Builds the examples' index now (at start-up) instead of on the first question."""
+    with _lock:
+        if _index is None:
+            _build()
+
+
 def by_examples(text):
     """(route, confidence 0..1) from the 5 nearest examples."""
     with _lock:

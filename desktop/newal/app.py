@@ -68,7 +68,8 @@ def main():
         return
     from newal import server
     httpd = server.serve(port)
-    from newal import school, tasks, updater
+    from newal import school, speed, tasks, updater
+    speed.warm_up()                  # the brain loads and reads its instructions while the window opens
     school.start_scheduler()
     tasks.start_worker()
     updater.start_checker()
