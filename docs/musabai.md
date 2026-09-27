@@ -29,7 +29,7 @@ Status: ✅ in place · 🟡 partly · ❌ not yet. Paths are under `desktop/new
 | 8 | Layered long-term memory | 🟡 | User (about me, memories), project (projects + file index), semantic (RAG in `memory.py`), lessons (`lessons.py`), **procedural** (`procedures.py`: steps of verified goals), tool log (`audit.py`) | Episodic record per goal (step, error, fix, test) built from the tool log |
 | 9 | Learning only from verified execution | 🟡 | `training.py` logs every answer with verified/run/judge; Kaggle School results come back as verified examples and lessons | Dataset export that keeps only verified, deduplicated, reproducible trajectories |
 | 10 | Kaggle as training/experiment space | 🟡 | `school.py`: hard tasks solved weekly on Kaggle's free GPUs | Fine-tuning run on Kaggle, gated by #11 before use |
-| 11 | Continuous evaluation | ❌ | `diagnose.py` self-test checks the system, the engine and the code loop, not answer quality | Built-in benchmark (Arabic, tools, code, math, hallucination) scored automatically, results kept per model file; a new model/file/adapter is used only if it does not score lower |
+| 11 | Continuous evaluation | 🟡 | `evals.py` («🧪 اختبار الجودة» in settings): 12 real tasks (Arabic, dialect, math, files/tools, code, honesty) run end to end and scored by evidence, each run kept with the brain's file name; `accept()` rejects a change that makes any category worse. `diagnose.py` checks the system and engine | More cases per category; run it automatically before switching the brain's file or using a trained adapter |
 | 12 | Hierarchical context | ✅ | `_context`: fixed system prompt → project instructions → relevant memories/files/chats → one worked example → skills → attachments | — |
 | 13 | Full project understanding | 🟡 | Project mode explores with list/read/search every time | A project map (entry points, dependencies, tests) saved per project and refreshed on change |
 | 14 | Multi-agent | 🟡 | Planner, executor, checker and reviewer roles run on the one brain; read-only tool calls run in parallel | Parallel model agents make one CPU slower, not faster: only with a second machine or a GPU |
@@ -52,8 +52,10 @@ Each step is shipped only with tests, and with a measurement where it claims spe
 1. **Fewer and cheaper model rounds** (done): chat without needless tool rounds, the goal plan and checks inside the
    same conversation (llama.cpp continues instead of re-reading), shorter tool results.
 2. **Procedural memory, tool log, live command output** (done).
-3. **Built-in benchmark (#11)**: the gate for everything below, and the way to pick the brain's file on the user's own
-   laptop by speed *and* Arabic/tool accuracy.
+3. **Built-in benchmark (#11)** (first version done): the gate for everything below, and the way to pick the brain's
+   file on the user's own laptop by speed *and* Arabic/tool accuracy.
 4. **The brain's file**: CPU speed depends on the quantization types inside the file, not its label (Unsloth's
-   UD-IQ3_S keeps most experts as IQ2_S + IQ4_XS). Measured candidates are compared with #3 before switching.
+   UD-IQ3_S keeps most experts as IQ2_S + IQ4_XS; UD-Q3_K_M uses IQ3_XXS + IQ4_XS). On a small model of the same
+   architecture (4 threads, AVX2 only, not the user's laptop) K-quant expert mixes read and wrote faster than the IQ
+   mixes, but the spread between runs was large. Candidates are compared with #3 on the laptop before switching.
 5. Permission levels (#5, #18), git checkpoints (#19), project map (#13), streaming code into files (#3).
