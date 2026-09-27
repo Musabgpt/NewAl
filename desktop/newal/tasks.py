@@ -85,7 +85,13 @@ def _git(args, cwd, timeout=120):
 
 def is_git(folder):
     code, out = _git(["rev-parse", "--show-toplevel"], folder)
-    return code == 0 and os.path.normcase(os.path.abspath(out.strip())) == os.path.normcase(os.path.abspath(folder))
+    if code != 0 or not out.strip():
+        return False
+    try:
+        # git prints C:/Users/... while Windows may give the same folder as C:\Users\RUNNER~1\...: compare the folders.
+        return os.path.samefile(out.strip().splitlines()[-1], folder)
+    except OSError:
+        return False
 
 
 def isolate(task):
