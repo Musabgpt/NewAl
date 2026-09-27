@@ -211,6 +211,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(memory.memories())
         if p == "/api/addons":
             return self._json(addons.status())
+        if p == "/api/addons/setup_all":
+            return self._json(addons.setup_status())
         if p == "/api/skills":
             return self._json([{k: v for k, v in x.items() if k != "path"} for x in skills.all_skills()])
         if p == "/api/file":
@@ -293,6 +295,10 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json(addons.install(body.get("id", ""), body.get("extra")))
             except Exception as e:  # noqa: BLE001
                 return self._json({"ok": False, "message": str(e)})
+        if p == "/api/addons/setup_all":
+            if "context7_key" in body:
+                config.update({"context7_key": body["context7_key"]})
+            return self._json(addons.setup_all())
         if p == "/api/addons/remove":
             return self._json(addons.remove(body.get("id", "")))
         if p == "/api/skills/save":

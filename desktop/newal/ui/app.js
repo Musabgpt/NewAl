@@ -8,7 +8,7 @@ let conv = null, job = null, attachments = [], state = null;
 const ROUTE_LABEL = {code: "💻 برمجة", tools: "🛠 أدوات", analyze: "🧠 تحليل", chat: "💬 محادثة", goal: "🎯 هدف"};
 const TOOL_LABEL = {
   web_search: "🔎 بحث بالنت", read_url: "🌐 قراءة صفحة", weather: "⛅ الطقس", currency: "💱 عملات",
-  current_time: "🕒 الوقت", run_command: "⌨ الطرفية", write_file: "📝 إنشاء ملف", read_file: "📄 قراءة ملف",
+  current_time: "🕒 الوقت", library_docs: "📚 توثيق المكتبة", run_command: "⌨ الطرفية", write_file: "📝 إنشاء ملف", read_file: "📄 قراءة ملف",
   list_dir: "📁 مجلد", search_memory: "🗂 الذاكرة", remember: "🗂 حفظ بالذاكرة", github_repos: "GitHub",
   github_read: "GitHub", github_issues: "GitHub", github_create_issue: "GitHub", github_create_repo: "GitHub",
   git_clone: "git clone", git_push: "git push", gitlab_projects: "GitLab", gitlab_read: "GitLab",
@@ -542,6 +542,12 @@ const panels = {
           '<button class="primary" data-install>⬇ تثبيت / ربط بضغطة</button>'}<span class="hint" data-out></span></div></div>`).join("");
     body.innerHTML = `<h2>🧩 الإضافات والمهارات</h2>
       <p class="hint">كل ما يُثبت هنا يستخدمه NewAl تلقائياً عندما يحتاجه، خاصة في وضع 🎯 هدف.</p>
+      <div class="card"><h4><span>⚡ جهّز كل شي بضغطة وحدة</span><span id="allSum" class="hint"></span></h4>
+        <div class="about">يثبّت ويربط كل البرامج والإضافات والحزم تحت (Git، Node.js، VS Code + Continue، حزم Python، المتصفح، الملفات،
+          التفكير، توثيق المكتبات) واحدة ورا الثانية. الجاهز يتخطاه. يأخذ 10–30 دقيقة حسب النت، وبتقدر تكمل شغلك.</div>
+        <div class="row"><button class="primary" id="setupAll">⚡ جهّز كل شي</button>
+          <input type="password" id="c7key" dir="ltr" style="flex:1" placeholder="اختياري: مفتاح Context7 المجاني (context7.com/dashboard)"></div>
+        <div id="allSteps"></div></div>
       ${group("apps", "البرامج", "برامج مجانية يحتاجها NewAl لبعض المهام، تُثبت من مصادرها الرسمية (winget).")}
       ${group("mcp", "إضافات الأدوات (MCP)", "MCP معيار مفتوح لأدوات الذكاء الاصطناعي: كل إضافة تعطي NewAl أدوات جديدة.")}
       <div class="card"><h4>➕ إضافة MCP أخرى</h4><div class="about">أي خادم MCP: اسم قصير وأمر التشغيل، مثل <code dir="ltr">npx -y @modelcontextprotocol/server-memory</code></div>
@@ -565,6 +571,24 @@ const panels = {
     body.querySelectorAll("[data-remove]").forEach(b => b.onclick = async () => {
       await api("/api/addons/remove", {id: b.closest(".card").dataset.id}); panels.addons(body);
     });
+    const icons = {ok: "✅", failed: "❌", running: "⏳", waiting: "▫"};
+    const showSetup = j => {
+      const steps = body.querySelector("#allSteps");
+      if (!steps || !j.steps.length) return;
+      body.querySelector("#setupAll").disabled = j.running;
+      body.querySelector("#allSum").textContent = j.running ? `${j.done}/${j.total}…` : `${j.done}/${j.total} جاهز` + (j.failed ? ` · ${j.failed} فشل` : "");
+      steps.innerHTML = j.steps.map(x => `<div class="hint">${icons[x.state] || ""} ${escapeHtml(x.title)}${x.message ? " — " + escapeHtml(x.message) : ""}</div>`).join("");
+      if (j.running) setTimeout(async () => {
+        if ($("#panel").hidden || !document.body.contains(steps)) return;
+        const n = await api("/api/addons/setup_all");
+        n.running ? showSetup(n) : panels.addons(body).then(() => showSetup(n));
+      }, 2000);
+    };
+    body.querySelector("#setupAll").onclick = async () => {
+      const key = body.querySelector("#c7key").value.trim();
+      showSetup(await api("/api/addons/setup_all", key ? {context7_key: key} : {}));
+    };
+    api("/api/addons/setup_all").then(showSetup);
     body.querySelector("#mcpAdd").onclick = async () => {
       const out = body.querySelector("#mcpOut"); out.textContent = "يشغّل الإضافة…";
       const r = await api("/api/addons/install", {id: "mcp:custom", extra: {name: body.querySelector("#mcpName").value, command: body.querySelector("#mcpCmd").value}});

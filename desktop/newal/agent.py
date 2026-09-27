@@ -265,7 +265,7 @@ class Turn:
                     elif c["name"] == "code_task":
                         result = self._code_task(c["arguments"])
                     elif c["name"] == "write_file" and writes_program(c["arguments"]):
-                        # Programs are written by the coding model (DeepSeek-Coder) and tested, not typed in by
+                        # Programs are written through code_task (a focused coding context) and tested, not typed in by
                         # the planner: send it through code_task.
                         result = ("Not written: programs must be made with code_task (the coding model writes and "
                                   "tests them). Call code_task with a full description of this program.")
@@ -391,6 +391,9 @@ class Turn:
         into a fix instruction, rewrite, run again... until it works (or the attempts run out).
         The user sees one final answer; the attempts are listed in a collapsed box."""
         request = messages[-1]["content"]
+        docs = self._docs(request)
+        if docs:
+            messages = messages[:-1] + [dict(messages[-1], content=request + "\n\n" + docs)]
         verify = config.get("verify_code")
         kind = "draft" if verify else "content"
         r = pool.chat(role, messages, on_delta=lambda k, t: self._delta(kind if k == "content" else k, t),
@@ -456,6 +459,12 @@ class Turn:
                 break
             history.append("attempt %d: %s" % (attempt, _last_line(problem)))
             fix = self._fix_prompt(request, code, problem, history)
+            if not docs and API_ERROR.search(problem):
+                # Wrong use of a library (a renamed function, a missing argument): its current documentation
+                # usually holds the fix. Looked up once per task.
+                docs = self._docs(request + "\n" + code, question=_last_line(problem))
+                if docs:
+                    fix += "\n\n" + docs
             self.emit({"type": "fix", "attempt": attempt, "prompt": fix})
             self.emit({"type": "draft_reset"})
             # Only the original request and the latest attempt go back to the coder: short and focused.
@@ -469,6 +478,35 @@ class Turn:
                        % (info["attempts"], " (أعاد النموذج نفس الكود)" if info.get("note") == "same_code" else "",
                           why[:300]))
         return answer, info
+
+    def _docs(self, text, question=None):
+        """Current documentation of the libraries a coding task uses, from the Context7 add-on (when installed):
+        the model writes against today's API instead of the one it remembers from training."""
+        from . import mcp
+        libs = libraries(text)
+        if not libs or "docs" not in mcp.manager.enabled():
+            return ""
+        question = (question or self.text or text)[:300]
+        parts = []
+        for lib in libs:
+            self.emit({"type": "tool", "name": "library_docs", "args": lib, "state": "start"})
+            try:
+                found = mcp.manager.call("mcp__docs__resolve-library-id", {"libraryName": lib, "query": question},
+                                         timeout=45)
+                lib_id = library_id(found)
+                text_ = mcp.manager.call("mcp__docs__query-docs", {"libraryId": lib_id, "query": question},
+                                         timeout=60) if lib_id else ""
+            except Exception as e:  # noqa: BLE001 - documentation helps, it never blocks the code
+                text_ = ""
+                found = str(e)
+            if text_ and not text_.startswith("خطأ"):
+                parts.append("### %s (%s)\n%s" % (lib, lib_id, connectors.clip(text_, 3500)))
+            self.emit({"type": "tool", "name": "library_docs", "state": "done",
+                       "result": ("%s: %d حرف" % (lib_id, len(text_))) if parts and text_ else connectors.clip(found, 300)})
+        if not parts:
+            return ""
+        self.tools_used.append({"name": "library_docs", "args": ", ".join(libs), "result": ""})
+        return "Current documentation (use these APIs, they are newer than your memory):\n" + "\n\n".join(parts)
 
     def _fix_prompt(self, request, code, problem, history=()):
         judge = catalog.pick("judge")
@@ -567,6 +605,28 @@ CODE_TASK_TOOL = {"type": "function", "function": {
 MULTI_STEP = re.compile(r"github|gitlab|push|commit|deploy|publish|upload|\bexe\b|executable|installer|pyinstaller|"
                         r"ارفع|رفع|انشر|نشر|ثبت|ثبّت|حوله لبرنامج|ملف تنفيذي|درايف|drive", re.I)
 WEB_TOOLS = {"web_search", "read_url", "weather", "currency"}
+
+LIBRARIES = tools.LIBRARIES
+API_ERROR = re.compile(r"AttributeError|ImportError|cannot import name|unexpected keyword argument|has no attribute|"
+                       r"is not a function|is not defined|DeprecationWarning|TypeError: .*argument", re.I)
+_ALIASES = {"cv2": "opencv", "bs4": "beautifulsoup", "sklearn": "scikit-learn", "torch": "pytorch"}
+
+
+def libraries(text, limit=2):
+    """The libraries a request or program uses, most mentioned first."""
+    counts = {}
+    for m in LIBRARIES.finditer(text or ""):
+        name = m.group(1).lower()
+        name = _ALIASES.get(name, name)
+        counts[name] = counts.get(name, 0) + 1
+    return sorted(counts, key=lambda n: -counts[n])[:limit]
+
+
+def library_id(resolved):
+    """The Context7 id («/org/project») in a resolve-library-id answer."""
+    m = re.search(r"library ID:\s*`?(/[\w.\-]+/[\w.\-]+(?:/[\w.\-]+)?)", resolved or "", re.I) or \
+        re.search(r"(?<![\w/])(/[\w.\-]+/[\w.\-]+)", resolved or "")
+    return m.group(1) if m else ""
 BROWSER_WORDS = re.compile(r"متصفح|browser|سجل دخول|login|اضغط على|click|عبّي|عبي النموذج|form|احجز|playwright", re.I)
 
 

@@ -109,8 +109,8 @@ class Server:
             raise RuntimeError(msg["error"].get("message", str(msg["error"])))
         return msg["result"]
 
-    def call(self, tool, arguments):
-        result = self.request("tools/call", {"name": tool, "arguments": arguments or {}}, timeout=300)
+    def call(self, tool, arguments, timeout=300):
+        result = self.request("tools/call", {"name": tool, "arguments": arguments or {}}, timeout=timeout)
         parts = []
         for c in result.get("content", []):
             if c.get("type") == "text":
@@ -173,11 +173,11 @@ class Manager:
                     "parameters": t.get("inputSchema") or {"type": "object", "properties": {}}}})
         return out
 
-    def call(self, full_name, arguments):
+    def call(self, full_name, arguments, timeout=300):
         _, name, tool = full_name.split("__", 2)
         if isinstance(arguments, str):
             arguments = json.loads(arguments or "{}")
-        return self.get(name).call(tool, arguments)
+        return self.get(name).call(tool, arguments, timeout=timeout)
 
     def add(self, name, command, args, env=None):
         servers = load_config()

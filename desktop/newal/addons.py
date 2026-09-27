@@ -1,8 +1,11 @@
 """Add-ons that install or connect with one click: VS Code, Git, Node.js, Python packs and MCP servers."""
 
+import json
 import os
 import re
 import shutil
+import threading
+import time
 
 from . import config, connectors, mcp
 
@@ -16,13 +19,20 @@ MCP_CATALOG = {
               ["-y", "@modelcontextprotocol/server-filesystem"]),
     "thinking": ("🧩 التفكير المتسلسل", "يقسم المهام الصعبة لخطوات ويراجعها (مفيد لوضع الهدف).",
                  ["-y", "@modelcontextprotocol/server-sequential-thinking"]),
+    "docs": ("📚 توثيق المكتبات (Context7)", "توثيق حديث لأي مكتبة أو إطار (FastAPI، React، pandas...) فيكتب النموذج كوداً "
+             "يطابق الإصدار الحالي بدل ما يتذكره. مجاني؛ مفتاح Context7 المجاني من الإعدادات يرفع الحد اليومي.",
+             ["-y", "@upstash/context7-mcp"]),
 }
 
 PYTHON_PACKS = {
     "data": ("📊 تحليل البيانات وExcel", ["pandas", "openpyxl", "matplotlib", "xlsxwriter"]),
     "web": ("🕸 أتمتة الويب والطلبات", ["requests", "beautifulsoup4", "lxml"]),
     "docs": ("📄 مستندات Word وPDF", ["python-docx", "pypdf", "reportlab"]),
+    "dev": ("🧪 أدوات المبرمج: اختبارات وفحص وبناء exe", ["pytest", "ruff", "pyinstaller"]),
+    "webapp": ("🌍 مواقع وواجهات API", ["flask", "fastapi", "uvicorn"]),
+    "gui": ("🖼 واجهات سطح المكتب والألعاب", ["customtkinter", "pygame"]),
 }
+PACKS_DONE = os.path.join(config.DATA, "python_packs.json")      # packs installed from here (pip show is slow)
 
 CONTINUE_CONFIG = """name: NewAl
 version: 1.0.0
@@ -73,8 +83,23 @@ def pip_installed(package):
     return code == 0
 
 
+def _packs_done():
+    try:
+        with open(PACKS_DONE, encoding="utf-8") as f:
+            return set(json.load(f))
+    except (OSError, ValueError):
+        return set()
+
+
+def _mark_pack(key):
+    done = _packs_done() | {key}
+    with open(PACKS_DONE, "w", encoding="utf-8") as f:
+        json.dump(sorted(done), f)
+
+
 def status():
     servers = mcp.load_config()
+    packs = _packs_done()
     running = {n for n, s in mcp.manager.servers.items() if s.alive()}
     items = [
         {"id": "vscode", "title": "🧑‍💻 VS Code + Continue", "group": "apps",
@@ -90,7 +115,7 @@ def status():
     ]
     for key, (title, packages) in PYTHON_PACKS.items():
         items.append({"id": "py:" + key, "title": title, "group": "python", "about": "مكتبات Python: " + ", ".join(packages),
-                      "ready": None, "detail": ""})       # checked on demand (pip is slow)
+                      "ready": True if key in packs else None, "detail": ""})
     for key, (title, about, _) in MCP_CATALOG.items():
         items.append({"id": "mcp:" + key, "title": title, "group": "mcp", "about": about,
                       "ready": key in servers, "running": key in running,
@@ -117,6 +142,8 @@ def install(item_id, extra=None):
         if not py:
             return {"ok": False, "message": "Python غير موجود"}
         code, out = connectors.run([py, "-m", "pip", "install", "-q", "--disable-pip-version-check"] + packages, timeout=900)
+        if code == 0:
+            _mark_pack(item_id[3:])
         return {"ok": code == 0, "message": "تم تثبيت " + ", ".join(packages) if code == 0 else connectors.clip(out, 800)}
     if item_id.startswith("mcp:"):
         key = item_id[4:]
@@ -129,12 +156,63 @@ def install(item_id, extra=None):
         title, _, args = MCP_CATALOG[key]
         if key == "files":
             args = args + _user_dirs()
+        env = {"CONTEXT7_API_KEY": config.get("context7_key")} if key == "docs" and config.get("context7_key") else None
         try:
-            tools = mcp.manager.add(key, "npx", args)
+            tools = mcp.manager.add(key, "npx", args, env=env)
         except Exception as e:  # noqa: BLE001
             return {"ok": False, "message": str(e)}
         return {"ok": True, "message": "%s: %d أداة جاهزة" % (title, len(tools))}
     return {"ok": False, "message": "غير معروف"}
+
+
+# ------------------------------------------------------------------ everything with one click
+
+# In order: the apps first (MCP add-ons need Node.js), then the Python packs and the MCP add-ons.
+SETUP_ALL = (["git", "node", "vscode"] + ["py:" + k for k in PYTHON_PACKS] + ["mcp:" + k for k in MCP_CATALOG])
+
+_job = {"running": False, "steps": [], "started": 0, "finished": 0}
+_job_lock = threading.Lock()
+
+
+def _title(item_id):
+    for i in status():
+        if i["id"] == item_id:
+            return i["title"]
+    return item_id
+
+
+def setup_all():
+    """Installs and connects every add-on in the background; progress in setup_status()."""
+    with _job_lock:
+        if _job["running"]:
+            return setup_status()
+        _job.update(running=True, started=time.time(), finished=0,
+                    steps=[{"id": i, "title": _title(i), "state": "waiting", "message": ""} for i in SETUP_ALL])
+    threading.Thread(target=_run_setup, daemon=True).start()
+    return setup_status()
+
+
+def _run_setup():
+    ready = {i["id"] for i in status() if i["ready"] is True}
+    try:
+        for step in _job["steps"]:
+            if step["id"] in ready:
+                step.update(state="ok", message="جاهز مسبقاً")
+                continue
+            step["state"] = "running"
+            try:
+                r = install(step["id"])
+            except Exception as e:  # noqa: BLE001 - one failed add-on must not stop the others
+                r = {"ok": False, "message": str(e)}
+            step.update(state="ok" if r.get("ok") else "failed", message=connectors.clip(r.get("message", ""), 300))
+    finally:
+        _job.update(running=False, finished=time.time())
+
+
+def setup_status():
+    steps = [dict(s) for s in _job["steps"]]
+    return {"running": _job["running"], "steps": steps, "done": sum(s["state"] == "ok" for s in steps),
+            "failed": sum(s["state"] == "failed" for s in steps), "total": len(steps)}
 
 
 def remove(item_id):

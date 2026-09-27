@@ -73,6 +73,7 @@ DEFAULTS = {
     "gitlab_url": "https://gitlab.com",
     "kaggle_username": "",
     "kaggle_key": "",
+    "context7_key": "",           # optional free key for the library-docs add-on (a higher daily limit)
     "drive_remote": "gdrive",
     "api_port": 8766,             # OpenAI-compatible endpoint for VS Code extensions
 }
@@ -87,7 +88,7 @@ if os.path.exists(_path):
     except (OSError, ValueError):
         pass
 
-SECRETS = ("github_token", "gitlab_token", "kaggle_key")
+SECRETS = ("github_token", "gitlab_token", "kaggle_key", "context7_key")
 
 
 def get(key):

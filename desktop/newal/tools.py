@@ -3,6 +3,7 @@
 import datetime
 import json
 import os
+import re
 
 from . import config, connectors, memory, web, wintools
 
@@ -222,10 +223,20 @@ def goal_names(text=""):
     return names
 
 
+# Libraries and frameworks whose API changes between versions: their docs are looked up before coding.
+LIBRARIES = re.compile(
+    r"(?<![\w.])(fastapi|flask|django|streamlit|gradio|pandas|polars|numpy|matplotlib|plotly|seaborn|requests|httpx|"
+    r"beautifulsoup4?|bs4|selenium|playwright|scrapy|sqlalchemy|pydantic|pytest|pygame|customtkinter|pyqt[56]?|"
+    r"pyside[26]?|kivy|flet|openpyxl|xlsxwriter|python-docx|reportlab|pypdf|opencv|cv2|pillow|scikit-learn|sklearn|"
+    r"pytorch|torch|tensorflow|keras|transformers|langchain|discord\.py|aiogram|python-telegram-bot|telebot|"
+    r"pyinstaller|react|next\.?js|vue|nuxt|svelte|angular|express|nestjs|tailwind(?:css)?|bootstrap|electron|"
+    r"three\.?js|chart\.?js|d3|jquery|prisma|mongoose|socket\.io|vite)(?![\w])", re.I)
+
 MCP_WORDS = {
     "browser": r"موقع|متصفح|browser|website|web ?page|صفحة|سجل دخول|login|اضغط|click|form|نموذج|احجز|اشتري|edge|chrome",
     "files": r"ابحث بالملفات|عدّل الملف|edit file|search files",
     "thinking": r"خطة|خطط|plan|خطوة بخطوة|step by step|معقد|complex",
+    "docs": r"توثيق|docs|documentation|مكتبة|library|framework|api|" + LIBRARIES.pattern,
 }
 
 

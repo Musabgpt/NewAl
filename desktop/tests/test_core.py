@@ -334,6 +334,74 @@ class ConfigTest(unittest.TestCase):
         config.update({"github_token": ""})
 
 
+class CodingHelpersTest(unittest.TestCase):
+    def test_libraries_found(self):
+        self.assertEqual(agent.libraries("اعملي API بـ FastAPI مع pandas، و fastapi routes"), ["fastapi", "pandas"])
+        self.assertEqual(agent.libraries("import cv2\nfrom sklearn import svm"), ["opencv", "scikit-learn"])
+        self.assertEqual(agent.libraries("اكتب دالة تعكس نص"), [])
+
+    def test_library_id(self):
+        self.assertEqual(agent.library_id("- Title: FastAPI\n- Context7-compatible library ID: /tiangolo/fastapi\n"),
+                         "/tiangolo/fastapi")
+        self.assertEqual(agent.library_id("nothing here"), "")
+
+    def test_docs_are_added_before_coding(self):
+        from newal import mcp
+        calls = []
+
+        def fake_call(name, args, timeout=0):
+            calls.append(name)
+            return "Context7-compatible library ID: /tiangolo/fastapi" if "resolve" in name else "@app.post('/items')"
+        old = (mcp.manager.enabled, mcp.manager.call)
+        mcp.manager.enabled, mcp.manager.call = (lambda: {"docs": {}}), fake_call
+        try:
+            t = agent.Turn(None, "اعملي API بـ FastAPI")
+            docs = t._docs(t.text)
+        finally:
+            mcp.manager.enabled, mcp.manager.call = old
+        self.assertIn("@app.post", docs)
+        self.assertIn("/tiangolo/fastapi", docs)
+        self.assertEqual(calls, ["mcp__docs__resolve-library-id", "mcp__docs__query-docs"])
+
+    def test_no_docs_without_the_addon(self):
+        from newal import mcp
+        old = mcp.manager.enabled
+        mcp.manager.enabled = lambda: {}
+        try:
+            self.assertEqual(agent.Turn(None, "FastAPI app")._docs("FastAPI app"), "")
+        finally:
+            mcp.manager.enabled = old
+
+    def test_programming_skills_match(self):
+        from newal import skills
+        names = lambda t: [x["id"] for x in skills.relevant(t, k=3)]
+        self.assertIn("debugging", names("عندي traceback وما عم يشتغل"))
+        self.assertIn("build-exe", names("حوّله لملف exe"))
+        self.assertIn("api-backend", names("اعملي api بـ fastapi"))
+
+    def test_setup_all_runs_every_step(self):
+        import time
+        from newal import addons
+        done = []
+        old = (addons.install, addons.status)
+        addons.install = lambda i, extra=None: (done.append(i), {"ok": i != "node", "message": "x"})[1]
+        addons.status = lambda: [{"id": "git", "title": "Git", "ready": True}]
+        try:
+            addons.setup_all()
+            for _ in range(200):
+                if not addons.setup_status()["running"]:
+                    break
+                time.sleep(0.02)
+            st = addons.setup_status()
+        finally:
+            addons.install, addons.status = old
+        self.assertNotIn("git", done)                    # already ready: skipped
+        self.assertEqual(done[0], "node")                 # Node.js before the MCP add-ons
+        self.assertIn("mcp:docs", done)
+        self.assertEqual(st["failed"], 1)
+        self.assertEqual(st["done"], st["total"] - 1)
+
+
 class ServerTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
