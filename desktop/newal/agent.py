@@ -528,7 +528,8 @@ class Turn:
             # Evidence-carrying termination: the goal ends only on evidence from the computer itself (the files it
             # names exist, the tool outputs show the result), never on the model saying it is done.
             claim = unsupported_claim(answer, self.tools_used)
-            missing_files = [p for p in claimed_paths(answer, absolute_only=True) if not os.path.exists(p)]
+            missing_files = [p for p in claimed_paths(answer, absolute_only=True)
+                             if "..." not in p and "…" not in p and not os.path.exists(p)]
             if claim or missing_files:
                 verdict = {"done": False, "missing": ("These files do not exist: %s. " % ", ".join(missing_files)
                                                       if missing_files else "") +
@@ -871,7 +872,7 @@ class Turn:
         try:
             workspace = "NewAl workspace folder: %s\n\n" % config.WORKSPACE
             files = ""
-            for p in claimed_paths(answer + "\n" + evidence)[:10]:
+            for p in self._real_paths(answer + "\n" + evidence)[:10]:
                 files += "%s: %s\n" % (p, ("exists, %d bytes" % os.path.getsize(p)) if os.path.isfile(p) else
                                         "folder exists" if os.path.isdir(p) else "DOES NOT EXIST")
             if files:
@@ -889,6 +890,28 @@ class Turn:
             raise
         except Exception as e:  # noqa: BLE001 - an unchecked goal is not a reached goal
             return {"done": False, "missing": "could not verify the result (%s): check it with the tools" % str(e)[:120]}
+
+    def _real_paths(self, text):
+        """The files a report names, as real paths: absolute ones as they are; a relative or shortened one
+        («report/x.csv», «…/workspace/x.csv») only when it matches a path the tools used or the workspace. Names that
+        match nothing are left out rather than reported missing (a wrong «does not exist» kept a finished goal going)."""
+        used = []
+        for t in self.tools_used:
+            for v in (t.get("args") or {}).values() if isinstance(t.get("args"), dict) else []:
+                if isinstance(v, str) and os.path.isabs(v.strip('"')):
+                    used.append(os.path.normpath(v.strip('"')))
+        out = []
+        for p in claimed_paths(text, absolute_only=True):
+            if "..." not in p and "…" not in p and p not in out:
+                out.append(p)
+        for m in _WS_FILE.findall(text or ""):
+            tail = os.path.normpath(m.replace("…", "").replace("...", "").lstrip("./\\"))
+            hit = next((u for u in used if u.endswith(os.sep + tail) or u == tail), None)
+            if not hit and os.path.exists(os.path.join(config.WORKSPACE, tail)):
+                hit = os.path.join(config.WORKSPACE, tail)
+            if hit and hit not in out:
+                out.append(hit)
+        return out
 
     def _web_context(self, question):
         from concurrent.futures import ThreadPoolExecutor
@@ -1218,7 +1241,7 @@ class Turn:
                 ask["_images"] = [data_url(shot.group(1).strip())]
         try:
             files = ""
-            for p in claimed_paths(answer + "\n" + evidence)[:10]:
+            for p in self._real_paths(answer + "\n" + evidence)[:10]:
                 files += "%s: %s\n" % (p, ("exists, %d bytes" % os.path.getsize(p)) if os.path.isfile(p) else
                                         "folder exists" if os.path.isdir(p) else "DOES NOT EXIST")
             if files:
