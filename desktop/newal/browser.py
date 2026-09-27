@@ -52,7 +52,11 @@ def render(target, width=1280, height=900, wait_ms=4000, timeout=60):
     args = [exe, "--headless=new", "--disable-gpu", "--hide-scrollbars", "--no-first-run",
             "--no-default-browser-check", "--disable-extensions", "--user-data-dir=" + profile,
             "--window-size=%d,%d" % (width, height), "--screenshot=" + png,
-            "--virtual-time-budget=%d" % wait_ms, "--enable-logging=stderr", "--v=0", to_url(target)]
+            "--virtual-time-budget=%d" % wait_ms, "--v=0", to_url(target)]
+    # The page's console comes from the browser's log. On Windows Edge/Chrome do not write it to a pipe (the self-test
+    # on a laptop rendered the page but got no console at all): there it goes to a file, read after the run.
+    log_file = os.path.join(out_dir, "console.log")
+    args[1:1] = ["--enable-logging", "--log-file=" + log_file] if config.IS_WINDOWS else ["--enable-logging=stderr"]
     if not config.IS_WINDOWS and hasattr(os, "geteuid") and os.geteuid() == 0:
         args.insert(1, "--no-sandbox")
     flags = 0x08000000 if config.IS_WINDOWS else 0
@@ -61,6 +65,12 @@ def render(target, width=1280, height=900, wait_ms=4000, timeout=60):
         log = (p.stderr or b"").decode("utf-8", "replace") + (p.stdout or b"").decode("utf-8", "replace")
     except subprocess.TimeoutExpired:
         return {"ok": False, "png": "", "console": [], "errors": ["المتصفح ما خلّص خلال %d ثانية" % timeout]}
+    for name in (log_file, os.path.join(profile, "chrome_debug.log")):
+        try:
+            with open(name, encoding="utf-8", errors="replace") as f:
+                log += "\n" + f.read()
+        except OSError:
+            pass
     console = [(m.group(2), int(m.group(4))) for m in CONSOLE.finditer(log)]
     errors = [text for text, line in console if re.match(r"(Uncaught|Error|TypeError|ReferenceError|SyntaxError)", text)
               or "Failed to load resource" in text]

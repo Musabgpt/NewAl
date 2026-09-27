@@ -114,6 +114,9 @@ class ToolsTest(unittest.TestCase):
         failed = [{"name": "run_command", "result": "exit code 127"}]
         self.assertTrue(agent.unsupported_claim("لا يوجد cmd هنا. لكن النتيجة ستكون: NewAl-ok", failed))
         self.assertFalse(agent.unsupported_claim("النتيجة: الملف فيه مرحبا", failed))
+        denied = [{"name": "run_command", "args": {"command": "Remove-Item x"}, "denied": True}]
+        self.assertTrue(agent.unsupported_claim("تم حذف الملف بنجاح.", denied))      # caught on the laptop
+        self.assertFalse(agent.unsupported_claim("ما حذفت الملف لأنك رفضت.", denied))
         worked = [{"name": "run_command", "result": "exit code 0\n5"}]
         self.assertFalse(agent.unsupported_claim("الناتج سيكون 5 كل مرة", worked))    # an explanation, not a guess
         self.assertTrue(agent.wants_action("ثبتلي بايثون"))
@@ -273,6 +276,11 @@ class WebQuestionTest(unittest.TestCase):
         self.assertTrue(agent.needs_web("كم سعر الدولار اليوم"))
         self.assertFalse(agent.needs_web("مرحبا كيفك"))
         self.assertFalse(agent.needs_web("اعمل ملف todo.md"))
+        # From the quality test on the laptop: these went to the web (3-4 minutes each) and got worse answers.
+        self.assertFalse(agent.needs_web("What is the time complexity of binary search? Answer in a few words."))
+        self.assertFalse(agent.needs_web("عندي 3 صناديق بكل واحد 17 تفاحة، وأكلت 8. كم تفاحة ضل معي؟"))
+        self.assertTrue(agent.maybe_web("مين رئيس فرنسا؟"))            # keeps its tools: the brain decides
+        self.assertTrue(agent.needs_web("search the web for llama.cpp releases"))
 
     def test_query_fallback_without_models(self):
         self.assertEqual(agent.search_queries("شو آخر أخبار الذكاء؟"), ["آخر أخبار الذكاء"])

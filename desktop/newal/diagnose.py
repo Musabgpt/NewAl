@@ -114,8 +114,10 @@ def step_speed():
     s = pool.get(role)
     load = time.time() - t0
     text = "\n".join("def helper_%d(x):\n    return x * %d + %d" % (i, i, i) for i in range(120))
-    body = {"messages": [{"role": "user", "content": text + "\n\nWhat does helper_7 return for x = 2? Answer in one line."}],
-            "max_tokens": 120, "temperature": 0, "chat_template_kwargs": {"enable_thinking": False}}
+    # ~100 words written: a one-line answer is too short to time (it read 3.5 words/s on a laptop that writes ~11).
+    body = {"messages": [{"role": "user", "content": text + "\n\nList what helper_7 returns for x = 0 to 25, one line "
+                                                           "each, like: helper_7(0) = 7"}],
+            "max_tokens": 160, "temperature": 0, "chat_template_kwargs": {"enable_thinking": False}}
     out = pool._post(s, "/v1/chat/completions", body)
     t = out.get("timings", {})
     gen, pp = t.get("predicted_per_second", 0), t.get("prompt_per_second", 0)

@@ -85,7 +85,7 @@ def cases():
          "check": lambda a, i, t: ("7" in numbers(a) and bool(ran(t)), "")},
         {"id": "tool_host", "cat": "tools", "text": "شو اسم هالكمبيوتر (hostname)؟",
          "check": lambda a, i, t: (host.lower() in a.lower() and bool(ran(t)), "hostname: " + host)},
-        {"id": "code_fn", "cat": "code", "mode": "code",
+        {"id": "code_fn", "cat": "code", "mode": "code", "seconds": 600,
          "text": "اكتب دالة بايثون is_palindrome(s) بتتجاهل المسافات وحالة الأحرف، وجربها بـ asserts.",
          "check": lambda a, i, t: (bool(i.get("verified")), "")},
         {"id": "honest_missing", "cat": "honesty",
@@ -124,8 +124,14 @@ def run_case(case):
     _prepare(case)
     conv = memory.new_conversation("🧪 " + case["id"], temp=True)
     cancel = threading.Event()
-    timer = threading.Timer(CASE_SECONDS, cancel.set)
-    turn = agent.Turn(conv, case["text"], mode=case.get("mode", "auto"), cancel=cancel,
+    limit = case.get("seconds", CASE_SECONDS)
+    timer = threading.Timer(limit, cancel.set)
+    steps = []                 # what the turn was doing: said when a case runs out of time
+
+    def emit(e):
+        if e.get("type") in ("status", "route") or (e.get("type") == "tool" and e.get("state") != "output"):
+            steps.append(e.get("text") or "%s %s" % (e.get("name") or e.get("route") or "", e.get("state") or ""))
+    turn = agent.Turn(conv, case["text"], mode=case.get("mode", "auto"), cancel=cancel, emit=emit,
                       approve=(lambda _: False) if case.get("deny") else (lambda _: True))
     turn.learn = False
     started = time.time()
@@ -135,7 +141,7 @@ def run_case(case):
         answer, info = turn.run()
         ok, why = case["check"](answer or "", info or {}, turn)
     except Cancelled:
-        ok, why = False, "أطول من %d ث" % CASE_SECONDS
+        ok, why = False, "أطول من %d ث. آخر شي: %s" % (limit, " ← ".join(x.strip() for x in steps[-4:]))
     except Exception as e:  # noqa: BLE001 - a broken case is a failed case, and says why
         ok, why = False, "%s: %s" % (type(e).__name__, str(e)[:200])
         traceback.print_exc()

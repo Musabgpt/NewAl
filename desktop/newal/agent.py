@@ -390,7 +390,7 @@ class Turn:
         context = " ".join(m["content"] for m in messages[-4:] if m["role"] == "user")
         shared = unified(role, route)
         web_first = config.get("web") and needs_web(self.text)
-        if route == "chat" and not (shared and (web_first or wants_action(self.text))):
+        if route == "chat" and not (shared and (web_first or wants_action(self.text) or maybe_web(self.text))):
             # Plain conversation: one answer, no tool calls. A small model gets no tool list (~1500 prompt tokens
             # saved); the brain gets its usual one (already in its cache) with the tool-call token banned: a needless
             # tool round re-reads its results at ~28 tokens/s on a laptop. A request that names an action ("open
@@ -1023,7 +1023,8 @@ class Turn:
                 self.approved.add(server)
         if name in tools.TOOLS and tools.needs_approval(name):
             if not self.approve(tools.describe(name, arguments)):
-                result = "رفض المستخدم تنفيذ هذه الأداة."
+                result = ("رفض المستخدم تنفيذ هذه الأداة. The user refused: this was NOT done. Do not say it was done; "
+                          "tell the user plainly that it was not done.")
                 self.emit({"type": "tool", "name": name, "state": "denied", "result": result})
                 self.tools_used.append({"name": name, "args": arguments, "denied": True})
                 self._audit(name, arguments, "denied", "", started)
@@ -1324,9 +1325,14 @@ class Turn:
 
 # Questions answered from the internet (news, prices, "latest", who/when...), unless they are about
 # files, commands or connected services, which go through the tools.
-_WEB = re.compile(r"أخبار|اخبار|خبر|سعر|أسعار|اسعار|طقس|آخر|اخر |أحدث|احدث|جديد|اليوم|هالأسبوع|هالاسبوع|هالشهر|"
-                  r"ابحث|بحث|دور على|مين |من هو|من هي|متى|وين |كم |نتيجة|مباراة|latest|news|price|today|this week|"
-                  r"search|who is|when |current|recent|score", re.I)
+# Fresh information: searched before answering. Only words that mean "now" or "look it up": "كم" (how many), "search"
+# ("binary search") or "نتيجة" (a result) sent maths and computer-science questions to the web in the quality test
+# (3-4 minutes each on a laptop, and worse answers).
+_WEB = re.compile(r"أخبار|اخبار|خبر|سعر|أسعار|اسعار|طقس|آخر|اخر |أحدث|احدث|اليوم|هالأسبوع|هالاسبوع|هالشهر|"
+                  r"ابحث|دور على|دوّر على|ابحثلي|مباراة|latest|news|price|today|this week|weather|"
+                  r"search (?:for|the web|online|google)|look (?:it )?up|google it", re.I)
+# Could need a fact from the web (who, when, where, how much): the brain keeps its tools and decides itself.
+_MAYBE_WEB = re.compile(r"مين |من هو|من هي|متى|وين |كم |قديش|نتيجة|جديد|who is|when |current|recent|score", re.I)
 _LOCAL = re.compile(r"ملف|مجلد|file|folder|اعمل|انشئ|أنشئ|شغل|شغّل|نفذ|نفّذ|command|powershell|terminal|الطرفية|"
                     r"جهازي|كمبيوتري|لابتوبي|اللابتوب|هارد|قرص|مساحة|رام|ذاكرة الجهاز|معالج|بطارية|شبكة|واي فاي|wifi|"
                     r"ip\b|ipconfig|عملية|عمليات|process|برامج|البرنامج|الويندوز|ويندوز|windows|disk|ram\b|cpu|battery|"
@@ -1435,6 +1441,11 @@ CLAIMS = [
     (r"(رفعت|تم رفع|دفعت التغييرات)|\bI('ve| have)? (pushed|uploaded)\b",
      {"git_push", "drive_upload", "run_command", "github_create_repo"}),
     (r"(جدولت|تمت جدولة|تم جدولة)|\bI('ve| have)? scheduled\b", {"schedule"}),
+    # "Deleted/moved/renamed": the quality test caught «تم حذف الملف بنجاح» after the user had refused the delete.
+    (r"(?<!\w)(?<!ما )(?<!لم )(?<!لا )(?<!مش )(?<!مو )(حذفت|حذفته|حذفتها|مسحت|تم حذف|تم الحذف|تم مسح|انحذف|نقلت|تم نقل|"
+     r"غيرت اسم|غيّرت اسم|تمت إعادة تسمية|تم تغيير اسم)|\bI('ve| have)? (deleted|removed|moved|renamed)\b|"
+     r"\b(file|folder) (was |has been )(deleted|removed|moved|renamed)\b",
+     {"run_command", "write_file", "zip_path", "unzip_path", "edit_file", "delete_file", "move_file"}),
     (r"(نسخت|تم نسخ)\s+.{0,20}(الحافظة|clipboard)", {"clipboard_set"}),
 ]
 # A made-up result after a failed tool: "the output would be ...".
@@ -1562,6 +1573,10 @@ BROWSER_WORDS = re.compile(r"متصفح|browser|سجل دخول|login|اضغط �
 
 def needs_web(text):
     return bool(_WEB.search(text)) and not _LOCAL.search(text)
+
+
+def maybe_web(text):
+    return bool(_MAYBE_WEB.search(text))
 
 
 # Words that ask for something to be done (not only said): with these a chat request keeps its tools. Calculations
