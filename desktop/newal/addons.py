@@ -83,18 +83,39 @@ def pip_installed(package):
     return code == 0
 
 
-def _packs_done():
+def _read_packs():
+    """{python: [packs installed into it from here]}. Older versions kept a plain list: the packs went into the Python
+    their find_python picked, which never looked past WindowsApps (so on a PC with the Python install manager it was
+    the bundled one)."""
     try:
         with open(PACKS_DONE, encoding="utf-8") as f:
-            return set(json.load(f))
+            data = json.load(f)
     except (OSError, ValueError):
-        return set()
+        return {}
+    if isinstance(data, list):
+        old = next((p for p in (shutil.which(n) for n in ("python", "py", "python3"))
+                    if p and "windowsapps" not in p.lower()), None)
+        for base in ([] if old else (os.path.join(config.APP_DIR, "bin"), os.path.join(config.BUNDLE, "bin"),
+                                     os.environ.get("NEWAL_BIN", ""))):
+            p = os.path.join(base, "python", "python" + config.EXE) if base else ""
+            if p and os.path.exists(p):
+                old = p
+                break
+        return {os.path.normcase(old or ""): data}
+    return data if isinstance(data, dict) else {}
+
+
+def _packs_done():
+    """The packs installed from here into the Python NewAl uses now."""
+    return set(_read_packs().get(os.path.normcase(config.find_python() or ""), []))
 
 
 def _mark_pack(key):
-    done = _packs_done() | {key}
+    packs = _read_packs()
+    py = os.path.normcase(config.find_python() or "")
+    packs[py] = sorted(set(packs.get(py, [])) | {key})
     with open(PACKS_DONE, "w", encoding="utf-8") as f:
-        json.dump(sorted(done), f)
+        json.dump(packs, f, ensure_ascii=False)
 
 
 def status():

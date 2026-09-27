@@ -326,8 +326,9 @@ def definitions(names=None, with_mcp=False):
     return out
 
 
-def needs_approval(name):
-    return TOOLS[name][3] and not config.get("auto_run")
+def needs_approval(name, always=False):
+    """A risky tool asks first, unless the user chose to run without asking (always: asks anyway, the quality test)."""
+    return TOOLS[name][3] and (always or not config.get("auto_run"))
 
 
 # Other names models use for the real tools (closed-world: a call is resolved to a tool that exists or refused).

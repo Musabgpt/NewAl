@@ -9,9 +9,10 @@ Rules every change follows:
 1. **Evidence over claims.** A task is done when the computer shows it (files exist, outputs show the result), never
    because the model says so. The same goes for our own work: every speed or quality claim is measured, and says
    what was measured and what was not.
-2. **Speed is a feature of the whole system.** On a laptop CPU the brain reads ~28 tokens/s and writes 6–10, so the
-   biggest wins come from not re-reading (stable prompt prefixes, KV cache on disk), fewer model rounds and shorter
-   tool results, then from the model file itself.
+2. **Speed is a feature of the whole system.** On the user's laptop (i7-8650U, 4 cores, 24 GB) the brain reads ~24
+   tokens/s and writes 5–6 (`desktop/tools/bench_brain.py`), so the biggest wins come from not re-reading (stable
+   prompt prefixes, KV cache on disk, no helper model that pushes the brain out of RAM), fewer model rounds and
+   shorter tool results, then from the model file itself.
 3. **Keep what the user owns outside the model.** Memory, procedures, lessons, skills, logs and datasets are plain
    files in NewAl's data folder and survive any model change.
 
@@ -58,4 +59,7 @@ Each step is shipped only with tests, and with a measurement where it claims spe
    UD-IQ3_S keeps most experts as IQ2_S + IQ4_XS; UD-Q3_K_M uses IQ3_XXS + IQ4_XS). On a small model of the same
    architecture (4 threads, AVX2 only, not the user's laptop) K-quant expert mixes read and wrote faster than the IQ
    mixes, but the spread between runs was large. Candidates are compared with #3 on the laptop before switching.
+   Measured on the laptop itself (UD-IQ3_S with MTP, `tools/bench_brain.py`): reading 23.6 tokens/s with 8 threads
+   (21.1 with 4); writing code 5.7–5.9 and Arabic 4.9–5.6 with MTP, 5.1–5.4 without. 3, 4 or 6 writing threads
+   differ less than two runs of the same setting, so the file (not the threads) is where writing speed can come from.
 5. Permission levels (#5, #18), git checkpoints (#19), project map (#13), streaming code into files (#3).

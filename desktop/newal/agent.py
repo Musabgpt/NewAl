@@ -180,6 +180,9 @@ class Turn:
         self.images = []               # pictures made during the turn (🎨 generate_image)
         self._procedures = []          # goal mode: how a similar verified goal was reached before (procedures.py)
         self.learn = True              # keep procedures and lessons from this turn (off for the quality test)
+        # Ask through approve() even when the user runs everything without asking: the quality test decides every
+        # approval itself (a refused delete ran for real on a laptop with «run without asking» on).
+        self.always_ask = False
 
     # -------------------------------------------------------------- entry
 
@@ -1013,7 +1016,7 @@ class Turn:
                 return "Error: " + error
             name, arguments = real, fixed
         self.emit({"type": "tool", "name": name, "args": arguments, "state": "start"})
-        if name.startswith("mcp__") and not config.get("auto_run"):
+        if name.startswith("mcp__") and (self.always_ask or not config.get("auto_run")):
             server = name.split("__")[1]
             if server not in self.approved:
                 if not self.approve("السماح لإضافة «%s» بالعمل في هذه المهمة؟\n%s" % (server, tools.describe(name, arguments))):
@@ -1021,7 +1024,7 @@ class Turn:
                     self._audit(name, arguments, "denied", "", started)
                     return "رفض المستخدم استخدام هذه الإضافة."
                 self.approved.add(server)
-        if name in tools.TOOLS and tools.needs_approval(name):
+        if name in tools.TOOLS and tools.needs_approval(name, self.always_ask):
             if not self.approve(tools.describe(name, arguments)):
                 result = ("رفض المستخدم تنفيذ هذه الأداة. The user refused: this was NOT done. Do not say it was done; "
                           "tell the user plainly that it was not done.")
@@ -1312,12 +1315,6 @@ class Turn:
                 ask["content"] += "\n\nThe screenshot of the rendered page is attached: check it shows what was asked."
                 ask["_images"] = [data_url(shot.group(1).strip())]
         try:
-            files = ""
-            for p in self._real_paths(answer + "\n" + evidence)[:10]:
-                files += "%s: %s\n" % (p, ("exists, %d bytes" % os.path.getsize(p)) if os.path.isfile(p) else
-                                        "folder exists" if os.path.isdir(p) else "DOES NOT EXIST")
-            if files:
-                evidence += "\n\n[filesystem check by NewAl]\n" + files
             return pool.complete_json(judge, [{"role": "system", "content": VERDICT_PROMPT}, ask], schema, max_tokens=150)
         except Exception:  # noqa: BLE001
             return {"ok": True, "reason": "ran without errors"}
@@ -1371,8 +1368,8 @@ def search_queries(question):
     import json
     fallback = [plain_query(question)]
     writer = catalog.pick("router") if (catalog.available("router") or catalog.available("agent")) else None
-    if not writer:
-        return fallback
+    if not writer or not pool.fits(writer):
+        return fallback            # never at the cost of the brain's reading (see Pool.fits)
     msgs = [{"role": "system", "content": QUERY_SYSTEM}]
     for a, b in QUERY_SHOTS:
         msgs += [{"role": "user", "content": a}, {"role": "assistant", "content": json.dumps(b, ensure_ascii=False)}]
@@ -1936,7 +1933,7 @@ def save_project(folder, request):
 
 def project_answer(answer, prog):
     """The final answer shows every file of the project (a fix may have returned only the changed ones)."""
-    head = re.split(r"```", answer, 1)[0].strip()
+    head = re.split(r"```", answer, maxsplit=1)[0].strip()
     lang = {"py": "python", "js": "javascript", "ts": "typescript", "html": "html", "css": "css", "json": "json",
             "md": "markdown", "toml": "toml", "yaml": "yaml", "yml": "yaml", "ps1": "powershell", "sql": "sql"}
     blocks = ["```%s %s\n%s```" % (lang.get(p.rsplit(".", 1)[-1], ""), p, c if c.endswith("\n") else c + "\n")

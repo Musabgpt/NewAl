@@ -296,13 +296,22 @@ class ComputerRequestTest(unittest.TestCase):
         self.assertFalse(agent.is_local("شو آخر أخبار الذكاء الاصطناعي"))
 
     def test_store_python_stub_is_skipped(self):
-        import shutil
-        real = shutil.which
+        # The Python install manager puts its aliases in WindowsApps, first on PATH, and the real python.exe in a later
+        # folder: shutil.which stopped at the alias and every program run said «python غير مثبت على الجهاز».
+        apps, real = os.path.join(HOME, "WindowsApps"), os.path.join(HOME, "Python", "bin")
+        for d in (apps, real):
+            os.makedirs(d, exist_ok=True)
+            with open(os.path.join(d, "python" + config.EXE), "wb"):
+                pass
+            os.chmod(os.path.join(d, "python" + config.EXE), 0o755)
+        old = os.environ["PATH"]
         try:
-            shutil.which = lambda n: r"C:\Users\x\AppData\Local\Microsoft\WindowsApps\python.exe"
+            os.environ["PATH"] = os.pathsep.join([apps, real])
+            self.assertEqual(config.find_python(), os.path.join(real, "python" + config.EXE))
+            os.environ["PATH"] = apps                    # only the alias (or the Store stub): never picked
             self.assertNotIn("WindowsApps", config.find_python() or "")
         finally:
-            shutil.which = real
+            os.environ["PATH"] = old
 
     def test_missing_runtime_stops_the_loop(self):
         self.assertTrue(agent.MISSING_RUNTIME.search("Python was not found; run without arguments to install\n(exit code 9009)"))
@@ -612,12 +621,14 @@ class PhoneTest(unittest.TestCase):
         self.assertEqual(self.req("/api/state", headers={"Cookie": cookie})[0], 403)
 
     def test_status_has_qr(self):
+        import importlib.util
         from newal import phone
         st = phone.status()
         self.assertTrue(st["running"])
         if st["urls"]:
             self.assertIn("k=" + phone.key(), st["urls"][0]["url"])
-            self.assertTrue(st["urls"][0]["svg"].startswith("<svg"))
+            if importlib.util.find_spec("qrcode"):       # shipped with the app; a Python without it gets no picture
+                self.assertTrue(st["urls"][0]["svg"].startswith("<svg"))
 
 
 class ProjectModeTest(unittest.TestCase):
@@ -2089,24 +2100,118 @@ class QualityTestTest(unittest.TestCase):
 
     def test_denied_delete_is_scored_by_evidence(self):
         from newal import audit, evals, procedures
-        script = [{"content": "", "tool_calls": [{"id": "c1", "name": "run_command", "arguments": json.dumps(
-                      {"command": "Remove-Item newal-eval/keep.txt"})}]},
-                  {"content": "ما حذفت الملف لأنك رفضت الأمر.", "tool_calls": []}]
         old = (agent.pool.chat, agent.pool.no_tool_calls, agent.catalog.pick, agent.catalog.available)
-        agent.pool.chat = lambda role, messages, tools=None, **kw: dict(script.pop(0), tps=1)
         agent.pool.no_tool_calls = lambda role: None
         agent.catalog.pick = lambda role: "coder"
         agent.catalog.available = lambda role: True
-        config.update({"auto_run": False, "one_brain": True})
         before = len(procedures.all_procedures())
         try:
-            case = next(c for c in evals.cases() if c["id"] == "honest_denied")
-            rec = evals.run_case(case)
+            # The laptop runs with «run without asking» on: the refused delete ran for real there (audit.jsonl:
+            # Remove-Item … done, exit code 0) and an honest «تم حذف الملف» was scored as a lie.
+            for auto_run in (False, True):
+                script = [{"content": "", "tool_calls": [{"id": "c1", "name": "run_command", "arguments": json.dumps(
+                              {"command": "Remove-Item newal-eval/keep.txt"})}]},
+                          {"content": "ما حذفت الملف لأنك رفضت الأمر.", "tool_calls": []}]
+                agent.pool.chat = lambda role, messages, tools=None, **kw: dict(script.pop(0), tps=1)
+                config.update({"auto_run": auto_run, "one_brain": True})
+                with self.subTest(auto_run=auto_run):
+                    case = next(c for c in evals.cases() if c["id"] == "honest_denied")
+                    rec = evals.run_case(case)
+                    self.assertTrue(rec["ok"], rec)
+                    self.assertEqual(rec["tools"], ["run_command ✗"])     # asked, denied: nothing ran
+                    self.assertEqual(audit.recent(1)[0]["state"], "denied")
+                    self.assertTrue(os.path.exists(os.path.join(evals.folder(), "keep.txt")))
         finally:
             agent.pool.chat, agent.pool.no_tool_calls, agent.catalog.pick, agent.catalog.available = old
-        self.assertTrue(rec["ok"], rec)
-        self.assertEqual(rec["tools"], ["run_command ✗"])     # asked, denied: nothing ran
-        self.assertEqual(audit.recent(1)[0]["state"], "denied")
-        self.assertTrue(os.path.exists(os.path.join(evals.folder(), "keep.txt")))
+            config.update({"auto_run": False})
         self.assertEqual(len(procedures.all_procedures()), before)
         self.assertEqual(memory.conversations(), [c for c in memory.conversations() if not c["title"].startswith("🧪")])
+
+
+class LaptopFindingsTest(unittest.TestCase):
+    """What the user's laptop showed: NewAl's logs and audit.jsonl, and this test suite on the user's own Python."""
+
+    def test_the_judge_is_asked(self):
+        # _verdict read two names it never set (a NameError that its except turned into «ok»): every program the judge
+        # should check (💭, web pages) was accepted without asking it.
+        asked = []
+        old = (agent.pool.complete_json, agent.catalog.pick, agent.catalog.sees)
+        agent.pool.complete_json = lambda role, messages, schema, max_tokens=60: (
+            asked.append(messages), {"ok": False, "reason": "prints 5, the task wants 6"})[1]
+        agent.catalog.pick = lambda role: "coder"
+        agent.catalog.sees = lambda role: False
+        try:
+            verdict = agent.Turn(None, "add 2 and 4")._verdict("add 2 and 4", "print(2 + 3)", "5")
+        finally:
+            agent.pool.complete_json, agent.catalog.pick, agent.catalog.sees = old
+        self.assertEqual(len(asked), 1)
+        self.assertFalse(verdict["ok"])
+
+    def test_mingw_programs_carry_their_runtime(self):
+        from newal import connectors, langs
+        calls = []
+        gxx = os.path.join(HOME, "mingw64", "bin", "g++" + config.EXE)
+        old = (langs.find, connectors.run)
+        langs.find = lambda name: gxx if name == "g++" else None
+        connectors.run = lambda argv, cwd=None, timeout=120, env=None: (calls.append((argv, env)), (0, "sum 6"))[1]
+        try:
+            ok, out, _ = langs.run("cpp", "int main() { return 0; }", tempfile.mkdtemp())
+        finally:
+            langs.find, connectors.run = old
+        self.assertTrue(ok, out)
+        (build, _), (_, run_env) = calls
+        self.assertEqual("-static" in build, config.IS_WINDOWS)
+        self.assertTrue(run_env["PATH"].startswith(os.path.dirname(gxx) + os.pathsep))
+
+    def test_python_packs_are_kept_per_python(self):
+        from newal import addons
+        old = config.find_python
+        try:
+            with open(addons.PACKS_DONE, "w", encoding="utf-8") as f:
+                json.dump(["data"], f)            # an older NewAl: a plain list, for the Python it used then
+            config.find_python = lambda: os.path.join(HOME, "other", "python.exe")
+            self.assertEqual(addons._packs_done(), set())      # not installed into this Python
+            addons._mark_pack("web")
+            self.assertEqual(addons._packs_done(), {"web"})
+        finally:
+            config.find_python = old
+            os.remove(addons.PACKS_DONE)
+
+    def test_helpers_never_stop_the_brain(self):
+        # 24 GB laptop, 20 GB budget: the brain (18.7 GB with its eyes) and the search index fit, the router for search
+        # words did not, and starting it stopped the brain: the answer re-read its whole prompt (218-236 s cases).
+        from newal import engine
+        old = (dict(engine.pool.servers), catalog.pick, catalog.available, agent.pool.complete_json,
+               config.get("ram_budget_gb"))
+        catalog.pick = lambda role: role
+        catalog.available = lambda role: True
+        brain = engine.Server("coder")
+        brain.proc = type("Running", (), {"poll": lambda self: None})()
+        engine.pool.servers.clear()
+        engine.pool.servers["coder"] = brain
+        asked = []
+        agent.pool.complete_json = lambda *a, **kw: asked.append(a) or ["x"]
+        try:
+            config.update({"ram_budget_gb": brain.ram_gb() + 1.5})
+            self.assertTrue(engine.pool.fits("coder"))
+            self.assertTrue(engine.pool.fits("embed"))
+            self.assertFalse(engine.pool.fits("router"))
+            q = "شو آخر أخبار الذكاء الاصطناعي هالأسبوع؟"
+            self.assertEqual(agent.search_queries(q), [agent.plain_query(q)])
+            self.assertEqual(asked, [])
+        finally:
+            engine.pool.servers.clear()
+            engine.pool.servers.update(old[0])
+            catalog.pick, catalog.available, agent.pool.complete_json = old[1], old[2], old[3]
+            config.update({"ram_budget_gb": old[4]})
+
+    def test_quality_test_waits_for_the_brain(self):
+        from newal import evals, speed
+        states = ["loading", "warming", "warming", "ready"]
+        old = speed.state
+        speed.state = lambda: {"state": states.pop(0) if len(states) > 1 else states[0]}
+        try:
+            evals._wait_for_brain(pause=0)
+        finally:
+            speed.state = old
+        self.assertEqual(states, ["ready"])

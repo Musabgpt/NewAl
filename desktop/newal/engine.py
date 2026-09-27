@@ -306,6 +306,18 @@ class Pool:
             self.notify("%s جاهز (%.0f ث)" % (s.model["title"], time.time() - t0))
             return s
 
+    def fits(self, role):
+        """True when `role` is running, or starting it stops no other model. Helpers (search words, re-ranking) are
+        used only then: on a 24 GB laptop starting the small router for search words stopped the brain, and the answer
+        re-read its whole prompt (~4000 tokens, 3-4 minutes at ~24 tokens/s)."""
+        actual = catalog.pick(role)
+        if not actual:
+            return False
+        live = [s for s in list(self.servers.values()) if s.alive()]     # no lock: get() holds it while a model loads
+        if any(s.role == actual for s in live):
+            return True
+        return sum(s.ram_gb() for s in live) + Server(actual).ram_gb() <= float(config.get("ram_budget_gb"))
+
     def _make_room(self, need):
         budget = float(config.get("ram_budget_gb"))
         while True:

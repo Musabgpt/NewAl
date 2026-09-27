@@ -134,6 +134,7 @@ def run_case(case):
     turn = agent.Turn(conv, case["text"], mode=case.get("mode", "auto"), cancel=cancel, emit=emit,
                       approve=(lambda _: False) if case.get("deny") else (lambda _: True))
     turn.learn = False
+    turn.always_ask = True             # the same test on every computer, whatever «run without asking» is set to
     started = time.time()
     answer, info, why = "", {}, ""
     timer.start()
@@ -170,8 +171,19 @@ def start(only=None):
     return status()
 
 
+def _wait_for_brain(limit=1200, pause=2):
+    """NewAl loads the brain and lets it read its instructions when it opens (speed.warm_up). A run started meanwhile
+    waits for that instead of charging it to the first case: on the laptop, started four minutes after NewAl opened,
+    «شو عاصمة سوريا؟» took 188 s and the next short answers 5-25 s."""
+    from . import speed
+    deadline = time.time() + limit
+    while speed.state().get("state") in ("loading", "warming") and time.time() < deadline:
+        time.sleep(pause)
+
+
 def _run(chosen):
     try:
+        _wait_for_brain()
         role = catalog.pick("coder")
         records = []
         for case, st in zip(chosen, _job["cases"]):

@@ -1,5 +1,6 @@
 """Where NewAl keeps its files, and the user's settings."""
 
+import glob
 import json
 import os
 import re
@@ -40,15 +41,34 @@ def find_tool(name):
     return shutil.which(name)
 
 
+def _version_key(path):
+    return [int(n) for n in re.findall(r"\d+", os.path.basename(os.path.dirname(path)))]
+
+
 def find_python():
     """A real Python: the user's own, else the one shipped with NewAl (bin/python).
 
-    On Windows without Python, "python" on PATH is a Microsoft Store stub that only prints
-    "Python was not found" (exit code 9009): it is skipped."""
-    for name in ("python", "py", "python3"):
-        p = shutil.which(name)
-        if p and "windowsapps" not in p.lower():
-            return p
+    "python" in WindowsApps is either the Microsoft Store stub that only prints "Python was not found" (exit code
+    9009) or an alias of the Python install manager, and it comes first on PATH: WindowsApps is skipped and every other
+    PATH folder is looked at (shutil.which stops at the first hit, and a laptop with the install manager then had "no
+    Python" at all), then the folders the python.org installers use."""
+    folders = [d.strip('"') for d in os.environ.get("PATH", "").split(os.pathsep)]
+    for name in ("python", "python3", "py"):
+        for d in folders:
+            p = os.path.join(d, name + EXE) if d and "windowsapps" not in d.lower() else ""
+            if p and os.path.isfile(p) and os.access(p, os.X_OK):
+                return p
+    local = os.environ.get("LOCALAPPDATA", "")
+    if IS_WINDOWS and local:
+        found = [os.path.join(local, "Python", "bin", "python.exe")]                       # install manager (3.14+)
+        for pattern in (os.path.join(local, "Python", "pythoncore-3*", "python.exe"),
+                        os.path.join(local, "Programs", "Python", "Python3*", "python.exe")):
+            found += sorted(glob.glob(pattern), key=_version_key, reverse=True)
+        for p in found:
+            if os.path.isfile(p):
+                return p
+    if not getattr(sys, "frozen", False) and sys.executable and os.path.isfile(sys.executable):
+        return sys.executable                    # NewAl itself runs from its sources on a real Python
     for base in (os.path.join(APP_DIR, "bin"), os.path.join(BUNDLE, "bin"), os.environ.get("NEWAL_BIN", "")):
         p = os.path.join(base, "python", "python" + EXE) if base else ""
         if p and os.path.exists(p):

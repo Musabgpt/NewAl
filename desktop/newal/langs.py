@@ -73,13 +73,20 @@ def run(runner, code, folder, timeout=60):
     with open(path, "w", encoding="utf-8") as f:
         f.write(code)
     out_exe = os.path.join(folder, "main" + EXE)
-    steps = []
+    steps, toolchain = [], ""
     if runner in ("c", "cpp"):
         cc = find("gcc" if runner == "c" else "g++") or find("clang" if runner == "c" else "clang++")
         if not cc:
             return missing(runner)
         flags = ["-std=c17"] if runner == "c" else ["-std=c++17"]
-        steps = [[cc, name] + flags + ["-O1", "-o", out_exe] + (["-lm"] if runner == "c" else []), [out_exe]]
+        # MinGW's runtime (libstdc++, libgcc_s, libwinpthread) goes inside the program, and its compiler's folder
+        # comes first on PATH: Rust's GNU toolchain puts an older libgcc_s_seh-1.dll and libwinpthread-1.dll on PATH
+        # before WinLibs, and every C++ program stopped with 0xC0000139 (entry point not found) on a laptop. The
+        # .exe then also runs when it is opened from the chat or copied to another PC.
+        static = ["-static"] if config.IS_WINDOWS and os.path.basename(cc).lower().startswith(("gcc", "g++")) else []
+        toolchain = os.path.dirname(cc)
+        steps = [[cc, name] + flags + ["-O1"] + static + ["-o", out_exe] + (["-lm"] if runner == "c" else []),
+                 [out_exe]]
     elif runner == "rust":
         rustc = find("rustc")
         if not rustc:
@@ -115,6 +122,8 @@ def run(runner, code, folder, timeout=60):
             return False, "TypeScript يحتاج Node.js 22 أو أحدث (عندك %d). حدّثه من 🧩 الإضافات." % major, False
         steps = [[node] + (["--experimental-strip-types"] if major < 23 else []) + ["--no-warnings", name]]
     env = dict(os.environ, DOTNET_CLI_TELEMETRY_OPTOUT="1", DOTNET_NOLOGO="1", GOTOOLCHAIN="local")
+    if toolchain:
+        env["PATH"] = toolchain + os.pathsep + env.get("PATH", "")
     shown = []
     for i, argv in enumerate(steps):
         if argv == ["__move__"]:
