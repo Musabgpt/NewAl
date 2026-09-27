@@ -18,10 +18,10 @@ MODELS = {
         "about": "شغال دائماً: يفهم الطلب ويوجهه للنموذج المختص",
     },
     "coder": {
-        "title": "Qwen3.6-35B-A3B", "label": "🧠 العقل والمبرمج", "kind": "chat",
-        "file": "Qwen3.6-35B-A3B-UD-IQ3_S.gguf", "size": 13676723168,
-        "url": HF + "unsloth/Qwen3.6-35B-A3B-GGUF/resolve/main/Qwen3.6-35B-A3B-UD-IQ3_S.gguf",
-        "about": "العقل: يخطط ويبرمج ويجرّب ويصلح ويحكم (MoE: 3B نشط من 35B، 73% في SWE-bench)",
+        "title": "DeepSeek-Coder-V2-Lite 16B", "label": "💻 البرمجة", "kind": "chat",
+        "file": "DeepSeek-Coder-V2-Lite-Instruct-Q4_K_M.gguf", "size": 10364416768,
+        "url": HF + "bartowski/DeepSeek-Coder-V2-Lite-Instruct-GGUF/resolve/main/DeepSeek-Coder-V2-Lite-Instruct-Q4_K_M.gguf",
+        "about": "يُحمّل لمهام البرمجة (MoE: 2.4B نشط من 16B فيبقى سريعاً)",
     },
     "agent": {
         "title": "LFM2.5 2.6B", "label": "🛠 الأدوات", "kind": "chat",
@@ -30,10 +30,10 @@ MODELS = {
         "about": "الأدوات والطرفية والنت والملفات والربط، والمحادثة العادية",
     },
     "judge": {
-        "title": "Qwen3.5 4B", "label": "🧠 حكم احتياطي (اختياري)", "kind": "chat", "optional": True,
+        "title": "Qwen3.5 4B", "label": "🧠 الحكم", "kind": "chat",
         "file": "Qwen3.5-4B-Q4_K_M.gguf", "size": 2740937888,
         "url": HF + "unsloth/Qwen3.5-4B-GGUF/resolve/main/Qwen3.5-4B-Q4_K_M.gguf",
-        "about": "غير لازم: العقل Qwen3.6 يحكم بنفسه. يُستخدم فقط إذا لم يُنزّل العقل بعد.",
+        "about": "يحلل الأخطاء، يحولها لبرومت، ويحكم على نجاح الإصلاح",
     },
     "embed": {
         "title": "Qwen3 Embedding 0.6B", "label": "🔎 الفهرسة", "kind": "embed",
@@ -53,7 +53,7 @@ MODELS = {
 FALLBACK = {
     "coder": ["coder", "judge", "agent", "router"],
     "agent": ["agent", "judge", "router"],
-    "judge": ["coder", "judge", "agent", "router"],       # the brain judges its own work
+    "judge": ["judge", "agent", "router"],
     "router": ["router", "agent"],
     "embed": ["embed"],
     "rerank": ["rerank"],
@@ -98,7 +98,7 @@ def status():
             have = max(have, os.path.getsize(part))
         out.append({
             "role": role, "title": m["title"], "label": m["label"], "about": m["about"],
-            "size": m["size"], "have": have, "ready": available(role), "optional": bool(m.get("optional")),
+            "size": m["size"], "have": have, "ready": available(role),
             "state": p.get("state", "ready" if available(role) else "missing"),
             "error": p.get("error", ""), "speed": p.get("speed", 0), "url": m["url"], "file": m["file"],
         })
