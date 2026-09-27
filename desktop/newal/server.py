@@ -14,7 +14,7 @@ import urllib.request
 import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-from . import addons, agent, catalog, config, connectors, memory, router, skills, training
+from . import addons, agent, catalog, config, connectors, lessons, memory, phone, router, skills, training
 from .engine import Cancelled, pool
 
 UI_DIR = os.path.join(config.BUNDLE, "ui")
@@ -171,6 +171,8 @@ class Handler(BaseHTTPRequestHandler):
         return json.loads(raw.decode("utf-8")) if raw else {}
 
     def _local_only(self):
+        if getattr(self.server, "phone", False):
+            return self._phone_ok()
         # The page and the API are for this computer only.
         # Web pages open in a browser could post to 127.0.0.1 too: refuse foreign origins, and require a
         # header that a cross-site form cannot send without a CORS preflight (which is never granted).
@@ -188,6 +190,41 @@ class Handler(BaseHTTPRequestHandler):
                 ok &= self.headers.get("X-NewAl") == "1"
         if not ok:
             self._json({"error": "forbidden"}, 403)
+        return ok
+
+    def _phone_ok(self):
+        """The phone listener: every request carries the phone key (from the QR code once, then a cookie),
+        and only this page may call the API (same origin, the X-NewAl header on POST)."""
+        u = urllib.parse.urlparse(self.path)
+        given = urllib.parse.parse_qs(u.query).get("k", [""])[0]
+        if self.command == "GET" and u.path == "/" and given and phone.valid(given):
+            self.send_response(303)
+            self.send_header("Set-Cookie", "newal_key=%s; Path=/; HttpOnly; SameSite=Strict; Max-Age=31536000"
+                             % config.get("phone_key"))
+            self.send_header("Location", "/")
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return False
+        cookie = ""
+        for part in (self.headers.get("Cookie") or "").split(";"):
+            name, _, value = part.strip().partition("=")
+            if name == "newal_key":
+                cookie = value
+        ok = phone.valid(cookie)
+        origin = self.headers.get("Origin")
+        if origin and origin != "http://" + (self.headers.get("Host") or ""):
+            ok = False
+        if self.command == "POST" and not self.path.startswith("/v1/"):
+            ok &= self.headers.get("X-NewAl") == "1"
+        if not ok:
+            data = ("<!doctype html><meta charset=utf-8><meta name=viewport content='width=device-width'>"
+                    "<body style='font-family:sans-serif;padding:24px' dir=rtl><h3>NewAl</h3>"
+                    "<p>امسح رمز QR من NewAl على الكمبيوتر (📱 الهاتف) لتدخل.</p>").encode("utf-8")
+            self.send_response(403)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
         return ok
 
     # routes
@@ -213,6 +250,10 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(addons.status())
         if p == "/api/addons/setup_all":
             return self._json(addons.setup_status())
+        if p == "/api/lessons":
+            return self._json(lessons.all_lessons())
+        if p == "/api/phone":
+            return self._json(phone.status())
         if p == "/api/skills":
             return self._json([{k: v for k, v in x.items() if k != "path"} for x in skills.all_skills()])
         if p == "/api/file":
@@ -295,6 +336,12 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json(addons.install(body.get("id", ""), body.get("extra")))
             except Exception as e:  # noqa: BLE001
                 return self._json({"ok": False, "message": str(e)})
+        if p == "/api/lessons":
+            if body.get("delete"):
+                lessons.forget(int(body["delete"]))
+            return self._json(lessons.all_lessons())
+        if p == "/api/phone":
+            return self._json(phone.configure(bool(body.get("enabled")), bool(body.get("new_key"))))
         if p == "/api/addons/setup_all":
             if "context7_key" in body:
                 config.update({"context7_key": body["context7_key"]})

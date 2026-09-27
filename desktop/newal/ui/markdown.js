@@ -28,14 +28,15 @@
     let out = "", i = 0;
     while (i < lines.length) {
       const line = lines[i];
-      const fence = line.match(/^\s*```\s*([\w+#.-]*)/);
+      const fence = line.match(/^\s*```\s*([\w+#.-]*)[ \t]*(?:(?:path|file|title|filename)\s*[=:]\s*)?["']?([\w\-./\\]+\.[A-Za-z0-9]{1,6})?/);
       if (fence) {
-        const lang = fence[1] || "";
+        const lang = fence[1] || "", file = fence[2] || "";
         const body = [];
         i++;
         while (i < lines.length && !/^\s*```\s*$/.test(lines[i])) body.push(lines[i++]);
         i++;  // closing fence (or end while streaming)
-        out += '<div class="codeblock" data-lang="' + esc(lang) + '"><div class="bar"><span>' + (esc(lang) || "code") +
+        out += '<div class="codeblock" data-lang="' + esc(lang) + '" data-file="' + esc(file) + '"><div class="bar"><span dir="ltr">' +
+          (file ? "📄 " + esc(file) : (esc(lang) || "code")) +
           '</span><span><button data-act="copy">نسخ</button><button data-act="save">حفظ كملف</button></span></div><pre><code>' +
           esc(body.join("\n")) + "</code></pre></div>";
         continue;

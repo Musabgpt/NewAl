@@ -68,6 +68,9 @@ def main():
         return
     from newal import server
     httpd = server.serve(port)
+    if config.get("phone_access"):
+        from newal import phone
+        phone.start()
     if config.get("project_dirs"):
         threading.Timer(20, memory.index_dirs).start()     # pick up changed project files
     try:

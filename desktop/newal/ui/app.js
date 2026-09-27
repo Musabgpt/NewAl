@@ -292,7 +292,7 @@ function wireCode(root) {
         const ext = {python: "py", py: "py", javascript: "js", js: "js", powershell: "ps1", ps1: "ps1", html: "html",
           css: "css", json: "json", bash: "sh", sh: "sh", sql: "sql", java: "java", cpp: "cpp", c: "c", csharp: "cs",
           typescript: "ts", ts: "ts", markdown: "md", md: "md", yaml: "yml", xml: "xml"}[cb.dataset.lang] || "txt";
-        const name = prompt("اسم الملف (في مجلد العمل)", "code." + ext);
+        const name = prompt("اسم الملف (في مجلد العمل)", (cb.dataset.file || "").split(/[\\/]/).pop() || "code." + ext);
         if (!name) return;
         const r = await fetch("/api/upload", {method: "POST", headers: {"X-NewAl": "1", "X-Target": "workspace", "X-Filename": encodeURIComponent(name)}, body: code});
         const j = await r.json();
@@ -338,6 +338,7 @@ async function send(text, files, editId) {
       case "fix": bot.fix(e); break;
       case "draft_reset": bot.draftReset(); break;
       case "skills": bot.status("🎓 " + e.names.join("، ")); break;
+      case "lessons": bot.status("📒 يتذكر " + e.items.length + " درس من أغلاط سابقة"); break;
       case "goal_check": bot.verdict({ok: e.done, reason: (e.done ? "🎯 تحقق الهدف. " : "🎯 لم يكتمل بعد، يكمل: ") + (e.missing || "")}); break;
       case "memory": bot.memory(e); break;
       case "approve": askApproval(e); break;
@@ -617,13 +618,17 @@ const panels = {
 
   async memory(body) {
     const s = await refreshState();
-    const mems = await api("/api/memories");
+    const [mems, learned] = await Promise.all([api("/api/memories"), api("/api/lessons")]);
     const ix = s.index;
     body.innerHTML = `<h2>🗂 الذاكرة والمشروع</h2>
       <div class="card"><h4>الذاكرة الطويلة (${mems.length})</h4>
         <div class="about">حقائق يتذكرها NewAl في كل المحادثات. يضيفها بنفسه عندما تقول «تذكر…» أو من هنا.</div>
         <div class="row"><input type="text" id="memText" style="flex:1" placeholder="مثال: مشاريعي بايثون وأستخدم Windows 11" dir="auto"><button id="memAdd">إضافة</button></div>
         <div id="memList"></div></div>
+      <div class="card"><h4>📒 دفتر الدروس (${learned.length})</h4>
+        <div class="about">كل مرة بيغلط بالكود وبيصلّح، بيكتب هون قاعدة حتى ما يرجع يغلطها. ولما شي بيفشل كل المحاولات،
+          بيكتب «تجنّب». قبل كل برنامج بيقرأ الدروس اللي بتشبه الطلب.</div>
+        <div id="lessonList"></div></div>
       <div class="card"><h4>مجلدات المشروع</h4>
         <div class="about">يُفهرس الكود والمستندات فيها (${ix.sources} ملف، ${ix.chunks} مقطع) ليبحث فيها NewAl عند كل سؤال.
         الملفات المرفقة بالمحادثات تُضاف تلقائياً. ${s.models.find(m => m.role === "embed").ready ? "" : '<span class="bad">نزّل نموذج الفهرسة للبحث بالمعنى.</span>'}</div>
@@ -639,6 +644,16 @@ const panels = {
       r.querySelector("button").onclick = async () => { await api("/api/memories", {delete: m.id}); panels.memory(body); };
       list.appendChild(r);
     }
+    const ll = body.querySelector("#lessonList");
+    for (const x of learned.slice().reverse()) {
+      const r = document.createElement("div");
+      r.className = "row";
+      r.innerHTML = '<span dir="auto" style="flex:1"></span><span class="hint"></span><button>🗑</button>';
+      r.querySelector("span").textContent = (x.kind === "avoid" ? "⛔ " : "✅ ") + x.text;
+      r.querySelector(".hint").textContent = `×${x.seen} · استُخدم ${x.used}`;
+      r.querySelector("button").onclick = async () => { await api("/api/lessons", {delete: x.id}); panels.memory(body); };
+      ll.appendChild(r);
+    }
     body.querySelector("#memAdd").onclick = async () => {
       const t = body.querySelector("#memText").value.trim();
       if (t) { await api("/api/memories", {text: t}); panels.memory(body); }
@@ -650,6 +665,41 @@ const panels = {
       setTimeout(() => panels.memory(body), 800);
     };
     if (ix.running) setTimeout(() => { if (!$("#panel").hidden && body.dataset.panel === "memory") panels.memory(body); }, 2000);
+  },
+
+  async phone(body) {
+    const s = await api("/api/phone");
+    body.innerHTML = `<h2>📱 التحكم من الهاتف</h2>
+      <p class="hint">اكتب لـ NewAl من هاتفك وإنت جنب الكمبيوتر: نفس الواجهة كاملة (برمجة، 🎯 هدف، موافقات، رفع صور وملفات).
+        ما بيحتاج نت، بس لازم يكون في وصلة بين الهاتف والكمبيوتر، وحدة من هدول:</p>
+      <ul class="hint">
+        <li><b>نقطة اتصال الهاتف:</b> شغّل Hotspot بالهاتف ووصّل الكمبيوتر عليه.</li>
+        <li><b>كابل USB:</b> وصّل الهاتف بالكابل ← إعدادات الهاتف ← نقطة الاتصال ← «ربط USB» (USB tethering).</li>
+        <li><b>نقطة اتصال الكمبيوتر:</b> ويندوز ← الإعدادات ← الشبكة والإنترنت ← «نقطة اتصال للأجهزة المحمولة»، ووصّل الهاتف عليها.</li>
+        <li><b>أو نفس الواي فاي.</b></li></ul>
+      <div class="row"><label><input type="checkbox" id="phoneOn" ${s.enabled ? "checked" : ""}> السماح للهاتف بالدخول</label>
+        ${s.enabled ? '<button id="phoneKey">🔑 مفتاح جديد (يطرد الأجهزة القديمة)</button>' : ""}</div>
+      ${s.error ? `<p class="bad">${escapeHtml(s.error)}</p>` : ""}
+      <div id="phoneUrls"></div>
+      ${s.enabled ? `<p class="hint">امسح الرمز بكاميرا الهاتف. أول مرة ممكن ويندوز يسألك عن جدار الحماية: اختار «السماح» (وعلّم «الشبكات العامة» كمان
+        إذا بتستخدم نقطة اتصال). بعد ما تفتح، من قائمة المتصفح اختار «إضافة للشاشة الرئيسية» فبيصير متل التطبيق.
+        ما في رمز؟ وصّل الهاتف أولاً بطريقة من فوق وبعدين اضغط <a href="#" id="phoneRefresh">تحديث</a>.</p>` : ""}`;
+    const list = body.querySelector("#phoneUrls");
+    for (const u of s.urls) {
+      const c = document.createElement("div");
+      c.className = "card";
+      c.innerHTML = `<h4><span></span></h4><div class="qr" style="width:220px;background:#fff;padding:6px;border-radius:8px">${u.svg}</div>
+        <div class="about" dir="ltr" style="word-break:break-all"></div>`;
+      c.querySelector("h4 span").textContent = u.kind + " — " + u.ip;
+      c.querySelector(".about").textContent = u.svg ? u.url.replace(/k=.*/, "k=…") : u.url;
+      list.appendChild(c);
+    }
+    if (s.enabled && !s.urls.length) list.innerHTML = '<p class="bad">ما لقيت وصلة مع أي جهاز: وصّل الهاتف بطريقة من فوق.</p>';
+    body.querySelector("#phoneOn").onchange = async e => { await api("/api/phone", {enabled: e.target.checked}); panels.phone(body); };
+    const k = body.querySelector("#phoneKey");
+    if (k) k.onclick = async () => { await api("/api/phone", {enabled: true, new_key: true}); panels.phone(body); };
+    const rf = body.querySelector("#phoneRefresh");
+    if (rf) rf.onclick = e => { e.preventDefault(); panels.phone(body); };
   },
 
   async settings(body) {
@@ -729,6 +779,12 @@ document.addEventListener("DOMContentLoaded", () => {
   try { document.documentElement.dataset.theme = localStorage.getItem("theme") || "dark"; } catch (_) {}
   $("#newChat").onclick = newChat;
   $("#toggleSide").onclick = () => document.body.classList.toggle("side-hidden");
+  // Phones: the chat first; the menu slides over it and closes once something in it is chosen.
+  const narrow = () => matchMedia("(max-width: 800px)").matches;
+  if (narrow()) document.body.classList.add("side-hidden");
+  $("#side").addEventListener("click", e => {
+    if (narrow() && e.target.closest("button, a, #convs > *")) setTimeout(() => document.body.classList.add("side-hidden"), 0);
+  });
   document.querySelectorAll("nav button").forEach(b => b.onclick = () => showPanel(b.dataset.panel));
   $("#closePanel").onclick = () => { $("#panel").hidden = true; refreshState(); };
   $("#panel").onclick = e => { if (e.target.id === "panel") $("#closePanel").click(); };

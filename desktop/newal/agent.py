@@ -4,9 +4,10 @@ import datetime
 import os
 import platform
 import re
+import threading
 import time
 
-from . import catalog, config, connectors, files, memory, router, skills, tools, training, web
+from . import catalog, config, connectors, files, lessons, memory, router, skills, tools, training, web
 from .engine import Cancelled, pool
 
 MAX_TOOL_ROUNDS = 6
@@ -33,6 +34,9 @@ CODER = ("You are an expert software engineer on Windows 11 (PowerShell, Python,
          "Write complete, working code in fenced blocks with the language tag (```python, ```powershell, ```javascript...). "
          "Your code is run automatically to test it: give one complete program in a single code block that runs on its "
          "own without user input, and end it with a small self-test (asserts or example calls) that prints the results. "
+         "When the task needs several files (a package, a web app with templates, a project with tests), write every "
+         "file in its own block with its path on the fence line (```python app/main.py), add tests in tests/ "
+         "(pytest), and give the command that checks it on its own line: RUN: python -m pytest -q. "
          "Explain briefly in the user's language.")
 
 JUDGE = ("You are an analyst and reviewer. Think carefully, find root causes, compare options honestly, and turn vague "
@@ -306,7 +310,9 @@ class Turn:
         result = "verified: %s\n%s\nLast run output:\n%s\n\nProgram:\n%s" % (
             info.get("verified"), info.get("judge", ""), info.get("run_output", "(not run)"),
             block[1] if block else answer[:4000])
-        if block:
+        if info.get("project"):
+            result += "\n\nThe whole project was saved in " + info["project"]
+        elif block:
             name = "goal_%s.%s" % (time.strftime("%H%M%S"), {"python": "py", "powershell": "ps1", "node": "js"}[block[0]])
             result += "\n\nSaved as " + tools.write_file(name, block[1]).split(": ", 1)[-1]
         self.emit({"type": "tool", "name": "code_task", "state": "done", "result": result[:3000]})
@@ -389,32 +395,43 @@ class Turn:
     def _code(self, messages, role):
         """Writes the program, then in the background: run it, let the judge check the result, turn the error
         into a fix instruction, rewrite, run again... until it works (or the attempts run out).
-        The user sees one final answer; the attempts are listed in a collapsed box."""
+        A program is one code block or a project (several files with their paths, run by its tests or entry).
+        Lessons from earlier mistakes go in before writing and before each fix; what this task teaches is
+        written down afterwards. The user sees one final answer; the attempts are in a collapsed box."""
         request = messages[-1]["content"]
+        extra = []
         docs = self._docs(request)
         if docs:
-            messages = messages[:-1] + [dict(messages[-1], content=request + "\n\n" + docs)]
+            extra.append(docs)
+        known = lessons.relevant(request)
+        if known:
+            self.emit({"type": "lessons", "items": [x["text"] for x in known]})
+            extra.append(lessons.as_prompt(known))
+        if extra:
+            messages = messages[:-1] + [dict(messages[-1], content=request + "\n\n" + "\n\n".join(extra))]
         verify = config.get("verify_code")
         kind = "draft" if verify else "content"
         r = pool.chat(role, messages, on_delta=lambda k, t: self._delta(kind if k == "content" else k, t),
-                      cancel=self.cancel, max_tokens=3072)
+                      cancel=self.cancel, max_tokens=4096)
         answer = r["content"].strip()
         info = {"tps": r["tps"], "attempts": 1}
         if not verify:
             return answer, info
         limit = max(1, int(config.get("max_fix_attempts") or 5))
         history = []                  # (attempt, short error) so the same mistake is not repeated
-        last_block = None
+        used = {x["id"] for x in known}
+        last, prog, folder = None, None, None
         for attempt in range(1, limit + 1):
-            block = runnable_block(answer)
-            if not block:
+            prog = program(answer, prog)
+            if not prog:
                 break                 # nothing runnable (HTML, SQL, a snippet): answer as written
-            lang, code = block
-            if block == last_block:
+            code = prog_text(prog)
+            lang = prog["lang"]
+            if prog == last:
                 info["note"] = "same_code"
                 break                 # the model returned the same code again: stop looping
-            last_block = block
-            if re.search(r"\binput\s*\(|Read-Host|readline\(", code):
+            last = prog
+            if re.search(r"\binput\s*\(|Read-Host|readline\(", code) and not prog.get("tests"):
                 info["note"] = "interactive"
                 break                 # needs a person typing: cannot be checked automatically
             if RISKY.search(code) and not self.approve(
@@ -422,12 +439,12 @@ class Turn:
                 info["note"] = "not_run"
                 break
             self.emit({"type": "status", "text": "▶ تجربة %d…" % attempt})
-            ok, output, timed_out = run_code(lang, code)
-            missing = re.search(r"No module named '([\w.]+)'", output) if lang == "python" else None
+            ok, output, timed_out, folder = run_program(prog)
+            missing = re.search(r"No module named '?([\w.]+)'?", output) if lang == "python" else None
             if missing and install_package(missing.group(1)):
                 self.emit({"type": "run", "lang": lang, "ok": False, "attempt": attempt,
                            "output": output[-1500:] + "\n\n📦 تم تثبيت " + missing.group(1)})
-                ok, output, timed_out = run_code(lang, code)
+                ok, output, timed_out, folder = run_program(prog)
             info["run_output"] = output[-2000:]
             info["attempts"] = attempt
             if MISSING_RUNTIME.search(output):
@@ -457,7 +474,7 @@ class Turn:
             info["verified"] = False
             if attempt == limit:
                 break
-            history.append("attempt %d: %s" % (attempt, _last_line(problem)))
+            history.append("attempt %d: %s" % (attempt, error_line(problem) or _last_line(problem)))
             fix = self._fix_prompt(request, code, problem, history)
             if not docs and API_ERROR.search(problem):
                 # Wrong use of a library (a renamed function, a missing argument): its current documentation
@@ -465,19 +482,62 @@ class Turn:
                 docs = self._docs(request + "\n" + code, question=_last_line(problem))
                 if docs:
                     fix += "\n\n" + docs
+            more = lessons.relevant(request, error=problem, k=2, skip=used)
+            if more:
+                used |= {x["id"] for x in more}
+                fix += "\n\n" + lessons.as_prompt(more)
+            if prog["project"]:
+                fix += ("\nReturn only the files you change, each complete in its own block with its path on the "
+                        "fence line (```python app/main.py).")
             self.emit({"type": "fix", "attempt": attempt, "prompt": fix})
             self.emit({"type": "draft_reset"})
             # Only the original request and the latest attempt go back to the coder: short and focused.
             retry = messages + [{"role": "assistant", "content": answer}, {"role": "user", "content": fix}]
             r = pool.chat(role, retry, on_delta=lambda k, t: self._delta("draft" if k == "content" else k, t),
-                          cancel=self.cancel, max_tokens=3072)
+                          cancel=self.cancel, max_tokens=4096)
             answer = r["content"].strip() or answer
+        lessons.mark_used(used)
+        if prog and prog["project"]:
+            answer = project_answer(answer, prog)
+            if info.get("verified") and folder:
+                info["project"] = save_project(folder, request)
+                answer += "\n\n📁 المشروع كامل ومجرّب، محفوظ في: `%s`" % info["project"]
         if info.get("verified") is False:
             why = error_line(info.get("run_output", "")) or info.get("judge", "")
             answer += ("\n\n> ⚠️ جرّبت الكود %d مرات وما زال فيه مشكلة%s. آخر خطأ:\n> `%s`"
                        % (info["attempts"], " (أعاد النموذج نفس الكود)" if info.get("note") == "same_code" else "",
                           why[:300]))
+        if history and info.get("verified") is not None:
+            threading.Thread(target=self._learn, args=(request, history, code, info.get("verified"),
+                                                       info.get("run_output", "")), daemon=True).start()
         return answer, info
+
+    def _learn(self, request, history, final_code, solved, last_output):
+        """Writes down what this task taught: the rule that made failing code work, or the approach to avoid."""
+        task = re.sub(r"\s+", " ", self.text or request)[:300]
+        if not solved:
+            lessons.add("avoid", "For a task like «%s», this failed %d times: %s. Try a different approach or "
+                                 "library." % (task[:120], len(history), history[-1].split(": ", 1)[-1][:160]),
+                        task, last_output)
+            return
+        brain = catalog.pick("judge")
+        if not brain:
+            return
+        schema = {"type": "object", "properties": {"lesson": {"type": "string"}}, "required": ["lesson"]}
+        try:
+            r = pool.complete_json(brain, [
+                {"role": "system", "content": "A program failed and was then fixed. Write ONE general rule (English, "
+                                              "max 30 words) that would have avoided the first error next time, "
+                                              "e.g. 'On Windows open text files with encoding=\"utf-8\"'. Not about "
+                                              "this task's details; about the mistake."},
+                {"role": "user", "content": "Task: %s\n\nErrors in order:\n%s\n\nCode that finally worked:\n%s"
+                                            % (task, "\n".join(history), final_code[:3000])}], schema, max_tokens=120)
+            text = (r.get("lesson") or "").strip()
+        except Exception:  # noqa: BLE001 - learning must never break an answer
+            return
+        if text:
+            first = history[0].split(": ", 1)[-1]
+            lessons.add("fix", text, task, first)
 
     def _docs(self, text, question=None):
         """Current documentation of the libraries a coding task uses, from the Context7 add-on (when installed):
@@ -660,7 +720,7 @@ def runnable_block(text):
 
 
 def run_code(runner, code, timeout=60):
-    folder = os.path.join(config.WORKSPACE, "runs", time.strftime("%Y%m%d-%H%M%S"))
+    folder = os.path.join(config.WORKSPACE, "runs", time.strftime("%Y%m%d-%H%M%S-") + os.urandom(3).hex())
     os.makedirs(folder, exist_ok=True)
     ext = {"python": ".py", "powershell": ".ps1", "node": ".js"}[runner]
     path = os.path.join(folder, "main" + ext)
@@ -683,6 +743,156 @@ def run_code(runner, code, timeout=60):
     code_, out = connectors.run(args, cwd=folder, timeout=timeout)
     timed_out = code_ == -1 and "انتهت المهلة" in out
     return code_ == 0, "$ %s\n%s\n(exit code %d)" % (os.path.basename(path), connectors.clip(out, 4000), code_), timed_out
+
+
+# ------------------------------------------------------------------ programs: one block or a project
+
+_FENCE = re.compile(r"```([\w+-]*)[ \t]*([^\n`]*)\n(.*?)```", re.S)
+_PATH = re.compile(r"^(?:(?:path|file|title|filename)\s*[=:]\s*)?[\"']?([\w\-./\\]+\.[A-Za-z0-9]{1,6})[\"']?$")
+_RUN = re.compile(r"^\s*(?:\*\*)?RUN:?(?:\*\*)?:?\s*`?([^`\n]+?)`?\s*$", re.M | re.I)
+TEXT_FILES = (".py", ".js", ".mjs", ".ts", ".json", ".html", ".css", ".md", ".txt", ".toml", ".cfg", ".ini", ".yaml",
+              ".yml", ".csv", ".ps1", ".sql", ".env.example", ".jinja", ".j2", ".xml", ".svg")
+
+
+def safe_rel(path):
+    """A relative path inside the project, or None (no absolute paths, drives or «..»)."""
+    p = path.replace("\\", "/").strip()
+    while p.startswith("./"):
+        p = p[2:]
+    if not p or p.startswith("/") or re.match(r"^[A-Za-z]:", p) or ".." in p.split("/"):
+        return None
+    return p
+
+
+_PATH_ABOVE = re.compile(r"^[\s#>*`_-]*(?:\d+[.)]\s*)?(?:file|الملف|ملف)?\s*:?\s*[`*_]*([\w\-./\\]+\.[A-Za-z0-9]{1,6})[`*_]*\s*:?\s*$",
+                         re.I)
+_PATH_COMMENT = re.compile(r"^\s*(?:#|//|<!--|/\*)\s*(?:file(?:name)?\s*:\s*)?([\w\-./\\]+\.[A-Za-z][A-Za-z0-9]{0,5})\s*(?:-->|\*/)?\s*$",
+                           re.I)
+
+
+def project_files(text):
+    """{path: code} for the fenced blocks that name a file (on the fence line, on the line just above the block,
+    or in a first-line comment), and the RUN command if one is given."""
+    text = text or ""
+    files = {}
+    for m in _FENCE.finditer(text):
+        lang, rest, code = m.groups()
+        name = _PATH.match(rest.strip())
+        path = name.group(1) if name else ""
+        if not path:
+            above = text[:m.start()].rstrip("\n").rsplit("\n", 1)[-1]
+            hit = _PATH_ABOVE.match(above)
+            path = hit.group(1) if hit else ""
+        if not path:
+            first = code.split("\n", 1)[0]
+            hit = _PATH_COMMENT.match(first)
+            path = hit.group(1) if hit else ""
+        rel = safe_rel(path) if path else None
+        if rel:
+            files[rel] = code
+    run = _RUN.search(text)
+    return files, (run.group(1).strip() if run else "")
+
+
+def program(answer, previous=None):
+    """What to run from an answer: a project (several named files; a fix may return only the changed ones)
+    or its last runnable block."""
+    files, run = project_files(answer)
+    if previous and previous["project"] and files:
+        merged = dict(previous["files"])
+        merged.update(files)
+        files, run = merged, run or previous["run"]
+    if len(files) >= 2:
+        py = [p for p in files if p.endswith(".py")]
+        js = [p for p in files if p.endswith((".js", ".mjs"))]
+        tests = [p for p in py if re.search(r"(^|/)(tests?/|test_[^/]*\.py$)|_test\.py$", p)]
+        return {"project": True, "files": files, "run": run, "tests": bool(tests),
+                "lang": "python" if py or not js else "node"}
+    block = runnable_block(answer)
+    if not block:
+        return None
+    return {"project": False, "files": {"main": block[1]}, "run": "", "tests": False, "lang": block[0]}
+
+
+def prog_text(prog):
+    if not prog["project"]:
+        return prog["files"]["main"]
+    return "\n\n".join("### %s\n%s" % (p, c) for p, c in prog["files"].items())
+
+
+def _entry_command(prog, py):
+    """argv for checking a project: its RUN line when it is a python/pytest/node command, else its tests,
+    else its main file."""
+    import shlex
+    import shutil
+    files = prog["files"]
+    try:
+        parts = shlex.split(prog["run"], posix=True) if prog["run"] else []
+    except ValueError:
+        parts = []
+    if parts:
+        head = parts[0].lower()
+        if head in ("python", "python3", "py") and py:
+            return [py, "-X", "utf8"] + parts[1:]
+        if head == "pytest" and py:
+            return [py, "-X", "utf8", "-m", "pytest"] + parts[1:]
+        if head == "node" and shutil.which("node"):
+            return [shutil.which("node")] + parts[1:]
+    if prog["tests"] and py:
+        return [py, "-X", "utf8", "-m", "pytest", "-q"]
+    for name in ("main.py", "app.py", "run.py", "__main__.py"):
+        for p in files:
+            if p == name or p.endswith("/" + name):
+                return [py, "-X", "utf8", p] if py else None
+    for name in ("index.js", "main.js", "app.js", "server.js"):
+        if name in files and shutil.which("node"):
+            return [shutil.which("node"), name]
+    for p, c in files.items():
+        if p.endswith(".py") and "__main__" in c:
+            return [py, "-X", "utf8", p] if py else None
+    return None
+
+
+def run_program(prog, timeout=90):
+    """Runs one block or a whole project: (ok, output, timed_out, folder)."""
+    if not prog["project"]:
+        ok, out, slow = run_code(prog["lang"], prog["files"]["main"])
+        return ok, out, slow, None
+    folder = os.path.join(config.WORKSPACE, "runs", time.strftime("%Y%m%d-%H%M%S-") + os.urandom(3).hex())
+    for rel, code in prog["files"].items():
+        path = os.path.join(folder, *rel.split("/"))
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(code)
+    py = config.find_python()
+    argv = _entry_command(prog, py)
+    if not argv:
+        return False, "%s غير مثبت على الجهاز، أو لا يوجد ملف تشغيل (main.py / tests)" % prog["lang"], False, folder
+    code_, out = connectors.run(argv, cwd=folder, timeout=timeout)
+    timed_out = code_ == -1 and "انتهت المهلة" in out
+    shown = " ".join(os.path.basename(a) if i == 0 else a for i, a in enumerate(argv))
+    return code_ == 0, "$ %s\n%s\n(exit code %d)" % (shown, connectors.clip(out, 4000), code_), timed_out, folder
+
+
+def save_project(folder, request):
+    """Copies a working project from the test folder to workspace/projects/<name>."""
+    import shutil
+    words = re.findall(r"[A-Za-z0-9]+", request)[:4]
+    name = ("-".join(words).lower() or "project")[:40] + "-" + time.strftime("%m%d-%H%M")
+    dest = os.path.join(config.WORKSPACE, "projects", name)
+    shutil.copytree(folder, dest, ignore=shutil.ignore_patterns("__pycache__", ".pytest_cache"), dirs_exist_ok=True)
+    return dest
+
+
+def project_answer(answer, prog):
+    """The final answer shows every file of the project (a fix may have returned only the changed ones)."""
+    head = re.split(r"```", answer, 1)[0].strip()
+    lang = {"py": "python", "js": "javascript", "ts": "typescript", "html": "html", "css": "css", "json": "json",
+            "md": "markdown", "toml": "toml", "yaml": "yaml", "yml": "yaml", "ps1": "powershell", "sql": "sql"}
+    blocks = ["```%s %s\n%s```" % (lang.get(p.rsplit(".", 1)[-1], ""), p, c if c.endswith("\n") else c + "\n")
+              for p, c in prog["files"].items()]
+    run = "\n\nRUN: `%s`" % prog["run"] if prog["run"] else ""
+    return (head + "\n\n" if head else "") + "\n\n".join(blocks) + run
 
 
 # Generated code that deletes, runs other programs or sends data: asks first even in the background loop.

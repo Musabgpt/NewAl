@@ -402,6 +402,132 @@ class CodingHelpersTest(unittest.TestCase):
         self.assertEqual(st["done"], st["total"] - 1)
 
 
+class ProjectLoopTest(unittest.TestCase):
+    ANSWER = ("Here is the project.\n\n```python calc/core.py\ndef add(a, b):\n    return a - b\n```\n\n"
+              "```python main.py\nfrom calc.core import add\nassert add(2, 3) == 5, add(2, 3)\nprint('ok', add(2, 3))\n```\n"
+              "\n```python calc/__init__.py\n```\n\nRUN: `python main.py`")
+    FIX = "Fixed.\n\n```python calc/core.py\ndef add(a, b):\n    return a + b\n```"
+
+    def test_project_files(self):
+        files, run = agent.project_files(self.ANSWER)
+        self.assertEqual(sorted(files), ["calc/__init__.py", "calc/core.py", "main.py"])
+        self.assertEqual(run, "python main.py")
+        self.assertEqual(agent.project_files("```python ../../evil.py\nx\n```")[0], {})
+        self.assertEqual(agent.project_files("```python C:/x.py\nx\n```")[0], {})
+        loose = ("**app/main.py**\n```python\nprint(1)\n```\n### `tests/test_x.py`\n```python\ndef test(): pass\n```\n"
+                 "```js\n// web/index.js\nx\n```\n```python\n# 1.5 times\nprint(2)\n```")
+        self.assertEqual(sorted(agent.project_files(loose)[0]), ["app/main.py", "tests/test_x.py", "web/index.js"])
+
+    def test_fix_merges_changed_files(self):
+        first = agent.program(self.ANSWER)
+        self.assertTrue(first["project"])
+        second = agent.program(self.FIX, first)
+        self.assertIn("a + b", second["files"]["calc/core.py"])
+        self.assertIn("main.py", second["files"])
+        self.assertEqual(second["run"], "python main.py")
+        # a single runnable block stays a plain program
+        self.assertFalse(agent.program("```python\nprint(1)\n```")["project"])
+
+    def test_run_project(self):
+        ok, out, slow, folder = agent.run_program(agent.program(self.ANSWER))
+        self.assertFalse(ok)
+        self.assertIn("AssertionError", out)
+        ok, out, slow, folder = agent.run_program(agent.program(self.FIX, agent.program(self.ANSWER)))
+        self.assertTrue(ok, out)
+        self.assertIn("ok 5", out)
+
+    def test_loop_fixes_project_and_learns(self):
+        from newal import engine, lessons
+        replies = [self.ANSWER, self.FIX]
+        old = (engine.pool.chat, catalog.pick, agent.pool.chat)
+
+        def fake_chat(role, messages, **kw):
+            return {"content": replies.pop(0), "tps": 1, "tool_calls": []}
+        agent.pool.chat = fake_chat
+        catalog.pick = lambda role: None          # no judge model: a clean run counts as success
+        try:
+            t = agent.Turn(None, "write a calculator package")
+            answer, info = t._code([{"role": "user", "content": "write a calculator package"}], "coder")
+        finally:
+            agent.pool.chat, catalog.pick = old[2], old[1]
+        self.assertTrue(info["verified"], info)
+        self.assertEqual(info["attempts"], 2)
+        self.assertIn("a + b", answer)
+        self.assertIn("main.py", answer)                 # the answer shows the whole project
+        self.assertTrue(os.path.isfile(os.path.join(info["project"], "calc", "core.py")))
+
+    def test_lessons(self):
+        from newal import lessons
+        lessons.add("fix", "On Windows open text files with encoding='utf-8' to read Arabic text.",
+                    "read an arabic csv file", "UnicodeDecodeError: 'charmap' codec can't decode")
+        lessons.add("fix", "On Windows open text files with encoding='utf-8' when reading Arabic text.",
+                    "read arabic text", "UnicodeDecodeError")
+        found = lessons.relevant("اقرأ ملف csv", error="UnicodeDecodeError: 'charmap'")
+        self.assertEqual(len(found), 1)
+        self.assertEqual(found[0]["seen"], 2)            # the same lesson again is counted, not duplicated
+        self.assertIn("utf-8", lessons.as_prompt(found))
+        self.assertEqual(lessons.relevant("draw a chart of sales"), [])
+        lessons.forget(found[0]["id"])
+        self.assertEqual(lessons.all_lessons(), [])
+
+
+class PhoneTest(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        from newal import phone
+        config.update({"phone_port": 0})
+        phone.configure(True)
+        cls.port = phone._server.server_address[1]
+        cls.ip = next((a["ip"] for a in phone.addresses()), "127.0.0.1")
+        cls.base = "http://%s:%d" % (cls.ip, cls.port)
+
+    @classmethod
+    def tearDownClass(cls):
+        from newal import phone
+        phone.configure(False)
+
+    def req(self, path, method="GET", body=None, headers=None):
+        class NoRedirect(urllib.request.HTTPRedirectHandler):
+            def redirect_request(self, *a, **k):
+                return None
+        opener = urllib.request.build_opener(NoRedirect)
+        r = urllib.request.Request(self.base + path, json.dumps(body).encode() if body is not None else None,
+                                   headers or {}, method=method)
+        try:
+            with opener.open(r) as resp:
+                return resp.status, dict(resp.headers), resp.read()
+        except urllib.error.HTTPError as e:
+            return e.code, dict(e.headers), e.read()
+
+    def test_key_needed(self):
+        from newal import phone
+        self.assertEqual(self.req("/")[0], 403)
+        self.assertEqual(self.req("/api/state")[0], 403)
+        self.assertEqual(self.req("/?k=wrong")[0], 403)
+        code, headers, _ = self.req("/?k=" + phone.key())
+        self.assertEqual(code, 303)
+        cookie = headers["Set-Cookie"].split(";")[0]
+        self.assertIn("HttpOnly", headers["Set-Cookie"])
+        self.assertEqual(self.req("/", headers={"Cookie": cookie})[0], 200)
+        self.assertEqual(self.req("/api/state", headers={"Cookie": cookie})[0], 200)
+        # POSTs: the page's own header and origin only
+        ok = {"Cookie": cookie, "X-NewAl": "1", "Content-Type": "application/json"}
+        self.assertEqual(self.req("/api/lessons", "POST", {}, ok)[0], 200)
+        self.assertEqual(self.req("/api/lessons", "POST", {}, {"Cookie": cookie})[0], 403)
+        self.assertEqual(self.req("/api/lessons", "POST", {}, dict(ok, Origin="http://evil.example"))[0], 403)
+        # a new key logs the old phone out
+        phone.configure(True, new_key=True)
+        self.assertEqual(self.req("/api/state", headers={"Cookie": cookie})[0], 403)
+
+    def test_status_has_qr(self):
+        from newal import phone
+        st = phone.status()
+        self.assertTrue(st["running"])
+        if st["urls"]:
+            self.assertIn("k=" + phone.key(), st["urls"][0]["url"])
+            self.assertTrue(st["urls"][0]["svg"].startswith("<svg"))
+
+
 class ServerTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):

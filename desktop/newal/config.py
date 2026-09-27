@@ -75,7 +75,10 @@ DEFAULTS = {
     "kaggle_key": "",
     "context7_key": "",           # optional free key for the library-docs add-on (a higher daily limit)
     "drive_remote": "gdrive",
-    "api_port": 8766,             # OpenAI-compatible endpoint for VS Code extensions
+    "api_port": 8766,
+    "phone_access": False,        # the page on a phone next to the computer (QR code + key)
+    "phone_port": 8767,
+    "phone_key": "",             # OpenAI-compatible endpoint for VS Code extensions
 }
 
 _lock = threading.Lock()
@@ -88,7 +91,7 @@ if os.path.exists(_path):
     except (OSError, ValueError):
         pass
 
-SECRETS = ("github_token", "gitlab_token", "kaggle_key", "context7_key")
+SECRETS = ("github_token", "gitlab_token", "kaggle_key", "context7_key", "phone_key")
 
 
 def get(key):
