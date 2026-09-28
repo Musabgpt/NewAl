@@ -134,7 +134,7 @@ def cli(args, timeout=600):
             pass
     code, out = connectors.run([py, "-m", "kaggle"] + args, timeout=timeout, env=env)
     if code != 0 and "No module named kaggle" in out:
-        c2, o2 = connectors.run([py, "-m", "pip", "install", "-q", "--disable-pip-version-check", "kaggle"], timeout=600)
+        c2, o2 = connectors.run([py] + connectors.PIP_INSTALL + ["kaggle"], timeout=600)
         if c2 != 0:
             return c2, "تعذر تثبيت أداة Kaggle: " + connectors.clip(o2, 400)
         code, out = connectors.run([py, "-m", "kaggle"] + args, timeout=timeout, env=env)

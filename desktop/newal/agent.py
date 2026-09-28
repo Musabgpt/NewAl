@@ -2060,7 +2060,7 @@ def install_package(module):
     name = PIP_NAMES.get(module.split(".")[0], module.split(".")[0])
     if not exe or not known_package(module) or not re.fullmatch(r"[A-Za-z0-9_.-]+", name):
         return False
-    code_, _ = connectors.run([exe, "-m", "pip", "install", "--disable-pip-version-check", "-q", name], timeout=300)
+    code_, _ = connectors.run([exe] + connectors.PIP_INSTALL + [name], timeout=300)
     return code_ == 0
 
 

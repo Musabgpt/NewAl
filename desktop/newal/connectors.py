@@ -15,6 +15,11 @@ import urllib.request
 from . import config
 
 NO_WINDOW = 0x08000000 if config.IS_WINDOWS else 0
+# pip on a weak network: by default it waits 15 s for each read and tries 5 times. On the laptop «⚡ جهّز كل شي» lost
+# three packs to ReadTimeoutError from pypi.org («from versions: none»: it could not read the list of versions).
+PIP_INSTALL = ["-m", "pip", "install", "-q", "--disable-pip-version-check", "--timeout", "60", "--retries", "10"]
+NET_ERROR = re.compile(r"ReadTimeoutError|ConnectTimeoutError|Read timed out|NewConnectionError|"
+                       r"Temporary failure in name resolution|getaddrinfo failed|RemoteDisconnected")
 
 
 def _api(url, token_header=None, method="GET", body=None, raw=False, timeout=30):

@@ -402,15 +402,19 @@ class SignInTest(unittest.TestCase):
         cfg = os.path.join(HOME, "gitconfig")
         with open(cfg, "w") as f:
             f.write('[credential]\n\thelper = "!f() { echo username=me; echo password=tok123; }; f"\n')
-        old = os.environ.get("GIT_CONFIG_GLOBAL")
+        old = {k: os.environ.get(k) for k in ("GIT_CONFIG_GLOBAL", "GIT_CONFIG_NOSYSTEM")}
         os.environ["GIT_CONFIG_GLOBAL"] = cfg
+        # Only this helper: the system's own (Git for Windows: Credential Manager) runs first otherwise, and on the laptop
+        # it sometimes took half a minute over example.com and failed the test.
+        os.environ["GIT_CONFIG_NOSYSTEM"] = "1"
         try:
             self.assertEqual(connectors.git_credential("example.com"), ("tok123", None))
         finally:
-            if old is None:
-                del os.environ["GIT_CONFIG_GLOBAL"]
-            else:
-                os.environ["GIT_CONFIG_GLOBAL"] = old
+            for k, v in old.items():
+                if v is None:
+                    os.environ.pop(k, None)
+                else:
+                    os.environ[k] = v
 
     def test_gitlab_header_kind(self):
         from newal import connectors
@@ -2315,3 +2319,23 @@ class LaptopFindingsTest(unittest.TestCase):
         self.assertTrue(ok, out)
         ok, out, _ = agent.run_code("python", bad)
         self.assertFalse(ok, out)          # run as a plain program it «passed»: the assert in test_sq never ran
+
+    def test_packs_on_a_weak_network(self):
+        # «⚡ جهّز كل شي» on the laptop: three packs failed with pip's ReadTimeoutError («from versions: none»).
+        from newal import addons, connectors
+        ran = []
+        old = (connectors.run, config.find_python)
+        config.find_python = lambda: os.path.join(HOME, "py", "python.exe")
+        connectors.run = lambda argv, **kw: (ran.append(argv), (1, "WARNING: Retrying (Retry(total=4)) after connection "
+                                                                  "broken by 'ReadTimeoutError(\"HTTPSConnectionPool(host="
+                                                                  "'pypi.org', port=443): Read timed out.\")': /simple/"
+                                                                  "requests/\nERROR: Could not find a version that satisfies "
+                                                                  "the requirement requests (from versions: none)"))[1]
+        try:
+            r = addons.install("py:web")
+        finally:
+            connectors.run, config.find_python = old
+        self.assertFalse(r["ok"])
+        self.assertIn("النت ضعيف", r["message"])
+        self.assertEqual(ran[0][ran[0].index("--timeout") + 1], "60")          # pip waits longer than its 15 s
+        self.assertIn("--retries", ran[0])

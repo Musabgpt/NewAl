@@ -179,10 +179,14 @@ def install(item_id, extra=None):
         py = config.find_python()
         if not py:
             return {"ok": False, "message": "Python غير موجود"}
-        code, out = connectors.run([py, "-m", "pip", "install", "-q", "--disable-pip-version-check"] + packages, timeout=900)
+        code, out = connectors.run([py] + connectors.PIP_INSTALL + packages, timeout=1800)
         if code == 0:
             _mark_pack(item_id[3:])
-        return {"ok": code == 0, "message": "تم تثبيت " + ", ".join(packages) if code == 0 else connectors.clip(out, 800)}
+            return {"ok": True, "message": "تم تثبيت " + ", ".join(packages)}
+        if connectors.NET_ERROR.search(out):
+            return {"ok": False, "message": "النت ضعيف هلق: pypi.org ما ردّ بالوقت، فما انثبت شي من %s. جرّب «⚡ جهّز كل شي» "
+                                            "كمان مرة (الجاهز بيتخطاه)." % ", ".join(packages)}
+        return {"ok": False, "message": connectors.clip(out, 800)}
     if item_id.startswith("mcp:"):
         key = item_id[4:]
         if key == "custom":
