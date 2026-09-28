@@ -106,6 +106,8 @@ def path(role):
 
 
 def available(role):
+    if MODELS.get(role, {}).get("provider") == "openai":       # a model the user added by its endpoint (models.py)
+        return bool(MODELS[role].get("base_url"))
     return _is_gguf(path(role), _magic(role))
 
 
@@ -156,6 +158,8 @@ def status():
     out = []
     need = needed()
     for role, m in MODELS.items():
+        if m.get("user"):
+            continue                               # the user's own models are listed by models.py
         p = _progress.get(role, {})
         main = os.path.join(config.MODELS, m["file"])
         downloading = p.get("state") == "downloading"

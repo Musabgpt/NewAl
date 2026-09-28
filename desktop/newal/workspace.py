@@ -392,12 +392,13 @@ class Project:
         """One line per step: «[x]» done, «[~]» doing now, «[ ]» still to do."""
         todos = []
         for line in str(items or "").splitlines():
-            m = re.match(r"^\s*(?:[-*•]|\d+[.)])?\s*\[( |x|X|~|>|-)\]\s*(.+)$", line)
+            # «[x ]» and «[~ ]» too: the brain wrote them with a space on the laptop and its checklist never moved.
+            m = re.match(r"^\s*(?:[^\w\s\[]+|\d+[.)])?\s*\[\s*(x|X|~|>|-)?\s*\]\s*(.+)$", line)
             if m:
                 todos.append({"text": m.group(2).strip(),
-                              "state": {"x": "done", "X": "done", "~": "doing", ">": "doing", "-": "doing"}.get(m.group(1), "todo")})
+                              "state": {"x": "done", "X": "done", "~": "doing", ">": "doing", "-": "doing"}.get(m.group(1) or "", "todo")})
             elif line.strip():
-                todos.append({"text": re.sub(r"^\s*(?:[-*•]|\d+[.)])\s*", "", line).strip(), "state": "todo"})
+                todos.append({"text": re.sub(r"^\s*(?:[^\w\s\[]+|\d+[.)])\s*", "", line).strip(), "state": "todo"})
         self.todos = todos[:20]
         mark = {"done": "[x]", "doing": "[~]", "todo": "[ ]"}
         return "Checklist (%d/%d done):\n%s" % (sum(t["state"] == "done" for t in self.todos), len(self.todos),

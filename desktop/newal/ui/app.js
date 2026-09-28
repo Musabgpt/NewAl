@@ -328,6 +328,18 @@ function addBot() {
       extras.appendChild(v);
     },
     fix(e) { extras.appendChild(box("", `🔧 طلب الإصلاح ${e.attempt}`, e.prompt)); },
+    agent(e) {
+      // Another agent took a part of the task (delegate): where it starts, then its report.
+      if (e.state === "start") {
+        const p = document.createElement("div");
+        p.className = "subagent";
+        p.textContent = `🤖 ${e.name}${e.role ? " (" + e.role + ")" : ""}${e.model ? " · " + e.model : ""}: ${e.task}`;
+        extras.appendChild(p);
+      } else {
+        extras.appendChild(box("ok", `🤖 ${e.name} خلص (${e.steps} خطوة)`, e.report || ""));
+      }
+      scrollDown();
+    },
     note(t) {
       // What the agent said before a step stays in its steps; the text streamed so far moves there.
       const p = document.createElement("div");
@@ -775,7 +787,8 @@ async function send(text, files, editId) {
   const mode = document.querySelector("input[name=mode]:checked").value;
   const plan = mode === "project" && $("#planFirst").checked;
   const r = await api("/api/chat", {conv, text, attachments: files, mode, think: $("#think").checked, plan, edit_from: editId || null,
-                                   temp: tempMode, space: tempMode ? 0 : space});
+                                   temp: tempMode, space: tempMode ? 0 : space,
+                                   agent: mode === "project" ? $("#agentPick").value || null : null});
   job = r.job;
   setBusy(true);
   const es = new EventSource("/api/chat/stream?job=" + job);
@@ -791,6 +804,7 @@ async function send(text, files, editId) {
       case "verdict": bot.verdict(e); break;
       case "fix": bot.fix(e); break;
       case "note": bot.note(e.text); break;
+      case "agent": bot.agent(e); break;
       case "todo": bot.todo(e.items); break;
       case "diff": bot.diff(e); break;
       case "image": bot.image(e); break;
@@ -1525,6 +1539,109 @@ const panels = {
   },
 };
 
+// 🤖 Agents and models (docs/platform.md): any model, a GGUF file here or an OpenAI-compatible endpoint, and agents
+// that each have a name, a role, a specialty, a model, tools, a permission, the agents they may call and a way of
+// working (a Markdown file, edited here as it is written).
+const NEW_AGENT = `---
+name: اسم الوكيل
+when_to_use: متى القائد بيكلّفه
+role: coder
+specialty: python
+model: default
+tools: read, edit, run
+permission: workspace-write
+may_call:
+steps: 30
+---
+طريقة شغله: شو بيعمل، كيف بيتأكد، وشو بيرجّع بتقريره.
+`;
+
+async function loadAgents() {
+  const list = await api("/api/agents");
+  const pick = $("#agentPick");
+  const keep = pick.value || "lead";
+  pick.innerHTML = list.map(a => `<option value="${escapeHtml(a.id)}">${escapeHtml(a.name)}</option>`).join("");
+  pick.value = list.some(a => a.id === keep) ? keep : "lead";
+  return list;
+}
+
+panels.team = async function (body) {
+  const [list, md] = await Promise.all([loadAgents(), api("/api/models")]);
+  body.innerHTML = `<h2>🤖 الوكلاء والنماذج</h2>
+    <p class="hint">الوكيل = نموذج + دور + طريقة شغل. كل وكيل ملف Markdown: الاسم، متى بينستخدم، الدور، الاختصاص، النموذج
+    (<code>default</code> = العقل)، الأدوات (read, edit, run, web, mcp)، الصلاحية (read-only / workspace-write / full)، مين
+    بيقدر يكلّف (<code>may_call</code>)، وتحتهم طريقة شغله. بوضع 🧑‍💻 «القائد» بياخد المهمة وبيكلّف الباقي.</p>
+    <h3>الوكلاء</h3><div id="agentList"></div><div class="row"><button id="newAgent">＋ وكيل جديد</button></div>
+    <h3>النماذج</h3><p class="hint">أي ملف GGUF على جهازك (بيشتغل على llama.cpp تبع NewAl بإعداداته)، أو أي API متوافق مع
+    OpenAI: Ollama (<code dir="ltr">http://127.0.0.1:11434/v1</code>)، LM Studio، جهاز فيه كرت شاشة عالشبكة، OpenRouter، OpenAI…
+    الوكيل بيستخدم النموذج باسمه (id).</p>
+    <div id="modelRows"></div>
+    <div class="card"><h4>＋ نموذج</h4>
+      <div class="row"><input id="mId" placeholder="id (مثلاً gpu-box)" dir="ltr"><input id="mName" placeholder="الاسم">
+        <select id="mProvider"><option value="local">ملف GGUF على الجهاز</option><option value="openai">API (OpenAI-compatible)</option></select></div>
+      <div class="row" data-local><input id="mFile" class="wide" placeholder="مسار الملف .gguf (أو اسمه بمجلد النماذج)" dir="ltr"></div>
+      <div class="row" data-remote hidden><input id="mUrl" class="wide" placeholder="base_url: http://127.0.0.1:11434/v1" dir="ltr">
+        <input id="mModel" placeholder="model" dir="ltr"><input id="mKey" type="password" placeholder="API key (إذا بدو)" dir="ltr"></div>
+      <div class="row"><input id="mContext" type="number" placeholder="context"><input id="mThreads" type="number" placeholder="threads">
+        <input id="mTemp" type="number" step="0.1" placeholder="temperature"><button class="primary" id="mSave">حفظ</button></div>
+      <div class="hint" id="mMsg"></div></div>`;
+  const agentsBox = body.querySelector("#agentList");
+  const editor = (a) => {
+    const c = document.createElement("div");
+    c.className = "card";
+    c.innerHTML = `<textarea rows="14" dir="auto" spellcheck="false"></textarea>
+      <div class="row"><input placeholder="id (اسم الملف)" dir="ltr"><button class="primary">حفظ</button><span class="hint"></span></div>`;
+    c.querySelector("textarea").value = a ? a.text : NEW_AGENT;
+    c.querySelector("input").value = a ? a.id : "";
+    c.querySelector("button").onclick = async () => {
+      const r = await api("/api/agents", {save: {id: c.querySelector("input").value, text: c.querySelector("textarea").value}});
+      if (r.error) c.querySelector(".hint").textContent = "⚠ " + r.error; else panels.team(body);
+    };
+    return c;
+  };
+  for (const a of list) {
+    const c = document.createElement("div");
+    c.className = "card";
+    c.innerHTML = `<h4><span>🤖 ${escapeHtml(a.name)} <span class="hint">${escapeHtml(a.role || "")}${a.specialty ? " · " + escapeHtml(a.specialty) : ""}</span></span>
+      <span class="hint">${escapeHtml(a.model)} · ${escapeHtml(a.permission)} · ${{builtin: "مضمّن", user: "إلك", project: "للمشروع"}[a.source] || a.source}</span></h4>
+      <div class="about">${escapeHtml(a.when_to_use || "")}${a.may_call.length ? " · بيكلّف: " + escapeHtml(a.may_call.join("، ")) : ""}</div>
+      <div class="row"><button data-edit>تعديل</button>${a.source === "user" ? "<button data-del>حذف</button>" : ""}</div>`;
+    c.querySelector("[data-edit]").onclick = () => c.replaceWith(editor(a));
+    const del = c.querySelector("[data-del]");
+    if (del) del.onclick = async () => { if (confirm("حذف الوكيل " + a.name + "؟")) { await api("/api/agents", {delete: a.id}); panels.team(body); } };
+    agentsBox.appendChild(c);
+  }
+  body.querySelector("#newAgent").onclick = () => agentsBox.appendChild(editor(null));
+  const rows = body.querySelector("#modelRows");
+  for (const m of md.all) {
+    const r = document.createElement("div");
+    r.className = "card";
+    r.innerHTML = `<h4><span>${m.provider === "openai" ? "🌐" : "💾"} ${escapeHtml(m.name)} <code dir="ltr">${escapeHtml(m.id)}</code></span>
+      <span class="hint" dir="ltr">${escapeHtml(m.where || "")}</span></h4>
+      <div class="row">${m.ready ? '<span class="ok">✓ جاهز</span>' : '<span class="bad">الملف ناقص</span>'}
+        ${m.size ? `<span class="hint">${gb(m.size)}</span>` : ""}<button data-test>جرّب</button>
+        ${m.user ? "<button data-del>حذف</button>" : ""}<span class="hint" data-out></span></div>`;
+    r.querySelector("[data-test]").onclick = async () => {
+      const out = r.querySelector("[data-out]");
+      out.textContent = "⏳ عم يجرّب (بيحمّل النموذج إذا مو محمّل)…";
+      const t = await api("/api/models", {test: m.id});
+      out.textContent = t.error ? "⚠ " + t.error : `${t.ok ? "✓" : "✗"} «${t.reply}» بـ ${t.seconds} ث${t.tps ? " · " + t.tps + " كلمة/ث" : ""}`;
+    };
+    const del = r.querySelector("[data-del]");
+    if (del) del.onclick = async () => { await api("/api/models", {delete: m.id}); panels.team(body); };
+    rows.appendChild(r);
+  }
+  const prov = body.querySelector("#mProvider");
+  prov.onchange = () => { body.querySelector("[data-local]").hidden = prov.value !== "local"; body.querySelector("[data-remote]").hidden = prov.value === "local"; };
+  body.querySelector("#mSave").onclick = async () => {
+    const v = id => body.querySelector(id).value.trim();
+    const entry = {id: v("#mId"), name: v("#mName"), provider: prov.value, file: v("#mFile"), base_url: v("#mUrl"),
+                   model: v("#mModel"), api_key: v("#mKey"), context: v("#mContext"), threads: v("#mThreads"), temperature: v("#mTemp")};
+    const r = await api("/api/models", {save: entry});
+    if (r.error) body.querySelector("#mMsg").textContent = "⚠ " + r.error; else panels.team(body);
+  };
+};
+
 panels.speed = async function (body) {
   const r = await api("/api/speed-report");
   const b = r.state || {};
@@ -1755,7 +1872,9 @@ document.addEventListener("DOMContentLoaded", () => {
   // of reading on a laptop CPU otherwise, at the first step).
   document.querySelectorAll("input[name=mode]").forEach(r => r.addEventListener("change", () => {
     if (r.checked && r.value === "project") api("/api/speed-report", {action: "warm_project"});
+    $("#agentChip").hidden = document.querySelector("input[name=mode]:checked").value !== "project";
   }));
+  loadAgents().catch(() => {});
   // Phones: the chat first; the menu slides over it and closes once something in it is chosen.
   const narrow = () => matchMedia("(max-width: 800px)").matches;
   if (narrow()) document.body.classList.add("side-hidden");

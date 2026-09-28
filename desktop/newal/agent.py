@@ -8,8 +8,8 @@ import re
 import threading
 import time
 
-from . import (audit, browser, catalog, config, connectors, files, kvcache, langs, lessons, memory, procedures, router, sandbox,
-               skills, tools, training, web, workspace)
+from . import (agents, audit, browser, catalog, config, connectors, files, kvcache, langs, lessons, memory, models,
+               procedures, router, sandbox, skills, tools, training, web, workspace)
 from .engine import Cancelled, pool
 
 MAX_TOOL_ROUNDS = 6
@@ -180,10 +180,49 @@ def brain_tools():
     return tools.definitions(tools.brain_names()) + [CODE_TASK_TOOL]
 
 
+DELEGATE_TOOL = {"type": "function", "function": {
+    "name": "delegate",
+    "description": "Hand a part of the task to another agent (one of those your instructions list): it works on its own in "
+                   "the same project, with its own model, tools and way of working, and returns a report. Put everything "
+                   "it needs in the task: the goal, the files, how to check.",
+    "parameters": {"type": "object", "properties": {
+        "agent": {"type": "string", "description": "the agent's name"},
+        "task": {"type": "string", "description": "what it must do, with the details it needs"}},
+        "required": ["agent", "task"]}}}
+MAX_DELEGATION = 2             # an agent called by an agent may call one more, no deeper
+SUB_AGENT_STEPS = 25
+
+
+def park(role):
+    """Saves what `role`'s model has read to disk (llama.cpp's slot save: a fraction of a second); returns the file name,
+    or '' when there is nothing to save (the model is not loaded, or runs elsewhere)."""
+    name = "park-%s-%s.bin" % (re.sub(r"\W", "", role), os.urandom(4).hex())
+    try:
+        return name if pool.save_slot(role, name) else ""
+    except Exception:  # noqa: BLE001 - only a speed-up
+        return ""
+
+
+def unpark(role, name):
+    """Puts a parked reading back, so the caller continues where it was; the file goes either way."""
+    if not name:
+        return
+    try:
+        pool.restore_slot(role, name)
+    except Exception:  # noqa: BLE001 - the next step then reads the conversation the usual way
+        pass
+    finally:
+        try:
+            os.remove(os.path.join(kvcache.SLOTS, name))
+        except OSError:
+            pass
+
+
 def project_tools():
-    """Project mode's tool list: the same for every project, so its start can be read in advance (warm_prompts)."""
+    """Project mode's tool list: the same for every project and every agent (each agent's limits are checked when it
+    calls a tool), so its start is read once, in advance (warm_prompts), for all of them."""
     from . import mcp
-    defs = workspace.Project.definitions()
+    defs = workspace.Project.definitions() + [DELEGATE_TOOL]
     if config.get("web"):
         defs += tools.definitions(["web_search", "read_url"])
     if "docs" in mcp.manager.enabled():
@@ -206,8 +245,9 @@ def warm_prompts(role, project=False):
 
 class Turn:
     def __init__(self, conv, text, attachments=(), emit=None, approve=None, cancel=None, mode="auto", think=False,
-                 project=None, plan=False):
+                 project=None, plan=False, agent=None):
         self.conv = conv
+        self.agent_id = agent          # project mode: which agent takes the task (agents.py; the lead by default)
         self.plan = plan               # project mode: explore and write a plan only, change nothing
         self.max_steps = MAX_PROJECT_STEPS
         self.project = project         # project mode: this folder instead of the open project (background tasks)
@@ -413,7 +453,7 @@ class Turn:
 
     def _extra(self, role, budget=0):
         """Thinking for this request: off by default (speed), `budget` tokens when given, unlimited with 💭."""
-        if catalog.MODELS[role]["file"].lower().startswith("qwen3"):
+        if os.path.basename(catalog.MODELS[role].get("file") or "").lower().startswith("qwen3"):
             extra = {"chat_template_kwargs": {"enable_thinking": bool(self.think or budget)}}
             if budget and not self.think:
                 extra["thinking_budget_tokens"] = budget
@@ -673,13 +713,38 @@ class Turn:
                 % (root, proj.test_cmd or "(none found: run the program itself to check)", tree,
                    ("\nFunctions and classes by file:\n" + symbols + "\n") if symbols else "",
                    "\n\n".join(n for n in notes if n)))
-        messages[-1] = dict(messages[-1], content=head + messages[-1]["content"])
+        lead = agents.get(self.agent_id, root) or agents.default(root)
+        messages[-1] = dict(messages[-1], content=agents.header(lead, root) + head + messages[-1]["content"])
+        answer, st = self._agent_loop(proj, messages, models.role_of(lead.get("model"), role), lead, root)
+        steps, checks, verified, failures, tps = st["steps"], st["checks"], st["verified"], st["failures"], st["tps"]
+        changed = proj.changed()
+        diff = proj.diff()
+        if changed:
+            self.emit({"type": "diff", "diff": diff[:80000], "files": changed, "checkpoint": proj.id})
+            answer = (answer or "خلصت.") + "\n\n**الملفات اللي تغيرت:**\n" + "\n".join(
+                "- `%s` %s" % (f["path"], "(جديد)" if f["new"] else "(+%d −%d)" % (f["plus"], f["minus"])) for f in changed)
+        if verified is False:
+            answer += "\n\n> ⚠️ اختبارات المشروع ما زالت تفشل: `%s`" % failures[-1].split(": ", 1)[-1][:300]
+        if failures and verified is not None:
+            later(self._learn, self.text, failures, diff[:4000], verified, "")
+        if self.plan:
+            return answer or "ما قدرت كمّل الخطة خلال %d خطوة." % steps, {"tps": tps, "steps": steps, "plan": True,
+                                                                        "project": root}
+        return answer or "ما قدرت كمّل خلال %d خطوة." % steps, {
+            "tps": tps, "verified": verified, "steps": steps, "attempts": checks or 1, "agent": lead["id"],
+            "checkpoint": proj.id if changed else None, "files": changed, "project": root}
+
+    def _agent_loop(self, proj, messages, role, agent, root, depth=0):
+        """One agent working in the project until it answers without a tool call: its own model, its steps, its tools
+        and permission (agents.py). The lead (depth 0) is then checked by the project's own tests and a review; an
+        agent it called reports back to it instead. Returns (answer, stats)."""
         defs = project_tools()
         if self.plan:        # looking only: nothing that changes or runs anything
             defs = [d for d in defs if d["function"]["name"] not in READ_ONLY_BLOCKED]
+        limit = agent.get("steps") or (self.max_steps if depth == 0 else SUB_AGENT_STEPS)
         steps, checks, reviews, failures, verified, answer, tps, searched = 0, 0, 0, [], None, "", 0, False
         think_next = True              # the first step plans the change
-        while steps < self.max_steps:
+        while steps < limit:
             self.emit({"type": "status", "text": "🧑‍💻 خطوة %d…" % (steps + 1)})
             compact(messages, keep=8, budget_chars=context_chars(role))
             # Thinking before a step costs ~20 s on a laptop: on the first step and after a failed check, not before
@@ -700,15 +765,15 @@ class Turn:
                 self._note(r["content"])
                 messages.append(assistant_turn(r, "call_%d_%%d" % steps))
                 for i, c in enumerate(r["tool_calls"]):
-                    result = self._project_tool(proj, c["name"], c["arguments"])
+                    result = self._project_tool(proj, c["name"], c["arguments"], agent, depth, role)
                     messages.append({"role": "tool", "tool_call_id": c["id"] or "call_%d_%d" % (steps, i),
                                      "content": result})
                     steps += 1
                 self.emit({"type": "draft_reset"})
                 continue
             answer = r["content"].strip()
-            if self.plan or not proj.changed():
-                break
+            if depth or self.plan or not proj.changed():
+                break                  # an agent that was called reports back; its caller checks the whole task
             proj.test_cmd = proj.test_cmd or workspace.test_command(root)      # tests the agent wrote first
             if proj.test_cmd and checks < MAX_PROJECT_CHECKS:
                 # The agent says it is done: the project's own tests decide.
@@ -754,22 +819,48 @@ class Turn:
                     self.emit({"type": "draft_reset"})
                     continue
             break
+        return answer, {"steps": steps, "checks": checks, "verified": verified, "failures": failures, "tps": tps}
+
+    def _delegate(self, proj, arguments, caller, depth, role):
+        """The delegate tool: another agent does a part of the task in the same project, in its own context with its own
+        model, tools and way of working, and its report comes back as the tool's result (Claude Code's Task tool,
+        Roo Code's new_task). Agents on the same model share the system prompt and tool list, so llama.cpp does not
+        read them again for each agent."""
+        try:
+            a = json.loads(arguments or "{}") if isinstance(arguments, str) else dict(arguments or {})
+        except ValueError:
+            a = {}
+        root = proj.root
+        caller = caller or agents.default(root)
+        others = agents.callable_by(caller, root)
+        target = agents.get(a.get("agent"), root)
+        if not target or target["id"] not in {o["id"] for o in others}:
+            return "No agent «%s» that you can call. You can call: %s" % (
+                a.get("agent") or "", ", ".join("«%s»" % o["name"] for o in others) or "nobody: do it yourself")
+        task = str(a.get("task") or "").strip()
+        if not task:
+            return "Give the task: what «%s» must do, with everything it needs to know." % target["name"]
+        if depth >= MAX_DELEGATION:
+            return "Agents called by agents cannot go deeper: do this part yourself."
+        sub_role = models.role_of(target.get("model"), role)
+        self.emit({"type": "agent", "state": "start", "name": target["name"], "role": target.get("role", ""),
+                   "task": task, "model": catalog.MODELS.get(sub_role, {}).get("title", "")})
+        msgs = [{"role": "system", "content": _system("project", role)},
+                {"role": "user", "content": agents.header(target, root) + "Project folder: %s\nTest command: %s\n\n"
+                                            "Task from «%s»:\n%s" % (root, proj.test_cmd or "(none)", caller["name"], task)}]
+        # The model has one slot: the called agent's work replaces what the caller had read, and the caller's next step
+        # re-read all of it (4388 tokens, 215 s on the laptop). Its reading is saved to disk and put back instead.
+        parked = park(role)
+        try:
+            answer, st = self._agent_loop(proj, msgs, sub_role, target, root, depth + 1)
+        finally:
+            unpark(role, parked)
+        self.emit({"type": "agent", "state": "done", "name": target["name"], "report": answer[:3000],
+                   "steps": st["steps"]})
         changed = proj.changed()
-        diff = proj.diff()
-        if changed:
-            self.emit({"type": "diff", "diff": diff[:80000], "files": changed, "checkpoint": proj.id})
-            answer = (answer or "خلصت.") + "\n\n**الملفات اللي تغيرت:**\n" + "\n".join(
-                "- `%s` %s" % (f["path"], "(جديد)" if f["new"] else "(+%d −%d)" % (f["plus"], f["minus"])) for f in changed)
-        if verified is False:
-            answer += "\n\n> ⚠️ اختبارات المشروع ما زالت تفشل: `%s`" % failures[-1].split(": ", 1)[-1][:300]
-        if failures and verified is not None:
-            later(self._learn, self.text, failures, diff[:4000], verified, "")
-        if self.plan:
-            return answer or "ما قدرت كمّل الخطة خلال %d خطوة." % steps, {"tps": tps, "steps": steps, "plan": True,
-                                                                        "project": root}
-        return answer or "ما قدرت كمّل خلال %d خطوة." % steps, {
-            "tps": tps, "verified": verified, "steps": steps, "attempts": checks or 1,
-            "checkpoint": proj.id if changed else None, "files": changed, "project": root}
+        return "Report from «%s» (%d steps):\n%s%s" % (
+            target["name"], st["steps"], answer or "(no report)",
+            ("\n\nFiles changed so far in this task: " + ", ".join(f["path"] for f in changed)) if changed else "")
 
 
     def _research(self, messages, role):
@@ -909,14 +1000,30 @@ class Turn:
             self.emit({"type": "note", "text": text[:600]})
             self.notes.append(text[:600])          # not a tool: a note is no evidence that anything was done
 
-    def _project_tool(self, proj, name, arguments):
+    def _project_tool(self, proj, name, arguments, agent=None, depth=0, role=None):
         if name == "todo":
             # The checklist is shown as the checklist (not as a tool box), and it is no evidence of work done.
             result = proj.call(name, arguments)
             self.emit({"type": "todo", "items": proj.todos})
             return result
+        if name == "delegate":
+            return self._delegate(proj, arguments, agent, depth, role)
+        try:
+            args = json.loads(arguments or "{}") if isinstance(arguments, str) else dict(arguments or {})
+        except ValueError:
+            args = {}
+        if isinstance(args, dict) and args.get("path"):
+            try:                        # an agent's path limits (edit:tests/*) are relative to the project
+                args = dict(args, path=proj.shown(proj.readable(str(args["path"]))))
+            except ValueError:
+                pass
+        ok, why = agents.allowed(agent, name, args if isinstance(args, dict) else {}) if agent else (True, "")
+        # An agent with «full» permission runs its commands without asking; the others ask as usual.
+        proj.approve = (lambda text: True) if agent and agent.get("permission") == "full" else self.approve
         self.emit({"type": "tool", "name": name, "args": arguments, "state": "start"})
-        if self.plan and name in READ_ONLY_BLOCKED:
+        if not ok:
+            result = "Not allowed: %s. Hand this part to an agent that may (delegate), or do it another way." % why
+        elif self.plan and name in READ_ONLY_BLOCKED:
             result = "Plan mode: nothing is changed or run now. Finish the plan."
         elif name == "look":
             result = self._look_page(proj, arguments)
@@ -935,8 +1042,9 @@ class Turn:
             result = tools.call(name, arguments)
         else:
             result = "أداة غير متاحة في وضع المشروع: " + name
-        self.tools_used.append({"name": name, "args": arguments, "result": result[:500]})
-        self.emit({"type": "tool", "name": name, "state": "done", "result": result[:4000]})
+        self.tools_used.append({"name": name, "args": arguments, "result": result[:500]} if ok else
+                               {"name": name, "args": arguments, "denied": True})
+        self.emit({"type": "tool", "name": name, "state": "done" if ok else "denied", "result": result[:4000]})
         return result
 
     def _code_task(self, arguments):

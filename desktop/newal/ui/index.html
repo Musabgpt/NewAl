@@ -18,6 +18,7 @@
   <div id="convs"></div>
   <nav>
     <button data-panel="models">🧠 النماذج</button>
+    <button data-panel="team">🤖 الوكلاء والنماذج</button>
     <button data-panel="connect">🔗 الربط</button>
     <button data-panel="addons">🧩 الإضافات والمهارات</button>
     <button data-panel="memory">🧠 الذاكرة</button>
@@ -71,6 +72,7 @@
       <label class="chip" title="يرسم صورة من وصفك على جهازك (SD-Turbo)"><input type="radio" name="mode" value="image">🎨 صورة</label>
       <label class="chip toggle"><input type="checkbox" id="think">💭 تفكير عميق</label>
       <label class="chip toggle" title="وضع المشروع: بيقرأ المشروع ويكتب خطة بدون ما يغيّر شي، وإنت بتوافق"><input type="checkbox" id="planFirst">📝 خطة أولاً</label>
+      <label class="chip" id="agentChip" hidden title="وضع المشروع: الوكيل اللي بياخد المهمة (🤖 الوكلاء والنماذج)">🤖 <select id="agentPick"></select></label>
     </div>
     <input type="file" id="fileInput" multiple hidden>
   </footer>

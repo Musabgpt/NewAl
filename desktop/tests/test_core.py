@@ -1590,11 +1590,14 @@ class SpeedTest(unittest.TestCase):
             def __iter__(self):
                 return iter(self.lines)
 
-        class Srv:
+        class Srv(engine.Server):
             role = "coder"
             url = "http://x"
             model = catalog.MODELS["coder"]
             used = 0
+
+            def __init__(self):
+                pass
 
             def vision(self):
                 return False
@@ -2389,6 +2392,9 @@ class AgentLikeProjectTest(unittest.TestCase):
         r = p.todo("- [x] read the failing test\n- [~] fix add()\n- [ ] run the tests")
         self.assertIn("1/3", r)
         self.assertEqual([t["state"] for t in p.todos], ["done", "doing", "todo"])
+        p.todo("▫ [x ] delegate the test\n▫ [~ ] check everything\n- [] report")       # as the laptop's brain wrote it
+        self.assertEqual([(t["state"], t["text"]) for t in p.todos],
+                         [("done", "delegate the test"), ("doing", "check everything"), ("todo", "report")])
         props = {d["function"]["name"]: d["function"]["parameters"]["properties"] for d in p.definitions()}
         self.assertEqual(props["run"]["background"]["type"], "boolean")
         self.assertEqual(props["search"]["context"]["type"], "integer")
@@ -2437,3 +2443,136 @@ class AgentLikeProjectTest(unittest.TestCase):
         finally:
             agent.pool.chat = old
         self.assertEqual(seen[0], (warm["messages"][0]["content"], warm["tools"]))     # the same start: read once
+
+
+class PlatformTest(unittest.TestCase):
+    """NewAl as a platform (docs/platform.md): any model (a GGUF file or an OpenAI-compatible endpoint) and agents,
+    each a model with a name, a role, a specialty, tools, a permission, who it may call and its way of working."""
+
+    def test_agent_files_roles_and_limits(self):
+        from newal import agents
+        ids = {a["id"] for a in agents.all_agents()}
+        self.assertTrue({"lead", "planner", "coder", "tester", "reviewer", "explorer"} <= ids)
+        lead, tester, reviewer = agents.get("lead"), agents.get("المختبِر"), agents.get("reviewer")   # by id or name
+        self.assertEqual(tester["id"], "tester")
+        self.assertIn("tester", [a["id"] for a in agents.callable_by(lead)])
+        self.assertTrue(agents.allowed(tester, "write_file", {"path": "tests/test_shop.py"})[0])
+        self.assertFalse(agents.allowed(tester, "edit_file", {"path": "shop.py"})[0])      # never the code under test
+        self.assertFalse(agents.allowed(reviewer, "run", {})[0])                            # read-only
+        self.assertTrue(agents.allowed(reviewer, "read_file", {})[0])
+        self.assertIn("«المختبِر»", agents.header(lead))                                   # the lead knows whom to call
+        root = tempfile.mkdtemp(prefix="proj-")
+        os.makedirs(os.path.join(root, ".newal", "agents"))
+        with open(os.path.join(root, ".newal", "agents", "tester.md"), "w", encoding="utf-8") as f:
+            f.write("---\nname: مختبر المشروع\nrole: tester\ntools: read, run\nsteps: 5\n---\nOnly unittest here.\n")
+        self.assertEqual(agents.get("tester", root)["name"], "مختبر المشروع")             # a project's own wins
+        self.assertEqual(agents.get("tester", root)["steps"], 5)
+        aid = agents.save("my-helper", "---\nname: مساعدي\nrole: coder\nmay_call: tester\n---\nBe brief.\n")
+        self.assertEqual(agents.get("my-helper")["may_call"], ["tester"])
+        self.assertTrue(agents.delete(aid))
+
+    def test_models_by_file_and_by_endpoint(self):
+        from newal import models
+        gguf = os.path.join(HOME, "tiny-test.gguf")
+        with open(gguf, "wb") as f:
+            f.write(b"GGUF" + b"\0" * 64)
+        try:
+            models.save({"id": "Tiny", "name": "Tiny", "provider": "local", "file": gguf, "context": "4096", "threads": 2})
+            models.save({"id": "box", "name": "GPU box", "provider": "openai", "base_url": "http://127.0.0.1:9/v1",
+                         "model": "qwen", "api_key": "sk-secret-key-1234567890"})
+            self.assertEqual(models.role_of("tiny", "coder"), "m:tiny")
+            self.assertEqual(models.role_of("default", "coder"), "coder")
+            self.assertTrue(catalog.available("m:tiny") and catalog.available("m:box"))
+            self.assertEqual(catalog.MODELS["m:tiny"]["context"], 4096)
+            self.assertEqual([m["api_key"] for m in models.public() if m["id"] == "box"], ["••••"])
+            models.save({"id": "box", "name": "GPU box", "provider": "openai", "base_url": "http://127.0.0.1:9/v1",
+                         "model": "qwen", "api_key": "••••"})                        # the UI sends the mask back
+            self.assertEqual(catalog.MODELS["m:box"]["api_key"], "sk-secret-key-1234567890")
+            self.assertIn("m:tiny", [m["role"] for m in models.listing()])
+            self.assertNotIn("m:box", [m["role"] for m in catalog.status()])           # not in the download list
+            with self.assertRaises(ValueError):
+                models.save({"id": "x", "provider": "openai", "base_url": "ftp://nope"})
+        finally:
+            models.delete("tiny")
+            models.delete("box")
+        self.assertNotIn("m:tiny", catalog.MODELS)
+
+    def test_an_openai_compatible_endpoint_answers(self):
+        import threading
+        from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+        from newal import engine, models
+        seen = {}
+
+        class Fake(BaseHTTPRequestHandler):
+            def log_message(self, *a):
+                pass
+
+            def do_POST(self):
+                seen["path"] = self.path
+                seen["auth"] = self.headers.get("Authorization")
+                seen["body"] = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+                chunks = [{"choices": [{"delta": {"content": "مرحبا"}}]}, {"choices": [{"delta": {"content": " OK"}}]}]
+                data = "".join("data: %s\n\n" % json.dumps(c) for c in chunks) + "data: [DONE]\n\n"
+                self.send_response(200)
+                self.send_header("Content-Type", "text/event-stream")
+                self.send_header("Content-Length", str(len(data.encode())))
+                self.end_headers()
+                self.wfile.write(data.encode())
+
+        httpd = ThreadingHTTPServer(("127.0.0.1", 0), Fake)
+        threading.Thread(target=httpd.serve_forever, daemon=True).start()
+        try:
+            models.save({"id": "fake", "provider": "openai", "base_url": "http://127.0.0.1:%d/v1" % httpd.server_port,
+                         "model": "some-model", "api_key": "sk-test-key-000000000000"})
+            r = engine.pool.chat("m:fake", [{"role": "user", "content": "hi"}], max_tokens=8)
+            self.assertEqual(r["content"], "مرحبا OK")
+            self.assertEqual(seen["path"], "/v1/chat/completions")
+            self.assertEqual(seen["auth"], "Bearer sk-test-key-000000000000")
+            self.assertEqual(seen["body"]["model"], "some-model")
+            self.assertNotIn("min_p", seen["body"])                                # llama.cpp's own fields stay home
+            self.assertEqual(engine.pool.prime("m:fake", [{"role": "system", "content": "s"}]), 0)
+        finally:
+            httpd.shutdown()
+            engine.pool.unload("m:fake")
+            models.delete("fake")
+
+    def test_the_lead_hands_a_part_to_another_agent(self):
+        root = tempfile.mkdtemp(prefix="proj-")
+        with open(os.path.join(root, "shop.py"), "w", encoding="utf-8") as f:
+            f.write("def total(p):\n    return sum(p)\n")
+        script = [
+            {"content": "بخلّي المختبِر يكتب اختبار.", "tool_calls": [{"id": "d1", "name": "delegate", "arguments": json.dumps(
+                {"agent": "المختبِر", "task": "Write tests/test_shop.py for total()."})}]},
+            {"content": "", "tool_calls": [{"id": "t1", "name": "edit_file", "arguments": json.dumps(
+                {"path": "shop.py", "old": "sum(p)", "new": "sum(p) + 0"})}]},              # not its job: refused
+            {"content": "", "tool_calls": [{"id": "t2", "name": "write_file", "arguments": json.dumps(
+                {"path": "tests/test_shop.py",
+                 "content": "from shop import total\n\ndef test_total():\n    assert total([1, 2]) == 3\n"})}]},
+            {"content": "Wrote tests/test_shop.py (1 test).", "tool_calls": []},       # the tester's report
+            {"content": "المختبِر كتب الاختبار.", "tool_calls": []},                      # the lead's answer
+        ]
+        firsts, events, order = [], [], []
+        old = (agent.pool.chat, agent.pool.no_tool_calls, agent.pool.save_slot, agent.pool.restore_slot)
+        agent.pool.chat = lambda role, messages, tools=None, **kw: (firsts.append(messages[1]["content"]),
+                                                                     order.append("chat"), dict(script.pop(0), tps=1))[2]
+        agent.pool.no_tool_calls = lambda role: None
+        agent.pool.save_slot = lambda role, name: (order.append("park"), {"ok": True})[1]
+        agent.pool.restore_slot = lambda role, name: (order.append("unpark"), {"ok": True})[1]
+        config.update({"review_changes": False, "tests_first": False})
+        try:
+            t = agent.Turn(None, "add a test", emit=events.append, mode="project", project=root)
+            answer, info = t._project([{"role": "system", "content": agent._system("project", "coder")},
+                                       {"role": "user", "content": "add a test"}], "coder")
+        finally:
+            agent.pool.chat, agent.pool.no_tool_calls, agent.pool.save_slot, agent.pool.restore_slot = old
+            config.update({"review_changes": True, "tests_first": True})
+        # The lead's reading is saved before the tester starts and put back after it: 215 s re-read on the laptop.
+        self.assertEqual(order, ["chat", "park", "chat", "chat", "chat", "unpark", "chat"])
+        self.assertTrue(firsts[1].startswith("You are working as «المختبِر»"))   # the tester's own first message
+        self.assertEqual([e["state"] for e in events if e["type"] == "agent"], ["start", "done"])
+        denied = [e for e in events if e["type"] == "tool" and e.get("state") == "denied"]
+        self.assertTrue(denied and "Not allowed" in denied[0]["result"])
+        self.assertEqual([f["path"] for f in info["files"]], ["tests/test_shop.py"])
+        with open(os.path.join(root, "shop.py"), encoding="utf-8") as f:
+            self.assertNotIn("+ 0", f.read())
+        self.assertIn("المختبِر كتب الاختبار.", answer)

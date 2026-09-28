@@ -85,6 +85,9 @@ details.box.fail summary { color: var(--bad); }
 .note p { margin: 0; }
 .todo { background: var(--card); border: 1px solid var(--line); border-radius: 10px; margin: 6px 0; padding: 6px 10px;
   font-size: 13px; }
+.subagent { font-size: 14px; margin: 10px 0 2px; padding: 4px 8px; border-radius: 8px; background: var(--card);
+  border-inline-start: 3px solid var(--warn); }
+#agentPick { background: transparent; border: 0; padding: 0 2px; color: inherit; }
 .todo > div { margin: 2px 0; } .todo .done { color: var(--muted); text-decoration: line-through; }
 .todo .doing { color: var(--accent); font-weight: 600; }
 .content { word-wrap: break-word; }

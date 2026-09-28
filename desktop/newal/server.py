@@ -14,7 +14,7 @@ import urllib.request
 import uuid
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-from . import addons, agent, audit, browser, catalog, config, connectors, diagnose, evals, kvcache, lessons, memory, phone, procedures, router, sandbox, schedules, school, skills, speed, tasks, training, updater, workspace
+from . import addons, agent, agents, audit, browser, catalog, config, connectors, diagnose, evals, kvcache, lessons, memory, models, phone, procedures, router, sandbox, schedules, school, skills, speed, tasks, training, updater, workspace
 from .engine import Cancelled, pool
 
 UI_DIR = os.path.join(config.BUNDLE, "ui")
@@ -65,7 +65,7 @@ def run_chat(job, body):
         project = body.get("project") if body.get("project") and os.path.isdir(body.get("project")) else None
         turn = agent.Turn(conv, text, attachments, emit=job.emit, approve=job.approve, cancel=job.cancel,
                           mode=body.get("mode", "auto"), think=bool(body.get("think")), plan=bool(body.get("plan")),
-                          project=project)
+                          project=project, agent=body.get("agent") or None)
         answer, meta = turn.run()
         if turn.sent and turn.sent != text:
             # The question as the model got it (with its notes and files): the next turns send it again exactly like
@@ -187,6 +187,30 @@ def tune_spec():
     config.update({"spec_type": keep})
     pool.unload("coder")
     return {"speeds": speeds, "chosen": keep or "none"}
+
+
+def agents_listing():
+    """The agents for the open project, each with its file as it is written (the UI edits the Markdown itself)."""
+    out = []
+    for a in agents.all_agents(config.get("project_path") or None):
+        try:
+            with open(a["path"], encoding="utf-8") as f:
+                text = f.read()
+        except OSError:
+            text = ""
+        out.append(dict({k: v for k, v in a.items() if k != "path"}, text=text))
+    return out
+
+
+def test_model(model_id):
+    """One short answer from a model: does it answer, and how fast (loads a local model if it is not loaded)."""
+    role = models.role_of(model_id, "")
+    if not role:
+        raise ValueError("نموذج غير معروف: %s" % model_id)
+    started = time.time()
+    r = pool.chat(role, [{"role": "user", "content": "Reply with one word: OK"}], max_tokens=16, temperature=0)
+    return {"ok": bool(r["content"].strip()), "reply": r["content"].strip()[:200], "seconds": round(time.time() - started, 1),
+            "tps": round(r.get("tps") or 0, 1)}
 
 
 def in_workspace(path):
@@ -372,6 +396,10 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(phone.status())
         if p == "/api/skills":
             return self._json([{k: v for k, v in x.items() if k != "path"} for x in skills.all_skills()])
+        if p == "/api/agents":
+            return self._json(agents_listing())
+        if p == "/api/models":
+            return self._json({"all": models.listing(), "user": models.public()})
         if p == "/api/file":
             return self._file(qs.get("path", [""])[0])
         if p.startswith("/out/"):
@@ -560,6 +588,26 @@ class Handler(BaseHTTPRequestHandler):
             return self._json(addons.setup_all())
         if p == "/api/addons/remove":
             return self._json(addons.remove(body.get("id", "")))
+        if p == "/api/agents":
+            try:
+                if body.get("delete"):
+                    agents.delete(body["delete"])
+                elif body.get("save"):
+                    agents.save(body["save"].get("id", ""), body["save"].get("text", ""))
+            except (OSError, ValueError) as e:
+                return self._json({"error": str(e)})
+            return self._json(agents_listing())
+        if p == "/api/models":
+            try:
+                if body.get("delete"):
+                    models.delete(body["delete"])
+                elif body.get("save"):
+                    models.save(body["save"])
+                elif body.get("test"):
+                    return self._json(test_model(body["test"]))
+            except (OSError, ValueError, RuntimeError) as e:
+                return self._json({"error": str(e)})
+            return self._json({"all": models.listing(), "user": models.public()})
         if p == "/api/skills/save":
             return self._json({"id": skills.save(body.get("name", ""), body.get("description", ""),
                                                  body.get("triggers", ""), body.get("body", ""))})

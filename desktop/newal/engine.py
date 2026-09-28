@@ -137,7 +137,15 @@ def with_images(messages, can_see):
     return out
 
 
+def family(s):
+    """The model file's name in lower case («qwen3…», «lfm…»): its chat template's options depend on it. A user's
+    model may give a full path (models.py)."""
+    return os.path.basename(s.model.get("file") or "").lower()
+
+
 class Server:
+    remote = False
+
     def __init__(self, role):
         self.role = role
         self.model = catalog.MODELS[role]
@@ -153,7 +161,19 @@ class Server:
     def url(self):
         return "http://127.0.0.1:%d" % self.port
 
+    def endpoint(self, path):
+        """The address of an OpenAI-style call («/chat/completions»)."""
+        return self.url + "/v1" + path
+
+    def headers(self):
+        return {"Content-Type": "application/json"}
+
+    def body(self, body):
+        return body
+
     def context(self):
+        if self.model.get("context"):
+            return max(2048, int(self.model["context"]))          # set for this model by the user (models.py)
         base = max(int(config.get("context") or 0), MIN_CONTEXT)
         if self.role == "coder":
             return max(base, int(config.get("brain_context") or 0))
@@ -191,7 +211,7 @@ class Server:
             raise RuntimeError("llama-server غير موجود. أعد تثبيت NewAl.")
         kind = self.model["kind"]
         args = [exe, "-m", self.path, "--host", "127.0.0.1", "--port", str(self.port),
-                "-t", str(config.threads()), "--no-webui"]
+                "-t", str(self.model.get("threads") or config.threads()), "--no-webui"]
         if kind == "chat":
             # One slot with the whole context: with automatic slots llama-server splits -c between them
             # (a 10.9k-token goal request hit a 4096-token slot on the laptop).
@@ -258,6 +278,59 @@ class Server:
         self.proc = None
 
 
+class Remote:
+    """A model the user added by its OpenAI-compatible endpoint (models.py): Ollama, LM Studio, vLLM, llama.cpp on
+    another computer, OpenRouter, OpenAI... Nothing runs here, so it takes no RAM and is never started or stopped."""
+    remote = True
+    # llama.cpp's own request fields: an OpenAI-style server may refuse what it does not know.
+    LOCAL_ONLY = ("min_p", "repeat_penalty", "timings_per_token", "chat_template_kwargs", "thinking_budget_tokens",
+                  "reasoning_format", "logit_bias", "cache_prompt", "n_predict")
+
+    def __init__(self, role):
+        self.role = role
+        self.model = catalog.MODELS[role]
+        self.url = (self.model.get("base_url") or "").rstrip("/")
+        self.path = ""
+        self.used = time.time()
+        self.mtp = False
+        self.slot_conv = None
+
+    def endpoint(self, path):
+        return self.url + path
+
+    def headers(self):
+        h = {"Content-Type": "application/json"}
+        if self.model.get("api_key"):
+            h["Authorization"] = "Bearer " + self.model["api_key"]
+        return h
+
+    def body(self, body):
+        out = {k: v for k, v in body.items() if k not in self.LOCAL_ONLY}
+        out["model"] = self.model.get("remote_model") or out.get("model") or ""
+        return out
+
+    def vision(self):
+        return False
+
+    def context(self):
+        return int(self.model.get("context") or 32768)
+
+    def ram_gb(self):
+        return 0.0
+
+    def alive(self):
+        return True
+
+    def start(self, timeout=0):
+        pass
+
+    def stop(self):
+        pass
+
+    def tail(self, n=6):
+        return ""
+
+
 class Pool:
     def __init__(self):
         self.servers = {}
@@ -291,6 +364,12 @@ class Pool:
         if not actual:
             raise RuntimeError("نموذج %s غير منزّل بعد. افتح «النماذج» ونزّله." % catalog.MODELS[role]["title"])
         with self.lock:
+            if catalog.MODELS[actual].get("provider") == "openai":
+                s = self.servers.get(actual)
+                if not isinstance(s, Remote) or s.model is not catalog.MODELS[actual]:
+                    s = self.servers[actual] = Remote(actual)
+                s.used = time.time()
+                return s
             s = self.servers.get(actual)
             if s and s.alive() and s.path == catalog.path(actual):
                 s.used = time.time()
@@ -313,6 +392,8 @@ class Pool:
         actual = catalog.pick(role)
         if not actual:
             return False
+        if catalog.MODELS[actual].get("provider") == "openai":
+            return True                                                    # runs elsewhere: takes no RAM here
         live = [s for s in list(self.servers.values()) if s.alive()]     # no lock: get() holds it while a model loads
         if any(s.role == actual for s in live):
             return True
@@ -358,13 +439,13 @@ class Pool:
                 "top_p": 0.95, "min_p": 0.05, "repeat_penalty": 1.05, "timings_per_token": False}
         if tools:
             body["tools"] = tools
-        qwen = s.model["file"].lower().startswith("qwen3")
+        qwen = family(s).startswith("qwen3")
         if qwen:
             # Thinking only when asked for. preserve_thinking: earlier answers are written back exactly as the model
             # wrote them (with their <think></think>), so llama.cpp finds them in its cache instead of re-reading
             # the last answer at every question (Qwen3.6's template drops those tags from older answers otherwise).
             body["chat_template_kwargs"] = {"enable_thinking": False, "preserve_thinking": True}
-        if s.model["file"].startswith("LFM"):
+        if family(s).startswith("lfm"):
             # LFM2.5 thinks before every answer and every tool call (5-15 s each on a laptop CPU). Off unless the
             # caller asks: the router already decides when tools are needed. (Per request, llama.cpp >= b9982.)
             body["thinking_budget_tokens"] = 0
@@ -373,8 +454,8 @@ class Pool:
             if qwen and "chat_template_kwargs" in extra:
                 body["chat_template_kwargs"] = dict(body["chat_template_kwargs"], **extra.pop("chat_template_kwargs"))
             body.update(extra)
-        req = urllib.request.Request(s.url + "/v1/chat/completions", json.dumps(body).encode("utf-8"),
-                                     {"Content-Type": "application/json"})
+        req = urllib.request.Request(s.endpoint("/chat/completions"), json.dumps(s.body(body)).encode("utf-8"),
+                                     s.headers())
         content, reasoning, calls, tps, timings = [], [], {}, 0.0, {}
         strip = ThinkStripper()
         started = time.time()
@@ -430,9 +511,9 @@ class Pool:
         body = {"messages": with_images(messages, s.vision()), "max_tokens": max_tokens, "temperature": 0,
                 "chat_template_kwargs": {"enable_thinking": False},
                 "response_format": {"type": "json_schema", "json_schema": {"name": "answer", "schema": schema}}}
-        if s.model["file"].lower().startswith("qwen3"):
+        if family(s).startswith("qwen3"):
             body["chat_template_kwargs"] = {"enable_thinking": False}     # thinking only when asked for
-        if s.model["file"].startswith("LFM"):
+        if family(s).startswith("lfm"):
             body["reasoning_format"] = "none"
         started = time.time()
         out = self._post(s, "/v1/chat/completions", body)
@@ -501,9 +582,9 @@ class Pool:
         """Makes llama.cpp read the start of the next request now, while the user is still typing: the conversation
         up to where the next question will begin. Returns the number of tokens it read (0 when not loaded)."""
         s = self.running(role)
-        if not s:
+        if not s or s.remote:
             return 0
-        kw = {"enable_thinking": False, "preserve_thinking": True} if s.model["file"].lower().startswith("qwen3") else {}
+        kw = {"enable_thinking": False, "preserve_thinking": True} if family(s).startswith("qwen3") else {}
         kw.update(chat_kwargs or {})
         renders = []
         for mark in ("\u2063A", "\u2063B"):
@@ -530,19 +611,24 @@ class Pool:
 
     def save_slot(self, role, filename):
         s = self.running(role)
-        if not s:
+        if not s or s.remote:
             return None
         return self._post(s, "/slots/0?action=save", {"filename": filename})
 
     def restore_slot(self, role, filename):
         s = self.running(role)
-        if not s:
+        if not s or s.remote:
             return None
         return self._post(s, "/slots/0?action=restore", {"filename": filename})
 
     def _post(self, s, path, body):
-        req = urllib.request.Request(s.url + path, json.dumps(body).encode("utf-8"),
-                                     {"Content-Type": "application/json"})
+        if s.remote:
+            if not path.startswith("/v1/"):
+                raise RuntimeError("%s: llama.cpp only, not on a remote model" % path)
+            url, body = s.endpoint(path[3:]), s.body(body)
+        else:
+            url = s.url + path
+        req = urllib.request.Request(url, json.dumps(body).encode("utf-8"), s.headers())
         try:
             with urllib.request.urlopen(req, timeout=600) as r:
                 s.used = time.time()
