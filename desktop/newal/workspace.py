@@ -36,9 +36,35 @@ DANGEROUS = re.compile(r"[;&|`]|\$\(|>\s*\S|Remove-Item|\brm\b|\bdel\b|rmdir|For
                        re.I)
 
 
+def ps_chain(command):
+    """bash's «a && b» and «a || b» for Windows PowerShell 5.1, which has neither (a parse error). The laptop's coding
+    agent wrote «cd "…" && python -c …» and lost a step to it."""
+    parts, ops, cur, quote, i = [], [], "", None, 0
+    while i < len(command):
+        ch = command[i]
+        if quote:
+            quote = None if ch == quote else quote
+        elif ch in "\"'":
+            quote = ch
+        elif command.startswith(("&&", "||"), i):
+            parts.append(cur.strip())
+            ops.append(command[i:i + 2])
+            cur, i = "", i + 2
+            continue
+        cur += ch
+        i += 1
+    if not ops:
+        return command
+    out = cur.strip()
+    for part, op in zip(reversed(parts), reversed(ops)):
+        out = "%s; if (%s$?) { %s }" % (part, "" if op == "&&" else "-not ", out)
+    return out
+
+
 def powershell_line(command):
     """PowerShell reads a line that starts with a quoted path as a string, not a program: it needs the call
     operator. The program's exit code is passed on (PowerShell itself would only say 0 or 1)."""
+    command = ps_chain(command)
     if command.startswith('"'):
         command = "& " + command
     return "[Console]::OutputEncoding=[Text.Encoding]::UTF8; " + command + "; if ($LASTEXITCODE) { exit $LASTEXITCODE }"
@@ -167,6 +193,8 @@ class Project:
         self.backups = {}           # rel path -> original text (None = the file did not exist)
         self.test_cmd = test_command(self.root)
         self.servers = []           # (command, process, log path, url) started with start_server
+        self.jobs = {}              # id -> long commands started with run(background=True)
+        self.todos = []             # the task's checklist (todo tool)
 
     # ---------------------------------------------------------- paths and backups
 
@@ -175,6 +203,20 @@ class Project:
         if os.path.commonpath([full, self.root]) != self.root:
             raise ValueError("المسار خارج المشروع: " + rel)
         return full
+
+    def readable(self, p):
+        """A path to read or search: inside the project, or any absolute path (logs, settings, another folder), read only
+        (the laptop's own session read NewAl's logs and data folder to find what went wrong)."""
+        p = os.path.expandvars(os.path.expanduser((p or ".").strip().strip('"')))
+        return os.path.abspath(p) if os.path.isabs(p) else self.path(p)
+
+    def shown(self, full):
+        """How a path is shown: relative inside the project, absolute outside."""
+        try:
+            rel = os.path.relpath(full, self.root)
+        except ValueError:                        # another drive
+            return full
+        return full if rel.startswith("..") or os.path.isabs(rel) else rel.replace("\\", "/")
 
     def rel(self, full):
         return os.path.relpath(full, self.root).replace("\\", "/")
@@ -190,23 +232,27 @@ class Project:
     # ---------------------------------------------------------- tools
 
     def list_files(self, path=".", pattern=""):
-        base = self.path(path)
+        base = self.readable(path)
+        if not os.path.isdir(base):
+            return "ليس مجلداً: " + path
         out = []
         for dirpath, dirnames, filenames in os.walk(base):
             dirnames[:] = sorted(d for d in dirnames if d not in IGNORED and not d.startswith("."))
             for n in sorted(filenames):
-                rel = self.rel(os.path.join(dirpath, n))
-                if pattern and not fnmatch.fnmatch(n, pattern) and not fnmatch.fnmatch(rel, pattern):
+                shown = self.shown(os.path.join(dirpath, n))
+                if pattern and not fnmatch.fnmatch(n, pattern) and not fnmatch.fnmatch(shown, pattern):
                     continue
-                out.append(rel)
+                out.append(shown)
                 if len(out) >= 300:
                     return "\n".join(out) + "\n… (أكثر من 300 ملف: حدّد مجلداً أو نمطاً)"
         return "\n".join(out) or "(لا ملفات)"
 
     def read_file(self, path, start=1, end=0):
-        full = self.path(path)
+        full = self.readable(path)
         if not os.path.isfile(full):
             return "غير موجود: " + path
+        if not _text_file(full):
+            return "%s: ملف ثنائي (ليس نصاً)، %d بايت" % (path, os.path.getsize(full))
         lines = _read(full).splitlines()
         start = max(1, int(start or 1))
         end = min(len(lines), int(end or 0) or start + MAX_READ_LINES - 1)
@@ -214,45 +260,60 @@ class Project:
         more = "\n… (%d سطر؛ اقرأ من %d)" % (len(lines), end + 1) if end < len(lines) else ""
         return "%s (%d lines)\n%s%s" % (path, len(lines), body, more)
 
-    def search(self, pattern, glob=""):
+    def search(self, pattern, glob="", path=".", ignore_case=False, context=0, files_only=False):
+        """Like grep: a regex (or plain text) in every text file under `path`, with line numbers."""
+        flags = re.I if str(ignore_case).lower() in ("1", "true", "yes") else 0
         try:
-            rx = re.compile(pattern)
+            rx = re.compile(pattern, flags)
         except re.error:
-            rx = re.compile(re.escape(pattern))
-        hits = []
-        for dirpath, dirnames, filenames in os.walk(self.root):
-            dirnames[:] = [d for d in dirnames if d not in IGNORED and not d.startswith(".")]
-            for n in filenames:
-                full = os.path.join(dirpath, n)
-                if glob and not fnmatch.fnmatch(n, glob):
-                    continue
-                if os.path.getsize(full) > 1_000_000 or not _text_file(full):
-                    continue
-                for i, line in enumerate(_read(full).splitlines(), 1):
-                    if rx.search(line):
-                        hits.append("%s:%d: %s" % (self.rel(full), i, line.strip()[:200]))
-                        if len(hits) >= 80:
-                            return "\n".join(hits) + "\n… (أول 80 نتيجة)"
+            rx = re.compile(re.escape(pattern), flags)
+        base = self.readable(path)
+        files = [base] if os.path.isfile(base) else []
+        for dirpath, dirnames, filenames in ([] if files else os.walk(base)):
+            dirnames[:] = sorted(d for d in dirnames if d not in IGNORED and not d.startswith("."))
+            files += [os.path.join(dirpath, n) for n in sorted(filenames)
+                      if not glob or fnmatch.fnmatch(n, glob) or fnmatch.fnmatch(self.shown(os.path.join(dirpath, n)), glob)]
+        around = max(0, min(10, int(context or 0)))
+        hits, found = [], 0
+        for full in files:
+            if os.path.getsize(full) > 1_000_000 or not _text_file(full):
+                continue
+            lines = _read(full).splitlines()
+            matched = [i for i, line in enumerate(lines) if rx.search(line)]
+            if not matched:
+                continue
+            found += 1
+            if str(files_only).lower() in ("1", "true", "yes"):
+                hits.append("%s (%d)" % (self.shown(full), len(matched)))
+                continue
+            shown_lines = sorted({j for i in matched for j in range(max(0, i - around), min(len(lines), i + around + 1))})
+            for j in shown_lines:
+                mark = ":" if j in matched else "-"
+                hits.append("%s%s%d%s %s" % (self.shown(full), mark, j + 1, mark, lines[j].rstrip()[:200]))
+                if len(hits) >= 120:
+                    return "\n".join(hits) + "\n… (أول 120 سطر: ضيّق البحث بـ glob أو path)"
         return "\n".join(hits) or "لا نتائج"
 
-    def edit_file(self, path, old, new):
+    def edit_file(self, path, old, new, replace_all=False):
         full = self.path(path)
         if not os.path.isfile(full):
             return "غير موجود: %s (لإنشاء ملف استخدم write_file)" % path
         text = _read(full)
+        every = str(replace_all).lower() in ("1", "true", "yes")
         n = text.count(old) if old else 0
-        if n != 1:
-            # Models often get the indentation or line endings slightly wrong: try once more with \r\n.
+        if n == 0 or (n > 1 and not every):
+            # Models often get the line endings slightly wrong: try once more with \r\n.
             alt = old.replace("\n", "\r\n") if old else ""
-            if alt and text.count(alt) == 1:
-                old, new, n = alt, new.replace("\n", "\r\n"), 1
+            m = text.count(alt) if alt else 0
+            if m == 1 or (m > 1 and every):
+                old, new, n = alt, new.replace("\n", "\r\n"), m
             else:
-                return ("لم يُعدّل: النص القديم موجود %d مرة (يجب مرة واحدة بالضبط). اقرأ الملف وانسخ النص كما هو "
-                        "مع أسطر كافية ليكون فريداً." % n)
+                return ("لم يُعدّل: النص القديم موجود %d مرة (يجب مرة واحدة بالضبط، أو replace_all لكل المرات). اقرأ الملف "
+                        "وانسخ النص كما هو مع أسطر كافية ليكون فريداً." % n)
         self._backup(full)
         with open(full, "w", encoding="utf-8", newline="") as f:
-            f.write(text.replace(old, new, 1))
-        return "✓ عُدّل %s" % path
+            f.write(text.replace(old, new) if every else text.replace(old, new, 1))
+        return "✓ عُدّل %s%s" % (path, " (%d مرة)" % n if every and n > 1 else "")
 
     def write_file(self, path, content):
         full = self.path(path)
@@ -262,12 +323,17 @@ class Project:
             f.write(content)
         return "✓ كُتب %s (%d سطر)" % (path, content.count("\n") + 1)
 
-    def run(self, command, timeout=180):
+    def run(self, command, timeout=180, background=False, cwd=""):
         command = (command or "").strip()
         if not command:
             return "أمر فارغ"
+        folder = self.readable(cwd) if cwd else self.root
+        if not os.path.isdir(folder):
+            return "المجلد غير موجود: " + cwd
         if not is_safe(command) and not self.approve("تشغيل أمر داخل المشروع %s:\n%s" % (os.path.basename(self.root), command)):
             return "رفض المستخدم تشغيل هذا الأمر."
+        if str(background).lower() in ("1", "true", "yes"):
+            return self._start_job(command, folder)
         command = re.sub(r"^\s*(python|py|python3)\b", lambda m: '"%s" -X utf8' % (config.find_python() or m.group(1)),
                          command)
         if config.IS_WINDOWS:
@@ -275,8 +341,67 @@ class Project:
             args = [shell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", powershell_line(command)]
         else:
             args = ["/bin/sh", "-c", command]
-        code, out = connectors.run(args, cwd=self.root, timeout=int(timeout or 180))
+        code, out = connectors.run(args, cwd=folder, timeout=int(timeout or 180))
         return "$ %s\n%s\n(exit code %d)" % (command, connectors.clip(out, 6000), code)
+
+    # ---------------------------------------------------------- commands in the background (builds, benchmarks)
+
+    def _start_job(self, command, folder):
+        """A long command (a build, a benchmark, a test run of many minutes) keeps running while the agent works on;
+        job_output shows how far it is. Jobs still running are stopped at the end of the task."""
+        jid = str(len(self.jobs) + 1)
+        log_path = os.path.join(CHECKPOINTS, "%s-job%s.log" % (self.id, jid))
+        log = open(log_path, "w", encoding="utf-8", errors="replace")
+        kw = {"creationflags": 0x08000000 | 0x00000200} if config.IS_WINDOWS else {"start_new_session": True}
+        env = dict(os.environ, PYTHONUNBUFFERED="1", PYTHONIOENCODING="utf-8")
+        proc = subprocess.Popen(self._shell_args(command), cwd=folder, stdout=log, stderr=subprocess.STDOUT,
+                                stdin=subprocess.DEVNULL, env=env, **kw)
+        proc.log_file = log
+        self.jobs[jid] = {"command": command, "proc": proc, "log": log_path, "started": time.time()}
+        time.sleep(2)
+        return ("Running in the background as job %s (pid %d). Check it with job_output (job=%s) while you do other "
+                "things.\nOutput so far:\n%s" % (jid, proc.pid, jid, connectors.clip(_read(log_path), 1500) or "(none yet)"))
+
+    def job_output(self, job=""):
+        chosen = [(job, self.jobs[job])] if job in self.jobs else list(self.jobs.items())
+        if not chosen:
+            return "لا توجد أوامر بالخلفية"
+        out = []
+        for jid, j in chosen:
+            code = j["proc"].poll()
+            state = ("still running (%d s)" % (time.time() - j["started"])) if code is None else "finished, exit code %d" % code
+            out.append("job %s: %s — %s\n%s" % (jid, j["command"], state, connectors.clip(_read(j["log"]), 4000)))
+        return "\n\n".join(out)
+
+    def stop_job(self, job=""):
+        n = 0
+        for jid, j in list(self.jobs.items()):
+            if (not job or jid == job) and j["proc"].poll() is None:
+                _kill_tree(j["proc"])
+                n += 1
+            if not job or jid == job:
+                try:
+                    j["proc"].log_file.close()
+                except (AttributeError, OSError):
+                    pass
+        return "أُوقف %d" % n
+
+    # ---------------------------------------------------------- the task's checklist (shown to the user)
+
+    def todo(self, items):
+        """One line per step: «[x]» done, «[~]» doing now, «[ ]» still to do."""
+        todos = []
+        for line in str(items or "").splitlines():
+            m = re.match(r"^\s*(?:[-*•]|\d+[.)])?\s*\[( |x|X|~|>|-)\]\s*(.+)$", line)
+            if m:
+                todos.append({"text": m.group(2).strip(),
+                              "state": {"x": "done", "X": "done", "~": "doing", ">": "doing", "-": "doing"}.get(m.group(1), "todo")})
+            elif line.strip():
+                todos.append({"text": re.sub(r"^\s*(?:[-*•]|\d+[.)])\s*", "", line).strip(), "state": "todo"})
+        self.todos = todos[:20]
+        mark = {"done": "[x]", "doing": "[~]", "todo": "[ ]"}
+        return "Checklist (%d/%d done):\n%s" % (sum(t["state"] == "done" for t in self.todos), len(self.todos),
+                                                "\n".join("%s %s" % (mark[t["state"]], t["text"]) for t in self.todos))
 
     # ---------------------------------------------------------- servers (web apps, APIs)
 
@@ -334,6 +459,7 @@ class Project:
         return "أُوقف %d" % n
 
     def stop_servers(self):
+        self.stop_job("")
         return self.stop_server("")
 
     def http_request(self, url, method="GET", body=""):
@@ -379,19 +505,37 @@ class Project:
         return out
 
     TOOLS = {
-        "list_files": ("List the project's files (skips .git, node_modules, venv...). Optional folder and glob pattern.",
-                       {"path": "folder, default the project root", "pattern": "glob such as *.py"}, []),
-        "read_file": ("Read a file with line numbers (%d lines per call; use start/end for more)." % MAX_READ_LINES,
+        "todo": ("Keep the task's checklist, shown to the user: one line per step, «[x]» done, «[~]» doing now, «[ ]» to "
+                 "do. Send the whole list again right after each step: the step just finished becomes [x] and the next "
+                 "one [~]. Use it for any task with three or more steps.",
+                 {"items": "the checklist, one step per line"}, ["items"]),
+        "list_files": ("List files (skips .git, node_modules, venv...): the project, or any folder by its absolute path. "
+                       "Optional glob pattern.",
+                       {"path": "folder, default the project root", "pattern": "glob such as *.py or tests/*"}, []),
+        "read_file": ("Read a text file with line numbers (%d lines per call; use start/end for more): a project file "
+                      "or any file by its absolute path (logs, settings)." % MAX_READ_LINES,
                       {"path": "file path", "start": "first line", "end": "last line"}, ["path"]),
-        "search": ("Search all project files for a regex or text; returns path:line: text.",
-                   {"pattern": "regex or text", "glob": "only files matching, e.g. *.py"}, ["pattern"]),
-        "edit_file": ("Replace one exact piece of a file: old must appear exactly once (copy it from read_file "
-                      "without the line numbers, with enough lines to be unique).",
-                      {"path": "file path", "old": "exact existing text", "new": "replacement text"}, ["path", "old", "new"]),
+        "search": ("Search files like grep: a regex (or text) in every text file of the project, or of a folder or file "
+                   "given by path; returns path:line: text. ignore_case, context lines around each hit, files_only "
+                   "(just the files and their counts).",
+                   {"pattern": "regex or text", "glob": "only files matching, e.g. *.py", "path": "folder or file",
+                    "ignore_case": "true to ignore letter case", "context": "lines to show around each hit (0-10)",
+                    "files_only": "true: only the files that match"}, ["pattern"]),
+        "edit_file": ("Replace one exact piece of a project file: old must appear exactly once (copy it from read_file "
+                      "without the line numbers, with enough lines to be unique), or set replace_all for every "
+                      "occurrence (a rename).",
+                      {"path": "file path", "old": "exact existing text", "new": "replacement text",
+                       "replace_all": "true: replace every occurrence"}, ["path", "old", "new"]),
         "write_file": ("Create a new file or rewrite a small one completely.",
                        {"path": "file path", "content": "full file content"}, ["path", "content"]),
-        "run": ("Run a command in the project folder (tests, the program, pip/npm install, git status...). "
-                "Windows PowerShell.", {"command": "command line", "timeout": "seconds, default 180"}, ["command"]),
+        "run": ("Run a command (Windows PowerShell) in the project folder (no cd needed) or in cwd: tests, the program, "
+                "pip/npm, git status/log/diff... Its real output and exit code come back. background=true for a long "
+                "command (a build, a benchmark, a long test run): it keeps running and job_output shows its progress.",
+                {"command": "command line", "timeout": "seconds, default 180", "cwd": "folder to run in",
+                 "background": "true: run in the background"}, ["command"]),
+        "job_output": ("What a command started with background=true has printed so far, and whether it finished "
+                       "(with its exit code).", {"job": "the job number (all jobs when empty)"}, []),
+        "stop_job": ("Stop a command running in the background.", {"job": "the job number (all when empty)"}, []),
         "diff": ("Show every change made so far (unified diff).", {}, []),
         "start_server": ("Start a program that keeps running (web server, API, dev server) in the background and wait "
                          "until it answers; returns its URL and first output. Stopped automatically at the end.",
@@ -408,14 +552,18 @@ class Project:
                  {"target": "URL or HTML file path", "question": "what to check on the page"}, ["target"]),
     }
 
-    def definitions(self):
+    TYPES = {"start": "integer", "end": "integer", "timeout": "integer", "context": "integer", "background": "boolean",
+             "replace_all": "boolean", "ignore_case": "boolean", "files_only": "boolean"}
+
+    @classmethod
+    def definitions(cls):
         out = []
-        for name, (desc, props, required) in self.TOOLS.items():
+        for name, (desc, props, required) in cls.TOOLS.items():
             out.append({"type": "function", "function": {
                 "name": name, "description": desc,
                 "parameters": {"type": "object", "required": required,
-                               "properties": {k: {"type": "integer" if k in ("start", "end", "timeout") else "string",
-                                                  "description": v} for k, v in props.items()}}}})
+                               "properties": {k: {"type": cls.TYPES.get(k, "string"), "description": v}
+                                              for k, v in props.items()}}}})
         return out
 
     def call(self, name, arguments):

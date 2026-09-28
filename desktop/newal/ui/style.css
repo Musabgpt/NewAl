@@ -80,6 +80,13 @@ details.box.ok summary { color: var(--good); }
 details.box.fail summary { color: var(--bad); }
 .verdict { font-size: 13px; margin: 4px 0; }
 .verdict.ok { color: var(--good); } .verdict.bad { color: var(--bad); }
+/* A coding agent's steps: what it says before each group of tool calls, and its checklist */
+.note { font-size: 14px; margin: 8px 0 2px; border-inline-start: 3px solid var(--accent); padding-inline-start: 8px; }
+.note p { margin: 0; }
+.todo { background: var(--card); border: 1px solid var(--line); border-radius: 10px; margin: 6px 0; padding: 6px 10px;
+  font-size: 13px; }
+.todo > div { margin: 2px 0; } .todo .done { color: var(--muted); text-decoration: line-through; }
+.todo .doing { color: var(--accent); font-weight: 600; }
 .content { word-wrap: break-word; }
 .content p { margin: 0 0 10px; }
 .content h1, .content h2, .content h3 { margin: 14px 0 8px; line-height: 1.3; }

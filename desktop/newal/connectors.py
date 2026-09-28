@@ -148,7 +148,9 @@ def shell(command, kind="powershell", cwd=None, timeout=120):
         # own quotes as they are.
         args = 'cmd.exe /d /u /s /c "chcp 65001>nul & %s"' % command if config.IS_WINDOWS else ["bash", "-lc", command]
     elif config.IS_WINDOWS:
+        from .workspace import ps_chain                   # «a && b» is a parse error in Windows PowerShell 5.1
         ps = shutil.which("pwsh") or "powershell.exe"
+        command = ps_chain(command)
         args = [ps, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command",
                 "[Console]::OutputEncoding=[Text.Encoding]::UTF8; " + ("& " if command.lstrip().startswith('"') else "") + command]
     else:

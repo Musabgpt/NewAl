@@ -2339,3 +2339,101 @@ class LaptopFindingsTest(unittest.TestCase):
         self.assertIn("النت ضعيف", r["message"])
         self.assertEqual(ran[0][ran[0].index("--timeout") + 1], "60")          # pip waits longer than its 15 s
         self.assertIn("--retries", ran[0])
+
+
+class AgentLikeProjectTest(unittest.TestCase):
+    """Project mode with the tools and the way of working of the session that fixed NewAl on the laptop (Claude Code):
+    grep-like search, reading logs outside the project, replace_all, long commands in the background, a checklist,
+    and a note before each step."""
+
+    def make(self):
+        root = tempfile.mkdtemp(prefix="agent-")
+        os.makedirs(os.path.join(root, "pkg"))
+        with open(os.path.join(root, "pkg", "calc.py"), "w", encoding="utf-8") as f:
+            f.write("def add(a, b):\n    return a - b\n\n\ndef add_twice(a):\n    return add(a, add(0, a))\n")
+        return root
+
+    def test_grep_like_search_and_reading_outside_the_project(self):
+        from newal import workspace
+        p = workspace.Project(self.make())
+        out = p.search("return a - b", context=1)
+        self.assertIn("pkg/calc.py:2:", out)                 # the hit
+        self.assertIn("pkg/calc.py-1-", out)                 # a line around it
+        self.assertEqual(p.search("RETURN"), "لا نتائج")
+        self.assertIn("pkg/calc.py (2)", p.search("RETURN", ignore_case=True, files_only=True))
+        log = os.path.join(HOME, "outside.log")
+        with open(log, "w", encoding="utf-8") as f:
+            f.write("line 1\nERROR: disk full\n")
+        self.assertIn("ERROR: disk full", p.read_file(log))  # a log outside the project: read only
+        self.assertIn("outside.log:2:", p.search("ERROR", path=log))
+        with self.assertRaises(ValueError):
+            p.path(log)                                      # ... never written
+
+    def test_replace_all_background_jobs_and_checklist(self):
+        import time
+        from newal import workspace
+        p = workspace.Project(self.make(), approve=lambda text: True)
+        self.assertIn("لم يُعدّل", p.edit_file("pkg/calc.py", "add(", "plus("))           # three times: not unique
+        self.assertIn("(3 مرة)", p.edit_file("pkg/calc.py", "add(", "plus(", replace_all=True))
+        self.assertNotIn("add(", p.read_file("pkg/calc.py"))
+        out = p.run("python -c \"import time; print('start'); time.sleep(1); print('end')\"", background=True)
+        self.assertIn("job 1", out)
+        deadline = time.time() + 60
+        while "finished" not in p.job_output("1") and time.time() < deadline:
+            time.sleep(0.5)
+        self.assertIn("finished, exit code 0", p.job_output("1"))
+        self.assertIn("end", p.job_output("1"))
+        p.run("python -c \"import time; time.sleep(120)\"", background=True)
+        p.stop_servers()                                     # the end of the task stops what still runs
+        self.assertNotIn("still running", p.job_output("2"))
+        r = p.todo("- [x] read the failing test\n- [~] fix add()\n- [ ] run the tests")
+        self.assertIn("1/3", r)
+        self.assertEqual([t["state"] for t in p.todos], ["done", "doing", "todo"])
+        props = {d["function"]["name"]: d["function"]["parameters"]["properties"] for d in p.definitions()}
+        self.assertEqual(props["run"]["background"]["type"], "boolean")
+        self.assertEqual(props["search"]["context"]["type"], "integer")
+
+    def test_notes_and_the_checklist_reach_the_chat(self):
+        from newal import workspace
+        events = []
+        t = agent.Turn(None, "fix add", emit=events.append, mode="project")
+        p = workspace.Project(self.make())
+        t._note("بقرأ الاختبار الفاشل أول شي.")
+        t._project_tool(p, "todo", json.dumps({"items": "- [~] read\n- [ ] fix"}))
+        self.assertEqual([e["type"] for e in events], ["note", "todo"])
+        self.assertEqual(t.notes, ["بقرأ الاختبار الفاشل أول شي."])
+        self.assertEqual(t.tools_used, [])                  # neither is evidence that anything was done
+
+    def test_bash_chains_run_in_windows_powershell(self):
+        # The laptop's run: «cd "…" && python -c …» was a parse error in Windows PowerShell 5.1 and cost a step.
+        from newal import workspace
+        self.assertEqual(workspace.ps_chain('cd "C:\a b" && python -m pytest -q'),
+                         'cd "C:\a b"; if ($?) { python -m pytest -q }')
+        self.assertEqual(workspace.ps_chain("a || b"), "a; if (-not $?) { b }")
+        self.assertEqual(workspace.ps_chain('python -c "print(\'x && y\')"'), 'python -c "print(\'x && y\')"')
+        if config.IS_WINDOWS:
+            root = self.make()
+            out = workspace.Project(root, approve=lambda text: True).run('cd "%s" && python -c "print(6 * 7)"' % root)
+            self.assertIn("42", out)
+            self.assertTrue(out.rstrip().endswith("(exit code 0)"), out)
+
+    def test_project_mode_start_is_read_in_advance(self):
+        from newal.engine import Cancelled
+        warm = agent.warm_prompts("coder", project=True)[0]
+        self.assertEqual(warm["messages"][0]["content"], agent._system("project", "coder"))
+        self.assertIn("todo", [d["function"]["name"] for d in warm["tools"]])
+        seen = []
+
+        def first_step(role, messages, tools=None, **kw):
+            seen.append((messages[0]["content"], tools))
+            raise Cancelled()
+        old = agent.pool.chat
+        agent.pool.chat = first_step
+        try:
+            t = agent.Turn(None, "fix it", mode="project", project=self.make())
+            with self.assertRaises(Cancelled):
+                t._project([{"role": "system", "content": agent._system("project", "coder")},
+                            {"role": "user", "content": "fix it"}], "coder")
+        finally:
+            agent.pool.chat = old
+        self.assertEqual(seen[0], (warm["messages"][0]["content"], warm["tools"]))     # the same start: read once

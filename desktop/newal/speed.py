@@ -70,6 +70,27 @@ def _warm():
         _lock.release()
 
 
+def warm_project():
+    """Project mode's start (its instructions and tools) read in advance when 🧑‍💻 is chosen or a project is opened,
+    while the brain is loaded and nobody waits for it: the first step then reads only the task (it read ~3800 tokens,
+    4.6 minutes, on the laptop). llama.cpp keeps the chat's start in its RAM cache meanwhile."""
+    threading.Thread(target=_warm_project, daemon=True).start()
+
+
+def _warm_project():
+    from . import agent
+    role = brain()
+    if not role or not pool.running(role) or agent.busy() or not _lock.acquire(blocking=False):
+        return
+    try:
+        for prompt in agent.warm_prompts(role, project=True):
+            pool.chat(role, prompt["messages"], tools=prompt.get("tools"), max_tokens=1, temperature=0)
+    except Exception:  # noqa: BLE001 - an optimisation, never an error
+        pass
+    finally:
+        _lock.release()
+
+
 def report(n=30):
     """The last model calls: what each read, found cached and wrote, and how fast."""
     calls = list(pool.calls)[-n:]

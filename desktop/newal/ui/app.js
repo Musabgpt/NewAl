@@ -19,7 +19,7 @@ const TOOL_LABEL = {
   vscode: "VS Code", code_task: "💻 كتابة وتجربة برنامج", plan: "📋 الخطة", find_files: "🔍 بحث عن ملفات",
   system_info: "💻 معلومات الجهاز", open_target: "↗ فتح", clipboard_get: "📋 الحافظة", clipboard_set: "📋 نسخ",
   screenshot: "📸 لقطة شاشة", notify: "🔔 إشعار", download_file: "⬇ تنزيل", zip_path: "🗜 ضغط", unzip_path: "🗜 فك ضغط",
-  schedule: "⏰ جدولة",
+  schedule: "⏰ جدولة", todo: "📋 المهام", job_output: "⏳ أمر بالخلفية", stop_job: "⏹ إيقاف أمر",
 };
 
 // ------------------------------------------------------------------ conversations
@@ -328,6 +328,24 @@ function addBot() {
       extras.appendChild(v);
     },
     fix(e) { extras.appendChild(box("", `🔧 طلب الإصلاح ${e.attempt}`, e.prompt)); },
+    note(t) {
+      // What the agent said before a step stays in its steps; the text streamed so far moves there.
+      const p = document.createElement("div");
+      p.className = "note";
+      p.innerHTML = renderMarkdown(t);
+      extras.appendChild(p);
+      text = "";
+      content.innerHTML = "";
+      scrollDown();
+    },
+    todo(items) {
+      let b = extras.querySelector(".todo");
+      if (!b) { b = document.createElement("div"); b.className = "todo"; extras.appendChild(b); }
+      const icon = {done: "✅", doing: "⏳", todo: "▫"};
+      b.innerHTML = "<b>📋 المهام</b>" + (items || []).map(i =>
+        `<div class="${i.state}">${icon[i.state] || "▫"} ${escapeHtml(i.text)}</div>`).join("");
+      scrollDown();
+    },
     image(e) {
       if ((e.caption || "").startsWith("🎨")) {
         // A picture NewAl drew: shown big in the answer, with download and open.
@@ -390,6 +408,7 @@ function addBot() {
       if (!live) for (const p of (meta || {}).images || []) this.image({path: p, caption: (/[\\/]images[\\/][^\\/]+$/.test(p) ? "🎨 " : "📊 ") + p.split(/[\\/]/).pop()});
       meta = meta || {};
       if (!route.textContent && meta.route) route.textContent = `${ROUTE_LABEL[meta.route] || meta.route} · ${meta.model || ""}`;
+      if (!live && (meta.notes || []).length) extras.appendChild(box("", `📝 خطوات العمل (${meta.notes.length})`, meta.notes.join("\n\n")));
       if (draft) draft.querySelector("summary").textContent = "⚙ مسودات الكود";
       if (meta.verified === true) {
         this.verdict({ok: true, reason: (meta.attempts > 1 ? `اشتغل بعد ${meta.attempts} محاولات. ` : "اشتغل من أول محاولة. ") + (meta.judge || "")});
@@ -771,6 +790,8 @@ async function send(text, files, editId) {
       case "run": bot.run(e); break;
       case "verdict": bot.verdict(e); break;
       case "fix": bot.fix(e); break;
+      case "note": bot.note(e.text); break;
+      case "todo": bot.todo(e.items); break;
       case "diff": bot.diff(e); break;
       case "image": bot.image(e); break;
       case "draft_reset": bot.draftReset(); break;
@@ -1730,6 +1751,11 @@ document.addEventListener("DOMContentLoaded", () => {
   $("#toggleSide").onclick = () => document.body.classList.toggle("side-hidden");
   $("#projectBtn").onclick = () => showPanel("project");
   showProject();
+  // Choosing 🧑‍💻 lets the brain read project mode's instructions and tools while the task is being typed (~3 minutes
+  // of reading on a laptop CPU otherwise, at the first step).
+  document.querySelectorAll("input[name=mode]").forEach(r => r.addEventListener("change", () => {
+    if (r.checked && r.value === "project") api("/api/speed-report", {action: "warm_project"});
+  }));
   // Phones: the chat first; the menu slides over it and closes once something in it is chosen.
   const narrow = () => matchMedia("(max-width: 800px)").matches;
   if (narrow()) document.body.classList.add("side-hidden");

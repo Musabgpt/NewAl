@@ -488,6 +488,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json(speed.set_power(act == "power_high"))
             if act == "warm":
                 speed.warm_up()
+            if act == "warm_project":
+                speed.warm_project()
             return self._json(speed_info())
         if p == "/api/memories":
             if body.get("delete"):
@@ -536,7 +538,10 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json(school.check())
             return self._json(school.status())
         if p == "/api/project":
-            return self._json(workspace.open_project(body.get("path", "")))
+            opened = workspace.open_project(body.get("path", ""))
+            if opened.get("ok"):
+                speed.warm_project()          # a project was just opened: its mode is what comes next
+            return self._json(opened)
         if p == "/api/project/undo":
             return self._json(workspace.undo(body.get("id", "")))
         if p == "/api/lessons":

@@ -46,13 +46,31 @@ CODER = ("You are an expert software engineer on Windows 11 (PowerShell, Python,
          "(pytest), and give the command that checks it on its own line: RUN: python -m pytest -q. "
          "Explain briefly in the user's language.")
 
-PROJECT = ("You are NewAl, an autonomous coding agent (like Codex) working inside the user's project folder on Windows. "
-           "First understand: list, search and read the files the task touches before changing anything. Then make "
-           "focused changes with edit_file (an exact, unique piece of the file) or write_file for new files, keeping the "
-           "project's style and structure. After changing code, check it: run the tests or the program with run, read "
-           "the errors and fix them, until it works. Do the work, do not just describe it; do not ask questions you can "
-           "answer by reading the code; do not touch files unrelated to the task. When finished, reply without a tool "
-           "call: a short summary in the user's language of what you changed and how you checked it.")
+# Project mode works the way Claude Code worked on this project on the user's laptop: evidence first, small exact
+# changes, every change checked by running it, a short note before each step, an honest report at the end.
+PROJECT = ("You are NewAl, an autonomous software engineer working in the user's project folder on Windows. Work like a "
+           "careful senior engineer:\n"
+           "1. Understand before changing: read AGENTS.md or the README, list and search the files, read the code the task "
+           "touches. When something is broken, look at the evidence first (the error, test output, logs; read_file and "
+           "search also take absolute paths outside the project) and find the real cause. Never guess what a file or an "
+           "output says.\n"
+           "2. For a task of three or more steps keep a checklist with todo; after each step send it again with that step "
+           "marked [x].\n"
+           "3. Before each group of tool calls write one short sentence in the user's language: what you do now and why "
+           "(the user follows your work live).\n"
+           "4. Change code with edit_file (an exact, unique piece; replace_all for a rename) or write_file for new files; "
+           "keep the project's style; change only what the task needs.\n"
+           "5. Check every change: run the tests or the program with run. When something fails, read the error, fix the "
+           "cause, run again, until it passes. When you fix a bug in a project with tests, add a test that fails "
+           "without the fix.\n"
+           "6. Long commands (builds, benchmarks, servers) run with background=true: check them with job_output and work "
+           "on meanwhile.\n"
+           "7. Be honest: never say something works, passed or was done unless a tool in this conversation showed it; "
+           "say what you could not check.\n"
+           "8. Anything destructive or outside the project (deleting, git push, installing for the whole system) needs "
+           "the user's approval: ask through the tool, or say what you would do.\n"
+           "When finished, reply without a tool call: a short report in the user's language: what you changed (files), how "
+           "you checked it (the commands and what they showed), and what is not checked or still open.")
 
 VERDICT_PROMPT = ("You check whether a program fulfils the user's request. List every thing the request asks for, then "
                   "check each one in the code AND in the output. ok is true only if all of them are done and the printed "
@@ -162,10 +180,24 @@ def brain_tools():
     return tools.definitions(tools.brain_names()) + [CODE_TASK_TOOL]
 
 
-def warm_prompts(role):
+def project_tools():
+    """Project mode's tool list: the same for every project, so its start can be read in advance (warm_prompts)."""
+    from . import mcp
+    defs = workspace.Project.definitions()
+    if config.get("web"):
+        defs += tools.definitions(["web_search", "read_url"])
+    if "docs" in mcp.manager.enabled():
+        defs += mcp.manager.definitions(only=["docs"])
+    return defs
+
+
+def warm_prompts(role, project=False):
     """What a model reads in advance (speed.warm_up): the start that every request shares. A question then only costs
-    its own words (llama.cpp keeps a checkpoint where the user's message starts)."""
+    its own words (llama.cpp keeps a checkpoint where the user's message starts). project: project mode's start, read
+    when 🧑‍💻 is chosen (its first step read ~3800 tokens on the laptop: 4.6 minutes)."""
     hello = {"role": "user", "content": "hi"}
+    if project:
+        return [{"messages": [{"role": "system", "content": _system("project", role)}, hello], "tools": project_tools()}]
     if unified(role, "chat"):
         return [{"messages": [{"role": "system", "content": _system("chat", role)}, hello], "tools": brain_tools(),
                  "extra": pool.no_tool_calls(role)}]
@@ -195,6 +227,7 @@ class Turn:
         # Ask through approve() even when the user runs everything without asking: the quality test decides every
         # approval itself (a refused delete ran for real on a laptop with «run without asking» on).
         self.always_ask = False
+        self.notes = []                # what the model said before its tool calls (project and goal steps)
 
     # -------------------------------------------------------------- entry
 
@@ -244,6 +277,8 @@ class Turn:
         if self.images:
             meta["images"] = list(meta.get("images") or []) + self.images
         meta["tools"] = self.tools_used
+        if self.notes:
+            meta["notes"] = self.notes
         meta["seconds"] = round(time.time() - started, 1)
         if memory.is_temp(self.conv):
             meta["temp"] = True              # a temporary chat (🕶) is not kept for training
@@ -537,6 +572,7 @@ class Turn:
             tps = r["tps"] or tps
             steps_since_check += 1
             if r["tool_calls"]:
+                self._note(r["content"])
                 messages.append(assistant_turn(r, "call_%d_%%d" % steps))
                 for i, c in enumerate(r["tool_calls"]):
                     key = (c["name"], c["arguments"])
@@ -638,9 +674,7 @@ class Turn:
                    ("\nFunctions and classes by file:\n" + symbols + "\n") if symbols else "",
                    "\n\n".join(n for n in notes if n)))
         messages[-1] = dict(messages[-1], content=head + messages[-1]["content"])
-        from . import mcp
-        web_defs = tools.definitions(["web_search", "read_url"]) if config.get("web") else []
-        defs = proj.definitions() + web_defs + (mcp.manager.definitions(only=["docs"]) if "docs" in mcp.manager.enabled() else [])
+        defs = project_tools()
         if self.plan:        # looking only: nothing that changes or runs anything
             defs = [d for d in defs if d["function"]["name"] not in READ_ONLY_BLOCKED]
         steps, checks, reviews, failures, verified, answer, tps, searched = 0, 0, 0, [], None, "", 0, False
@@ -663,6 +697,7 @@ class Turn:
                               extra=self._extra(role, budget=budget), max_tokens=4096)
             tps = r["tps"] or tps
             if r["tool_calls"]:
+                self._note(r["content"])
                 messages.append(assistant_turn(r, "call_%d_%%d" % steps))
                 for i, c in enumerate(r["tool_calls"]):
                     result = self._project_tool(proj, c["name"], c["arguments"])
@@ -866,12 +901,32 @@ class Turn:
         self.tools_used.append({"name": "web_search", "args": query, "result": parts[0][:300]})
         return "What others found for this error (web search):\n\n" + "\n\n".join(parts)
 
+    def _note(self, text):
+        """What the model says before its tool calls («first I read the failing test…»): kept in the chat as a step,
+        the way the user follows a coding agent working, instead of being wiped by the next step."""
+        text = (text or "").strip()
+        if text and not TOOL_MARKUP.search(text):
+            self.emit({"type": "note", "text": text[:600]})
+            self.notes.append(text[:600])          # not a tool: a note is no evidence that anything was done
+
     def _project_tool(self, proj, name, arguments):
+        if name == "todo":
+            # The checklist is shown as the checklist (not as a tool box), and it is no evidence of work done.
+            result = proj.call(name, arguments)
+            self.emit({"type": "todo", "items": proj.todos})
+            return result
         self.emit({"type": "tool", "name": name, "args": arguments, "state": "start"})
         if self.plan and name in READ_ONLY_BLOCKED:
             result = "Plan mode: nothing is changed or run now. Finish the plan."
         elif name == "look":
             result = self._look_page(proj, arguments)
+        elif name == "run":
+            # What the command prints shows in the chat while it runs (tests, installs, builds).
+            connectors.live_output(lambda text: self.emit({"type": "tool", "name": name, "state": "output", "text": text}))
+            try:
+                result = proj.call(name, arguments)
+            finally:
+                connectors.live_output(None)
         elif name in proj.TOOLS:
             result = proj.call(name, arguments)
         elif name.startswith("mcp__"):
