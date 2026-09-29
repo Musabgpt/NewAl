@@ -125,7 +125,7 @@ def basic(label):
     sid = api("/api/sessions", {"root": root, "model": model, "mode": "full-auto", "warm": False})["id"]
     before = memory()
     d, seconds, samples = run_turn(sid, TASK)
-    outputs = [str((e.get("meta") or {}).get("output", "")) for e in tool_ends(d, "bash")]
+    outputs = [str((e.get("meta") or {}).get("output", "")) + e.get("text", "") for e in tool_ends(d, "bash")]
     end = next((e for e in reversed(d.get("events") or []) if e.get("type") == "turn_end"), {})
     try:
         hello = api("/api/file?root=%s&path=hello.py" % urllib.request.quote(root))
@@ -266,7 +266,8 @@ def termux(state, model):
     sid = api("/api/sessions", {"root": root, "model": "phone", "mode": "full-auto", "warm": False},
               base=TERMUX_BASE)["id"]
     d, seconds, _ = run_turn(sid, TASK, base=TERMUX_BASE, limit=1200)
-    outputs = [str((e.get("meta") or {}).get("output", "")) for e in tool_ends(d, "bash")]
+    # (a command the model ran as a background job has its output in the text, not in meta.output)
+    outputs = [str((e.get("meta") or {}).get("output", "")) + e.get("text", "") for e in tool_ends(d, "bash")]
     end = next((e for e in reversed(d.get("events") or []) if e.get("type") == "turn_end"), {})
     print(json.dumps({"termux_task_seconds": round(seconds), "steps": end.get("steps"),
                       "answer": (end.get("answer") or "")[:200], "error": end.get("error")}, indent=1), flush=True)
