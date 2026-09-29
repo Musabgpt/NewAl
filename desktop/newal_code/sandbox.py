@@ -6,8 +6,9 @@ mode). It needs no admin rights and no extra program:
 - macOS: Seatbelt (sandbox-exec with a profile made here), as Codex does; optionally no IP connections.
 - Windows: the command runs at low integrity, the level browsers use for their sandboxes: Windows lets such a process
   write only where the mandatory label is low. The first sandboxed command in a folder labels it low (once; what is
-  made in it later inherits the label), and the temp folder is under AppData\\LocalLow. Git Bash runs through a
-  junction of its own (see msys_view), so it works next to a Git Bash the user has open. The network stays open.
+  made in it later inherits the label), and the temp folder is under AppData\\LocalLow. Git Bash runs from a copy
+  of its own (hard links; see msys_copy), so it works next to a Git Bash the user has open and shares nothing with
+  it. The network stays open.
 
 The launcher (Linux, Windows) is this file run as a script, or the packaged app with --newal-sandbox:
     python sandbox.py --write /project --write /tmp [--no-network] -- bash -c "pytest -q"
@@ -17,6 +18,7 @@ import ctypes
 import os
 import sys
 import tempfile
+import time
 
 _SYS = {"x86_64": (444, 445, 446), "aarch64": (444, 445, 446), "amd64": (444, 445, 446), "arm64": (444, 445, 446)}
 PR_SET_NO_NEW_PRIVS = 38
@@ -346,40 +348,148 @@ def _say(text):
         k32.WriteFile(h, data, len(data), ctypes.byref(w.DWORD()), None)
 
 
-def msys_view(argv):
-    """(argv, environment changes) that start Git Bash through NewAl Code's own path to the Git folder (a junction).
-    MSYS2 programs share their state in kernel objects named after a hash of the folder they run from, and the ones
-    a Git Bash at normal integrity made (a terminal left open) cannot be opened at low integrity: seen from another
-    path, the sandboxed bash and every program it starts share objects of their own. MSYS2's bash is started
-    directly, with the PATH and MSYSTEM Git's bin\\bash.exe would give it (that wrapper finds its folder itself)."""
-    exe = os.path.abspath(argv[0])
-    root, d = None, os.path.dirname(exe)
+def git_root(exe):
+    """The MSYS2 install (Git for Windows' folder) a bash.exe or sh.exe belongs to: bin\\ or usr\\bin\\ of it."""
+    exe = os.path.abspath(exe)
+    if os.path.splitext(os.path.basename(exe))[0].lower() not in ("bash", "sh"):
+        return None
+    d = os.path.dirname(exe)
     for _ in range(3):
         if os.path.isfile(os.path.join(d, "usr", "bin", "msys-2.0.dll")):
-            root = d
-            break
+            return d
         d = os.path.dirname(d)
-    if not root or os.path.basename(exe).lower() not in ("bash.exe", "sh.exe"):
-        return argv, {}
-    link = os.path.join(os.environ.get("LOCALAPPDATA") or tempfile.gettempdir(), "NewAlCode", "git")
+    return None
+
+
+def _msys_home():
+    return os.path.join(os.environ.get("LOCALAPPDATA") or tempfile.gettempdir(), "NewAlCode", "msys")
+
+
+def _remove(path):
+    """Removes a folder made here without following its junctions: a junction or link is removed itself, never what
+    it points to (the copy of Git's folder is mostly junctions to it)."""
+    def link(p):
+        return getattr(os.lstat(p), "st_file_attributes", 0) & 0x400 or os.path.islink(p)
+
+    def unlink(p):
+        try:
+            os.rmdir(p)                 # a directory junction or link
+        except OSError:
+            os.unlink(p)
+
     try:
-        if os.path.lexists(link) and os.path.normcase(os.path.realpath(link)) != os.path.normcase(
-                os.path.realpath(root)):
-            os.rmdir(link)                              # Git moved: a junction is removed like an empty folder
-        if not os.path.lexists(link):
-            import _winapi
-            os.makedirs(os.path.dirname(link), exist_ok=True)
-            _winapi.CreateJunction(root, link)
+        if link(path):
+            unlink(path)
+            return
+        entries = list(os.scandir(path))
+    except OSError:
+        return
+    for e in entries:
+        try:
+            if link(e.path):
+                unlink(e.path)
+            elif e.is_dir(follow_symlinks=False):
+                _remove(e.path)
+            else:
+                os.unlink(e.path)
+        except OSError:
+            pass
+    try:
+        os.rmdir(path)
+    except OSError:
+        pass
+
+
+def msys_copy(root, hardlinks=True, home=None):
+    """NewAl Code's own copy of an MSYS2 install (Git for Windows) for sandboxed commands: its usr\\bin as hard links
+    to the same files (no space taken), or copies where Windows allows no link (an install in Program Files for a
+    user who cannot write there, another drive), and junctions to the rest. MSYS2 programs keep their shared state in
+    kernel objects named after a hash of the real folder of msys-2.0.dll (junctions and symbolic links are resolved; a
+    hard link is a name of its own). Objects a Git Bash at normal integrity made (a terminal left open) cannot be
+    opened at low integrity, and must not be shared with a sandboxed command anyway; run from this folder, the
+    sandboxed bash and every MSYS2 program it starts have objects of their own. One per MSYS2 version, made once;
+    returns its folder, or None (msys_copy.error says why; the command then runs from Git's folder, which works
+    unless a Git Bash is open)."""
+    import hashlib
+    import shutil
+    msys_copy.error = ""
+    home = home or _msys_home()
+    part = None
+    try:
+        bindir = os.path.join(root, "usr", "bin")
+        files = sorted(os.scandir(bindir), key=lambda e: e.name)
+        sig = hashlib.sha1(os.path.normcase(os.path.abspath(root)).encode("utf-8"))
+        for e in files:                              # a Git update makes a new copy (a few ms: no file is opened)
+            st = e.stat()
+            sig.update(("%s|%d|%d\n" % (e.name, st.st_size, st.st_mtime_ns)).encode("utf-8"))
+        tag = sig.hexdigest()[:12]
+        dest = os.path.join(home, tag)
+        if all(os.path.isfile(os.path.join(dest, "usr", "bin", n)) for n in ("msys-2.0.dll", "bash.exe")):
+            return dest
+        import _winapi
+        os.makedirs(home, exist_ok=True)
+        part = "%s.%d.part" % (dest, os.getpid())
+        _remove(part)
+        os.makedirs(os.path.join(part, "usr", "bin"))
+        stats = {"linked": 0, "copied": 0, "bytes": 0}
+        for src, out, skip in ((root, part, "usr"), (os.path.join(root, "usr"), os.path.join(part, "usr"), "bin")):
+            for e in os.scandir(src):
+                if e.name.lower() != skip and e.is_dir():
+                    _winapi.CreateJunction(e.path, os.path.join(out, e.name))
+        for e in files:
+            target = os.path.join(part, "usr", "bin", e.name)
+            if e.is_dir():
+                _winapi.CreateJunction(e.path, target)
+                continue
+            if hardlinks:
+                try:
+                    os.link(e.path, target)
+                    stats["linked"] += 1
+                    continue
+                except OSError:
+                    hardlinks = False               # the same for every file here: copy the rest
+            shutil.copyfile(e.path, target)
+            stats["copied"] += 1
+            stats["bytes"] += e.stat().st_size
+        try:
+            os.rename(part, dest)
+        except OSError:
+            _remove(part)                           # made at the same time by another NewAl Code
+            if not os.path.isfile(os.path.join(dest, "usr", "bin", "msys-2.0.dll")):
+                raise
+        msys_copy.made = stats
+        for name in os.listdir(home):               # copies of versions Git no longer has
+            old = os.path.join(home, name)
+            if name != tag and len(name.split(".")[0]) == 12 and (
+                    not name.endswith(".part") or os.path.getmtime(old) < time.time() - 3600):
+                _remove(old)
+        return dest
     except (OSError, ImportError, AttributeError) as e:
-        msys_view.error = "%s: %s" % (type(e).__name__, e)
+        msys_copy.error = "%s: %s" % (type(e).__name__, e)
+        if part:
+            _remove(part)
+        return None
+
+
+msys_copy.error = ""
+msys_copy.made = None
+
+
+def msys_view(argv):
+    """(argv, environment changes) that start a Git Bash command from NewAl Code's copy of the MSYS2 install (see
+    msys_copy): MSYS2's own bash.exe, with the PATH and MSYSTEM Git's bin\\bash.exe would give it. Other programs, or
+    when no copy can be made, run as they are."""
+    root = git_root(argv[0])
+    view = root and msys_copy(root)
+    if not view:
         return argv, {}
-    paths = [os.path.join(link, "mingw64", "bin"), os.path.join(link, "usr", "bin")]
+    prefix = next((p for p in ("mingw64", "clangarm64", "mingw32", "ucrt64", "clang64")
+                   if os.path.isdir(os.path.join(view, p, "bin"))), None)
+    paths = ([os.path.join(view, prefix, "bin")] if prefix else []) + [os.path.join(view, "usr", "bin")]
     env = {"PATH": os.pathsep.join(paths + [os.environ.get("PATH", "")]),
-           "MSYSTEM": os.environ.get("MSYSTEM") or "MINGW64"}
-    return [os.path.join(link, "usr", "bin", os.path.basename(exe))] + list(argv[1:]), env
-
-
-msys_view.error = ""
+           "MSYSTEM": os.environ.get("MSYSTEM") or (prefix or "msys").upper()}
+    name = os.path.splitext(os.path.basename(argv[0]))[0].lower() + ".exe"
+    return [os.path.join(view, "usr", "bin", name)] + list(argv[1:]), env
 
 
 def run_low_integrity(argv, writable, cwd=None):

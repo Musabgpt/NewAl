@@ -15,9 +15,9 @@ on:
 permissions:
   contents: write
 
-concurrency:
+concurrency:                          # a newer push waits: a phone check already running is not thrown away
   group: newal-code-android-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: false
 
 jobs:
   apk:

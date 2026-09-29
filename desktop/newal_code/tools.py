@@ -795,7 +795,8 @@ def t_bash(ctx, command, timeout=120, background=False):
 
 
 SANDBOX_DENIED = re.compile(r"Permission denied|Operation not permitted|Read-only file system|EACCES|EPERM|"
-                            r"Access is denied|Access to the path .{1,300}? is denied|WinError 5\b")
+                            r"Access is denied|Access to the path .{1,300}? is denied|WinError 5\b|"
+                            r"0xC0000022")         # STATUS_ACCESS_DENIED (MSYS2's fatal errors)
 
 
 def _start_job(ctx, command):

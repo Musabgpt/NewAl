@@ -364,41 +364,96 @@ class SandboxTest(unittest.TestCase):
         time.sleep(5)
         self.assertFalse(os.path.exists(os.path.join(self.root, "late.txt")))
 
+    def other_git_bash(self, seconds):
+        """A Git Bash at normal integrity, like a terminal the user left open: MSYS2's own bash.exe from Git's folder
+        (Git's bin\\bash.exe is a launcher that starts that one, and would leave it running when killed)."""
+        root = self.sb.git_root(tools.shell_command()[0][0])
+        exe = os.path.join(root, "usr", "bin", "bash.exe") if root else tools.shell_command()[0][0]
+        p = subprocess.Popen([exe, "-c", "sleep %d" % seconds])
+        self.addCleanup(lambda: subprocess.run(["taskkill", "/T", "/F", "/PID", str(p.pid)], capture_output=True))
+        time.sleep(3)
+        return p
+
     def test_git_bash_open_at_the_same_time(self):
         """Windows: a Git Bash at normal integrity (a terminal left open) while a sandboxed one runs."""
         if self.sb.kind() != "low-integrity" or tools.shell_command()[1] != "bash":
             self.skipTest("Windows with Git Bash only")
-        other = subprocess.Popen(tools.shell_command()[0] + ["sleep 25"])
-        self.addCleanup(other.kill)
-        time.sleep(3)
+        self.other_git_bash(25)
         m = self.run_in("auto-edit", "echo a > in.txt && echo ok")
         self.assertEqual(m["exit"], 0, m)
         self.assertTrue(os.path.exists(os.path.join(self.root, "in.txt")))
 
     def test_external_commands_in_the_sandbox(self):
         """Programs found on PATH (not only shell builtins) run in the sandbox; on Windows with a Git Bash also
-        running at normal integrity (the case that needs MSYS2's separate namespace)."""
-        other = None
+        running at normal integrity (the case that needs MSYS2 objects of the sandbox's own)."""
         if self.sb.kind() == "low-integrity" and tools.shell_command()[1] == "bash":
-            other = subprocess.Popen(tools.shell_command()[0] + ["sleep 20"])
-            self.addCleanup(other.kill)
-            time.sleep(3)
+            self.other_git_bash(20)
         m = self.run_in("auto-edit", "sleep 0 && ls > listing.txt && cat listing.txt && type sleep")
         print("\n[external commands] exit %s:\n%s" % (m["exit"], m["output"][-1500:]))
         self.assertEqual(m["exit"], 0, m["output"])
         self.assertTrue(os.path.exists(os.path.join(self.root, "listing.txt")))
 
-    def test_windows_git_bash_runs_from_its_own_path(self):
-        """Windows: the sandboxed Git Bash starts through NewAl Code's junction, and MSYS2 sees that as its root
-        (which is what gives it objects apart from a Git Bash the user has open)."""
+    def test_windows_git_bash_runs_from_its_own_copy(self):
+        """Windows: the sandboxed Git Bash runs from NewAl Code's copy of the MSYS2 install (hard links to Git's
+        files), which MSYS2 takes as its root: objects of its own, apart from any Git Bash the user has open."""
         if self.sb.kind() != "low-integrity" or tools.shell_command()[1] != "bash":
             self.skipTest("Windows with Git Bash only")
+        t = time.time()
         argv, env = self.sb.msys_view(tools.shell_command()[0] + ["cygpath -w /"])
-        print("\n[msys view] %s %s error=%r" % (argv[0], env.get("MSYSTEM"), self.sb.msys_view.error))
-        self.assertIn(os.path.join("NewAlCode", "git"), argv[0], self.sb.msys_view.error)
+        print("\n[msys copy] %s %s, %.2f s, made now: %s, error=%r" % (
+            argv[0], env.get("MSYSTEM"), time.time() - t, self.sb.msys_copy.made, self.sb.msys_copy.error))
+        self.assertIn(os.path.join("NewAlCode", "msys"), argv[0], self.sb.msys_copy.error)
+        t = time.time()
+        self.sb.msys_view(tools.shell_command()[0] + ["true"])
+        self.assertLess(time.time() - t, 1.0)                     # made once, then only checked
         m = self.run_in("auto-edit", "cygpath -w / && echo $MSYSTEM")
         print("[msys root in the sandbox] %s" % m["output"].strip())
-        self.assertIn(os.path.join("NewAlCode", "git").lower(), m["output"].lower())
+        self.assertEqual(m["exit"], 0, m["output"])
+        self.assertIn(os.path.join("NewAlCode", "msys").lower(), m["output"].lower())
+
+    def test_windows_msys_copy_without_hard_links(self):
+        """Windows: where Windows makes no hard link (Git in Program Files for a user who cannot write there, another
+        drive) Git's usr\\bin is copied, MSYS2 runs from the copy the same way, and removing a copy leaves Git's
+        folder alone (the copy is mostly junctions to it)."""
+        if self.sb.kind() != "low-integrity" or tools.shell_command()[1] != "bash":
+            self.skipTest("Windows with Git Bash only")
+        root = self.sb.git_root(tools.shell_command()[0][0])
+        home = tempfile.mkdtemp(prefix="nc-msys-")
+        self.addCleanup(self.sb._remove, home)
+        t = time.time()
+        view = self.sb.msys_copy(root, hardlinks=False, home=home)
+        print("\n[msys copy without links] %s, %.1f s: %s error=%r" % (
+            view, time.time() - t, self.sb.msys_copy.made, self.sb.msys_copy.error))
+        self.assertTrue(view, self.sb.msys_copy.error)
+        self.assertEqual(self.sb.msys_copy.made["linked"], 0)
+        out = subprocess.run([os.path.join(view, "usr", "bin", "bash.exe"), "-c", "cygpath -w / && ls /etc/fstab"],
+                             capture_output=True, text=True, timeout=120)
+        self.assertEqual(out.returncode, 0, out.stdout + out.stderr)
+        self.assertTrue(os.path.samefile(out.stdout.splitlines()[0].strip(), view), out.stdout)
+        self.sb._remove(view)
+        self.assertFalse(os.path.exists(view))
+        for part in (("usr", "bin", "msys-2.0.dll"), ("etc", "fstab"), ("usr", "bin", "bash.exe")):
+            self.assertTrue(os.path.isfile(os.path.join(root, *part)), part)
+
+    def test_removing_a_copy_never_follows_its_links(self):
+        outside = tempfile.mkdtemp(prefix="nc-outside-")
+        self.addCleanup(shutil.rmtree, outside, True)
+        with open(os.path.join(outside, "keep.txt"), "w") as f:
+            f.write("x")
+        made = tempfile.mkdtemp(prefix="nc-copy-")
+        os.makedirs(os.path.join(made, "usr", "bin"))
+        with open(os.path.join(made, "usr", "bin", "a.exe"), "w") as f:
+            f.write("x")
+        if os.name == "nt":
+            import _winapi
+            _winapi.CreateJunction(outside, os.path.join(made, "etc"))
+            _winapi.CreateJunction(outside, os.path.join(made, "usr", "share"))
+        else:
+            os.symlink(outside, os.path.join(made, "etc"))
+            os.symlink(outside, os.path.join(made, "usr", "share"))
+        self.sb._remove(made)
+        self.assertFalse(os.path.exists(made))
+        self.assertTrue(os.path.isfile(os.path.join(outside, "keep.txt")))
 
     def test_windows_labels_the_project_once(self):
         if self.sb.kind() != "low-integrity":
