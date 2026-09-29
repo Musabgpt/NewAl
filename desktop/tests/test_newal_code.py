@@ -644,6 +644,37 @@ class AgentLoopTest(unittest.TestCase):
         self.assertTrue(llm.requests[0]["chat_template_kwargs"]["enable_thinking"])
         self.assertEqual(llm.requests[0]["thinking_budget_tokens"], 256)
 
+    def test_local_model_stopped_by_the_pool_is_restarted(self):
+        # A sub-agent's model took the RAM, so the pool stopped this one: its next request starts it again.
+        llm = FakeLLM(["done"])
+
+        class FakeServer:
+            path, ctx, mtp, speculative, threads, used = "/m.gguf", 32768, False, "", 4, 0
+
+            def __init__(self, url, alive):
+                self.url, self._alive = url, alive
+
+            def alive(self):
+                return self._alive
+
+            def take_slot(self, owner):
+                return 0
+        dead, live = FakeServer("http://127.0.0.1:9", False), FakeServer(llm.url[:-len("/v1")], True)
+        client = models.Client({"id": "fake-local", "name": "fake", "provider": "local"},
+                               providers.LlamaCpp(dead.url + "/v1"), "fake", dead)
+        started = []
+        orig = runtime.pool.get
+        runtime.pool.get = lambda path, **kw: started.append(path) or live
+        try:
+            ag = agentmod.Agent(session.Session(make_project(CALC)), client=client)
+            ag.warm = lambda: 0
+            self.assertEqual(ag.run("say done"), "done")
+        finally:
+            runtime.pool.get = orig
+            llm.close()
+        self.assertEqual(started, ["/m.gguf"])
+        self.assertIs(client.server, live)
+
     def test_anthropic_model_runs_the_loop(self):
         llm = FakeLLM([{"tools": [("edit", {"path": "calc.py", "old": "return a - b", "new": "return a + b"})]},
                        "fixed"])

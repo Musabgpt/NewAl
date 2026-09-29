@@ -444,6 +444,12 @@ class Agent:
                 self.emit({"type": "tool_intent", "name": piece})
         if client.local:
             extra["parallel_tool_calls"] = True
+            if client.stopped():
+                # Another model took its RAM (a sub-agent or a role on a different local model): start it again and
+                # put back the fixed start it had read; the conversation after it is read again.
+                self.emit({"type": "status", "text": "restarting %s…" % client.id})
+                client.revive()
+                self.warm()
         max_tokens = int(client.spec.get("max_tokens") or (4096 if client.local else 16384))
         started = time.time()
         comp = client.chat(self.request_messages(), tools=self.schemas(), owner=s.id, max_tokens=max_tokens,

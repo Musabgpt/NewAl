@@ -198,9 +198,23 @@ class Client:
             return r
         return self.spec.get("reasoning") or ("off" if self.local else "medium")
 
+    def stopped(self):
+        """A local model whose server the pool stopped to make room for another one (RAM)."""
+        return bool(self.server) and not self.server.alive()
+
+    def revive(self):
+        """Starts this model's server again (the pool makes room for it in turn)."""
+        old = self.server
+        self.server = runtime.pool.get(old.path, ctx=old.ctx, mtp=old.mtp, speculative=old.speculative,
+                                       threads=old.threads)
+        self.provider = providers.LlamaCpp(self.server.url + "/v1")
+        return self.server
+
     def chat(self, messages, tools=None, owner="main", **kw):
         extra = dict(kw.pop("extra", None) or {})
         if self.server:
+            if self.stopped():
+                self.revive()
             extra.setdefault("id_slot", self.server.take_slot(owner))
             self.server.used = __import__("time").time()
             kw.setdefault("temperature", self.spec.get("temperature", 0.2))

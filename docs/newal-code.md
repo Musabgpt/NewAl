@@ -9,6 +9,12 @@ or a terminal UI.
 Code: `desktop/newal_code/` (standard library only). Tests: `desktop/tests/test_newal_code.py`. Speed test:
 `desktop/bench/`.
 
+![A thread in the web app: explored, edited (with the diff), ran the tests, answered](images/newal-code-thread.png)
+
+![The review pane: the thread's changes, Undo last turn, Commit / Commit and push / Commit and create PR](images/newal-code-review.png)
+
+(Screenshots of a scripted demo run: `desktop/tools/ui_demo.py` and `ui_shots.js`.)
+
 ## Running it
 
 | How | Command |
@@ -32,7 +38,7 @@ It uses NewAl desktop's `llama-server` and the models NewAl already downloaded (
             │            ▼  │ results
             │      permissions ─► hooks ─► approval (UI) ─► tools: read edit write apply_patch glob grep
             │                                                      bash job todo task web_search web_fetch
-            │                                                      skill mcp__*
+            │                                                      skill notebook_edit mcp__*
             │      checkpoints (undo) · verify (project tests) · Stop hooks · /goal check · compaction
             ▼
       web app (server.py + ui/) · terminal (tui.py) · exec
@@ -53,7 +59,7 @@ It uses NewAl desktop's `llama-server` and the models NewAl already downloaded (
 - **Few tokens written.** On a CPU, writing is the slowest part (~6 tokens/s for a 4B model). The model edits with
   short exact replacements (files are shown as they are, so what it copies matches), calls independent tools
   together, and ends with one or two sentences. Files with multi-token-prediction heads draft several tokens per step
-  (+50% writing speed, measured).
+  (measured: +50% when writing a whole file, +33% on agent steps).
 - **Thinking only where it pays.** A local model does not think before acting on a task: running the change checks it.
   It thinks briefly before answering a question (nothing will check the answer), and right after a change fails its
   check (longer the second time). When the same error comes back, the result says so.
@@ -116,11 +122,16 @@ from its git URL or folder).
 | Any other endpoint | Models → "Add an API or a server" (base URL, model name, key variable), or `"models"` in `~/.newal-code/config.json` |
 
 Several models on one task: **roles** map a job to a model (`"roles": {"fast": "qwen3.5-2b", "review":
-"anthropic/claude-sonnet-4-5", "plan": "qwen3.6-35b-a3b-q2"}`, also in Models → Roles). The explore sub-agent uses
+"qwen3.5-9b", "plan": "anthropic/claude-sonnet-4-5"}`, also in Models → Roles). The explore sub-agent uses
 `fast`, the reviewer uses `review`, `/plan` uses `plan`, and any sub-agent file can name its own `model:`.
 **Teams** are named sets of roles (`"teams": {"hybrid": {"main": "qwen3.5-9b", "review": "openrouter/..."}}`).
 Local models share the RAM budget: a second one loads only when both fit, and otherwise the least recently used one
-stops.
+stops and starts again when it is needed (its fixed start comes back from disk; the conversation is read again).
+
+Measured with a 16 GB computer's budget (12.0 GB): main model Qwen3.5 9B fixed a bug (172 s), then `/review` ran the
+reviewer sub-agent on Qwen3.5 4B (the `review` role). Both need 12.7 GB, so the 4B took the 9B's place, and the 9B
+came back for the main agent's answer (the review turn took 445 s in all, most of it the 9B reading the conversation
+again). Where both fit, nothing stops: a 4B with a 2B helper needs about 7.4 GB, which even 12 GB computers have.
 
 ## RAM: 8 GB to 16 GB
 
@@ -130,11 +141,29 @@ container's limit) and keeps a share for everything else (2.8 GB on 8 GB, 3.3 GB
 state, MTP heads) and counts everything llama-server will hold: the weights, the KV cache (the MTP head's too), each
 conversation's recurrent state and the copies llama.cpp keeps of it to step back to (capped at 3 per conversation:
 by default it keeps up to 32, about 1.6 GB per conversation on Qwen3.5-4B, growing with every request), the compute
-buffers, and a RAM cache for other threads that only takes what is left. It picks the longest context that fits,
-with an f16 KV cache, or q8_0 when that buys a longer context. When nothing fits, the model does not start and the
-user is told why.
+buffers, and a RAM cache for other threads that only takes what is left. It picks the longest context that fits
+(16k at least: less is too little for an agent), with an f16 KV cache, or q8_0 when that buys a longer context.
+When nothing fits, the model does not start and the user is told why.
 
-RESULTS_RAM
+Measured on Linux (`desktop/bench/run_limited.py`): each computer is simulated by one memory limit the size of its
+usable RAM, shared by NewAl Code, the model and a second process that holds the share kept for Windows and the other
+apps. NewAl Code reads the limit as the computer's RAM, plans for it, and the whole speed test (below) runs inside:
+
+| Computer (usable RAM) | Kept for Windows and apps | Model (the default there) | Plan | Speed test inside the limit |
+|---|---|---|---|---|
+| 8 GB (7.8 GB) | 2.8 GB | Qwen3.5 4B + MTP | 32k context, 4.95 GB | 6 of 6 in 495 s; model + NewAl Code used at most 4.91 GB; nothing killed |
+| 12 GB (11.8 GB) | 3.3 GB | Qwen3.5 9B + MTP | 32k context, 7.8 GB | 6 of 6 in 592 s; nothing killed |
+| 16 GB (15.8 GB) | 3.8 GB | Qwen3.5 9B + MTP | 32k context, 7.8 GB, and 2 GB of RAM cache for other threads | the 12 GB case with 3.5 GB to spare |
+
+The kernel read back only 684 and 109 pages from disk (no thrashing). On 8 GB the limit was really reached: the OS
+took back the pages of the model file that llama.cpp had copied into its faster layout, as expected, and the run was
+not slower than the same model without a limit (495 s against 550 s). These two runs also read each new thread's
+project context before the task was sent, as the app does while the user types (about 70 tokens, 2 s per task
+here); the runs in the next section did not.
+
+The current NewAl's brain, Qwen3.6-35B-A3B IQ3_S (15.35 GB), fits none of these computers. Its 2-bit version
+(11.8 GB) needs about 12.7 GB with its buffers (measured), more than a 16 GB computer can spare, so NewAl Code offers
+it from 18 GB.
 
 ## Speed
 
@@ -161,7 +190,26 @@ Same model file, Qwen3.5-4B Q4_K_M (what the current NewAl runs on an 8 GB compu
 six right where the current NewAl got four. It made 25 model calls instead of 80 and wrote 2.6-2.9k tokens instead
 of 11.3k: on a CPU the time goes into writing, so writing less is what counts.
 
-RESULTS_MTP
+With the same model's MTP file (what NewAl Code downloads for 8 GB; the current NewAl drafts with the MTP heads too
+when its file has them, so both draft here):
+
+| Task | Current NewAl + MTP | NewAl Code + MTP | NewAl Code + MTP, 8 GB simulated |
+|---|---|---|---|
+| Fix a bug | 188 s ✓ | 43 s ✓ | 37 s ✓ |
+| Add a command-line option | 839 s ✓ | 259 s ✓ | 233 s ✓ |
+| Implement a function | 225 s ✓ | 85 s ✓ | 78 s ✓ |
+| Rename across files | 524 s ✓ | 87 s ✓ | 80 s ✓ |
+| Answer a question about the code | 67 s ✓ | 31 s ✓ | 20 s ✓ |
+| Fix a crash from its traceback | 384 s ✓ | 45 s ✓ | 47 s ✓ |
+| **Total** | **2227 s, 6 of 6 right** | **550 s, 6 of 6** | **495 s, 6 of 6** |
+
+**4.0 times as fast** with MTP on both sides (+305% speed, 75% less time), and 4.5 times in the 8 GB simulation
+(which also read each thread's project context ahead, see above). MTP made the current NewAl 1.29 times faster and
+NewAl Code 1.13 times: NewAl Code writes fewer tokens (3.2k against 11.6k), so there is less for drafting to speed
+up.
+
+The goal was "at least 90% faster": 1.9 times the speed. NewAl Code is 4.0 to 4.6 times as fast on the same model,
+and on 8-16 GB computers the current NewAl cannot run its own default model at all. In time saved that is 75-78%.
 
 Where the time went (the six tasks, same model file):
 
