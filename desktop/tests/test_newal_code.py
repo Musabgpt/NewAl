@@ -70,6 +70,37 @@ class ToolsTest(unittest.TestCase):
         a = agentmod.Agent(s, client=None)
         return agentmod.ToolContext(a)
 
+    def test_notebooks_read_and_edit(self):
+        nb = {"nbformat": 4, "nbformat_minor": 5, "metadata": {}, "cells": [
+            {"cell_type": "markdown", "id": "intro", "metadata": {}, "source": ["# Sales\n"]},
+            {"cell_type": "code", "id": "load", "metadata": {}, "execution_count": 1, "source": ["x = 2\n", "x * 21"],
+             "outputs": [{"output_type": "execute_result", "execution_count": 1, "metadata": {},
+                          "data": {"text/plain": ["42"]}}]}]}
+        root = make_project({"sales.ipynb": json.dumps(nb)})
+        self.assertIn("notebook_edit", tools.default_set(None, root))
+        self.assertNotIn("notebook_edit", tools.default_set(None, make_project(CALC)))
+        c = self.ctx(root)
+        text, _ = tools.call(c, "read", {"path": "sales.ipynb"})
+        self.assertIn("# cell 1 (code, id load)\nx = 2\nx * 21", text)
+        self.assertIn("# output of cell 1\n42", text)
+        text, meta = tools.call(c, "notebook_edit", {"path": "sales.ipynb", "cell": "1", "source": "x = 3\nx * 14"})
+        self.assertIn("Replaced cell 1", text)
+        self.assertIn("+x = 3", meta["diff"])
+        tools.call(c, "notebook_edit", {"path": "sales.ipynb", "cell": "load", "mode": "insert",
+                                        "source": "print(undefined_name)"})
+        with open(os.path.join(root, "sales.ipynb")) as f:
+            saved = json.load(f)
+        self.assertEqual([x["cell_type"] for x in saved["cells"]], ["markdown", "code", "code"])
+        self.assertEqual(saved["cells"][1]["outputs"], [])          # the old output no longer belongs to it
+        self.assertEqual(saved["cells"][1]["source"], ["x = 3\n", "x * 14"])
+        self.assertTrue(saved["cells"][2]["id"])
+        text, _ = tools.call(c, "notebook_edit", {"path": "sales.ipynb", "cell": 2, "source": "%matplotlib inline\nprint(x)"})
+        self.assertNotIn("Problems", text)                             # magics and earlier cells' names are fine
+        text, _ = tools.call(c, "notebook_edit", {"path": "sales.ipynb", "cell": 0, "mode": "delete"})
+        self.assertIn("(2 cells now)", text)
+        d = permissions.decide("auto-edit", "notebook_edit", "edit", {"path": "sales.ipynb"}, root, {})
+        self.assertEqual(d.action, "allow")
+
     def test_read_edit_write_and_undo(self):
         root = make_project(CALC)
         c = self.ctx(root)
@@ -208,10 +239,22 @@ class SandboxTest(unittest.TestCase):
         self.outside = tempfile.mkdtemp(prefix=".nc-outside-", dir=HERE)
         self.addCleanup(shutil.rmtree, self.outside, True)
 
-    def run_in(self, mode, command):
+    def run_in(self, mode, command, dirs=()):
         s = session.Session(self.root, mode=mode)
+        s.dirs = list(dirs)
         ctx = agentmod.ToolContext(agentmod.Agent(s))
         return tools.call(ctx, "bash", {"command": command})[1]
+
+    def test_added_folder_is_writable_and_inside(self):
+        m = self.run_in("auto-edit", "echo b > %s/out.txt" % self.outside, dirs=[self.outside])
+        self.assertTrue(m["sandboxed"])
+        self.assertEqual(m["exit"], 0, m)
+        self.assertTrue(os.path.exists(os.path.join(self.outside, "out.txt")))
+        s = session.Session(self.root)
+        s.dirs = [self.outside]
+        ctx = agentmod.ToolContext(agentmod.Agent(s))
+        self.assertTrue(tools.inside(ctx, os.path.join(self.outside, "x.py")))       # edits there need no approval
+        self.assertFalse(tools.inside(ctx, os.path.join(HERE, "x.py")))
 
     def test_auto_edit_writes_only_in_the_project(self):
         m = self.run_in("auto-edit", "echo a > in.txt && echo b > %s/out.txt" % self.outside)
@@ -264,6 +307,35 @@ class ExtensionsTest(unittest.TestCase):
         self.assertIn("explore", ag)
 
 
+class PluginsTest(unittest.TestCase):
+    def test_plugin_brings_commands_agents_skills_hooks_and_mcp(self):
+        from newal_code import plugins
+        src = make_project({
+            ".claude-plugin/plugin.json": json.dumps({"name": "lint-kit", "description": "Lint helpers",
+                                                      "version": "1.0.0"}),
+            "commands/lint.md": "---\ndescription: Lint the project\n---\nRun the linter on $ARGUMENTS\n",
+            "agents/linter.md": "---\nname: linter\ndescription: Fixes lint\ntools: Read, Edit\n---\nFix lint.\n",
+            "skills/style/SKILL.md": "---\nname: house-style\ndescription: The house style\n---\nTabs.\n",
+            "hooks/hooks.json": json.dumps({"hooks": {"PostToolUse": [{"matcher": "Edit", "hooks": [
+                {"type": "command", "command": "${CLAUDE_PLUGIN_ROOT}/fmt.sh"}]}]}}),
+            ".mcp.json": json.dumps({"mcpServers": {"lintd": {"command": "${CLAUDE_PLUGIN_ROOT}/server"}}}),
+        })
+        root = make_project(CALC)
+        p = plugins.install(src, root=root)
+        self.assertEqual((p["name"], p["version"]), ("lint-kit", "1.0.0"))
+        self.assertEqual(sorted(p["has"]), ["agents", "commands", "hooks", "mcp", "skills"])
+        self.assertIn("lint", extensions.custom_commands(root))
+        self.assertIn("linter", extensions.agents(root))
+        self.assertIn("house-style", extensions.skills(root))
+        hook = settings.project(root)["hooks"]["PostToolUse"][-1]["hooks"][0]["command"]
+        self.assertEqual(hook, os.path.join(p["dir"], "fmt.sh"))
+        self.assertEqual(mcp.configs(root)["lintd"]["command"], os.path.join(p["dir"], "server"))
+        with self.assertRaises(ValueError):
+            plugins.install(src, root=root)                 # already there
+        plugins.remove("lint-kit", root)
+        self.assertNotIn("lint", extensions.custom_commands(root))
+
+
 class HooksTest(unittest.TestCase):
     def test_pre_tool_use_blocks_and_prompt_context(self):
         py = sys.executable
@@ -282,7 +354,7 @@ class HooksTest(unittest.TestCase):
 
 
 class RamTest(unittest.TestCase):
-    def fake_gguf(self, path, arch="qwen35", layers=32, kv_heads=4, head_dim=256, interval=4, size_mb=100):
+    def fake_gguf(self, path, arch="qwen35", layers=32, kv_heads=4, head_dim=256, interval=4, size_mb=100, nextn=0):
         def s(x):
             b = x.encode()
             return struct.pack("<Q", len(b)) + b
@@ -294,8 +366,12 @@ class RamTest(unittest.TestCase):
                ("%s.attention.head_count_kv" % arch, 4, struct.pack("<I", kv_heads)),
                ("%s.attention.key_length" % arch, 4, struct.pack("<I", head_dim)),
                ("%s.attention.value_length" % arch, 4, struct.pack("<I", head_dim))]
-        if interval:
+        if interval:        # a hybrid model: Gated DeltaNet layers between the attention ones (Qwen3.5's sizes)
             kvs.append(("%s.full_attention_interval" % arch, 4, struct.pack("<I", interval)))
+            for k, v in (("conv_kernel", 4), ("state_size", 128), ("group_count", 16), ("inner_size", 4096)):
+                kvs.append(("%s.ssm.%s" % (arch, k), 4, struct.pack("<I", v)))
+        if nextn:
+            kvs.append(("%s.nextn_predict_layers" % arch, 4, struct.pack("<I", nextn)))
         with open(path, "wb") as f:
             f.write(b"GGUF" + struct.pack("<I", 3) + struct.pack("<Q", 0) + struct.pack("<Q", len(kvs)))
             for k, t, v in kvs:
@@ -308,6 +384,29 @@ class RamTest(unittest.TestCase):
         info = gguf.info(p)
         self.assertEqual(info["attention_layers"], 8)
         self.assertEqual(info["kv_bytes_per_token"], 8 * 4 * 512 * 2)
+        # 24 recurrent layers, each with a 128 x 4096 state and a 3 x 8192 convolution state, in f32: ~50 MB
+        self.assertEqual(info["state_bytes"], 24 * (128 * 4096 + 3 * 8192) * 4)
+        self.assertEqual(info["draft_kv_bytes_per_token"], 0)
+        # A file with an MTP head: one more block, which is not one of the model's own layers
+        mtp = os.path.join(tempfile.mkdtemp(), "mtp.gguf")
+        self.fake_gguf(mtp, layers=33, nextn=1)
+        info = gguf.info(mtp)
+        self.assertEqual((info["layers"], info["attention_layers"], info["nextn"]), (32, 8, 1))
+        self.assertEqual(info["state_bytes"], 24 * (128 * 4096 + 3 * 8192) * 4)
+        self.assertEqual(info["draft_kv_bytes_per_token"], 4 * 512 * 2)
+
+    def test_plan_counts_states_and_checkpoints(self):
+        p = os.path.join(tempfile.mkdtemp(), "m.gguf")
+        self.fake_gguf(p, size_mb=2800)
+        plan = runtime.plan(p, budget=64 * 1024 ** 3)
+        info = plan["info"]
+        states = 2 * info["state_bytes"] * (1 + runtime.CHECKPOINTS)          # 2 slots, each with its checkpoints
+        self.assertGreaterEqual(plan["need"], info["size"] + plan["kv"] + states)
+        s = runtime.Server(p, budget=64 * 1024 ** 3)
+        args = s.args("llama-server")
+        self.assertEqual(args[args.index("--ctx-checkpoints") + 1], str(runtime.CHECKPOINTS))
+        # the RAM cache for other conversations only takes what the plan leaves
+        self.assertLessEqual(s.cache_ram_mb() * 1024 * 1024, s.plan["budget"] - s.plan["need"])
 
     def test_tiers_and_plans_fit(self):
         GB = 1024 ** 3
@@ -535,6 +634,16 @@ class AgentLoopTest(unittest.TestCase):
         self.assertEqual(llm.requests[2]["thinking_budget_tokens"], 384)
         self.assertTrue(all(r["cache_prompt"] and r["parallel_tool_calls"] for r in llm.requests))
 
+    def test_local_model_thinks_before_answering_a_question(self):
+        llm = FakeLLM(["It adds (well, it subtracts: a bug)."])
+        spec = {"id": "fake-local", "name": "fake", "provider": "local"}
+        client = models.Client(spec, providers.LlamaCpp(llm.url), "fake")
+        ag = agentmod.Agent(session.Session(make_project(CALC)), client=client)
+        ag.run("What does add() in calc.py do?")
+        llm.close()
+        self.assertTrue(llm.requests[0]["chat_template_kwargs"]["enable_thinking"])
+        self.assertEqual(llm.requests[0]["thinking_budget_tokens"], 256)
+
     def test_anthropic_model_runs_the_loop(self):
         llm = FakeLLM([{"tools": [("edit", {"path": "calc.py", "old": "return a - b", "new": "return a + b"})]},
                        "fixed"])
@@ -580,6 +689,34 @@ class ContextTest(unittest.TestCase):
             self.assertEqual(a._prefix_text(client, "S", []), "<|im_start|>system\nS<|im_end|>\n<|im_start|>")
         finally:
             providers.post_json = orig
+
+    def test_project_context_is_read_while_the_user_types(self):
+        class FakeServer:
+            url = "http://x"
+        root = make_project(dict(CALC, **{"AGENTS.md": "Use tabs.\n"}))
+        a = agentmod.Agent(session.Session(root))
+        sent = []
+
+        def post(url, body, timeout=0):
+            sent.append((url, body))
+            if url.endswith("/apply-template"):
+                return {"prompt": "<|im_start|>system\nS<|im_end|>\n<|im_start|>user\n" + body["messages"][1]["content"]
+                                  + "<|im_end|>\n<|im_start|>assistant\n"}
+            return {}
+        orig = providers.post_json
+        try:
+            providers.post_json = post
+            a._warm_context(type("C", (), {"server": FakeServer})(), "S", [], 1)
+        finally:
+            providers.post_json = orig
+        url, body = sent[-1]
+        self.assertTrue(url.endswith("/completion"))
+        self.assertEqual((body["n_predict"], body["id_slot"]), (0, 1))
+        self.assertTrue(body["prompt"].endswith("</context>"))
+        self.assertIn("Use tabs.", body["prompt"])
+        # The first request's message starts with exactly the text that was read in advance.
+        content, _ = a._user_content("fix add in calc.py", [])
+        self.assertTrue(("<|im_start|>system\nS<|im_end|>\n<|im_start|>user\n" + content).startswith(body["prompt"]))
 
 
 class ServerTest(unittest.TestCase):
@@ -649,8 +786,14 @@ class ServerTest(unittest.TestCase):
         meta = self.call("/api/sessions/%s" % sid)
         self.assertEqual(meta["meta"]["title"], "fix add in calc.py")
         self.assertTrue(any(e["type"] == "tool_end" for e in meta["events"]))
-        r = self.call("/api/sessions/%s/commit" % sid, {"message": "fix add"})
-        self.assertTrue(r["ok"], r)
+        origin = tempfile.mkdtemp()
+        util_git("init", "-q", "--bare", origin)
+        util_git("remote", "add", "origin", origin)
+        # "Commit and create PR" from master: a branch of its own, committed and pushed (no gh here: no PR itself)
+        r = self.call("/api/sessions/%s/commit" % sid, {"message": "Fix add", "then": "pr"})
+        self.assertTrue(r["ok"] and r["pushed"], r)
+        pushed = __import__("subprocess").run(["git", "branch", "--list"], cwd=origin, capture_output=True, text=True)
+        self.assertIn("newal/fix-add", pushed.stdout)
         self.call("/api/sessions/%s/undo" % sid, {})
         with open(os.path.join(root, "calc.py")) as f:
             self.assertIn("a - b", f.read())
@@ -688,6 +831,12 @@ class ServerTest(unittest.TestCase):
         self.assertIn("AGENTS.md", self.call("/api/sessions/%s/send" % sid, {"text": "# always use tabs"})["reply"])
         with open(os.path.join(root, "AGENTS.md")) as f:
             self.assertIn("- always use tabs", f.read())
+        perms = self.call("/api/sessions/%s/send" % sid, {"text": "/permissions"})["reply"]
+        self.assertIn("Mode: read-only", perms)
+        self.assertIn("deny:", perms)
+        other = tempfile.mkdtemp()
+        self.assertIn("Added", self.call("/api/sessions/%s/send" % sid, {"text": "/add-dir " + other})["reply"])
+        self.assertIn(other, self.call("/api/sessions/%s" % sid)["meta"]["dirs"])
         r = self.call("/api/sessions/%s/send" % sid, {"text": "/new"})
         self.assertTrue(r.get("new"))
         self.assertNotEqual(r["session"], sid)
@@ -697,6 +846,27 @@ class ServerTest(unittest.TestCase):
         self.assertIn(root, state["projects"])
         models_ = self.call("/api/models")
         self.assertIn("qwen3.5-4b", [m["id"] for m in models_["models"]])
+
+    def test_notification_and_session_end_hooks(self):
+        root = make_project(CALC)
+        marks = tempfile.mkdtemp().replace("\\", "/")
+        os.makedirs(os.path.join(root, ".newal"))
+        with open(os.path.join(root, ".newal", "settings.json"), "w") as f:
+            json.dump({"hooks": {e: [{"hooks": [{"type": "command", "command": 'echo x >> "%s/%s"' % (marks, e)}]}]
+                                 for e in ("Notification", "SessionEnd")}}, f)
+        sid = self.call("/api/sessions", {"root": root, "mode": "ask", "warm": False})["id"]
+        self.llm.script[:] = [{"tools": [("edit", {"path": "calc.py", "old": "return a - b", "new": "return a + b"})]},
+                              "Fixed add."]
+        self.call("/api/sessions/%s/send" % sid, {"text": "fix add in calc.py"})
+        ap = self.wait_for(lambda e: e.get("type") == "approval" and e.get("session") == sid)
+        end = time.time() + 20
+        while not os.path.exists(os.path.join(marks, "Notification")) and time.time() < end:
+            time.sleep(0.05)
+        self.assertTrue(os.path.exists(os.path.join(marks, "Notification")))      # the user is needed: told
+        self.call("/api/approvals/%s" % ap["id"], {"answer": "deny"})
+        self.wait_for(lambda e: e.get("type") == "turn_end" and e.get("session") == sid)
+        self.call("/api/sessions/delete", {"id": sid})
+        self.assertTrue(os.path.exists(os.path.join(marks, "SessionEnd")))
 
 
 class CliTest(unittest.TestCase):
@@ -710,11 +880,14 @@ class CliTest(unittest.TestCase):
         known = dict(settings.user().get("models") or {})
         known["fake2"] = {"provider": "openai", "base_url": llm.url, "model": "fake"}
         settings.save({"models": known})
+        last = os.path.join(tempfile.mkdtemp(), "answer.txt")
         p = subprocess.run([sys.executable, "-m", "newal_code", "exec", "fix add", "--model", "fake2", "--json",
-                            "--cd", root], cwd=os.path.dirname(HERE), capture_output=True, text=True, timeout=120,
-                           env=env)
+                            "--cd", root, "-o", last, "--max-steps", "5"], cwd=os.path.dirname(HERE),
+                           capture_output=True, text=True, timeout=120, env=env)
         llm.close()
         self.assertEqual(p.returncode, 0, p.stderr[-2000:])
+        with open(last) as f:
+            self.assertEqual(f.read().strip(), "fixed it")
         events = [json.loads(l) for l in p.stdout.splitlines() if l.startswith("{")]
         kinds = [e["type"] for e in events]
         self.assertIn("tool_end", kinds)

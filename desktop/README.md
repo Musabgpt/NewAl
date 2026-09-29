@@ -17,9 +17,9 @@
 `python -m newal_code app` من مجلد `desktop`. التفاصيل كلها: [docs/newal-code.md](../docs/newal-code.md).
 - **بيشتغل متل Claude Code وCodex:** بيقرأ ويبحث ويعدّل ويشغّل الأوامر والاختبارات لحتى تخلص المهمة، وبعدين
   الكمبيوتر بيتأكد باختبارات المشروع. فيه كل شي تعودت عليه هناك: أوضاع الصلاحيات (قراءة بس، اسأل، وكيل، وصول
-  كامل)، AGENTS.md وCLAUDE.md، المهارات (SKILL.md)، الأوامر الخاصة (/)، الـ hooks، MCP، الوكلاء الفرعيين،
-  `/goal`، `/plan`، `/review`، `/compact`، `/undo`، محادثات بتكمل بعدين، worktree لكل محادثة، وصندوق معزول
-  للأوامر على لينكس.
+  كامل)، AGENTS.md وCLAUDE.md، المهارات (SKILL.md)، الأوامر الخاصة (/)، الـ hooks، MCP، الإضافات (plugins بنفس
+  شكل Claude Code)، الوكلاء الفرعيين، دفاتر Jupyter، `/goal`، `/plan`، `/review`، `/compact`، `/undo`، `/add-dir`،
+  محادثات بتكمل بعدين، worktree لكل محادثة، Commit وPush وPull Request من التطبيق، وصندوق معزول للأوامر على لينكس.
 - **أي نموذج أو أكتر من نموذج:** GGUF على جهازك (llama.cpp تبع NewAl ونفس النماذج اللي نزّلتها)، أو أي API
   متوافق مع OpenAI (Ollama، LM Studio، OpenRouter، OpenAI، DeepSeek، Gemini…)، أو Anthropic. وبتقدر تعطي أدوار
   لنماذج مختلفة (السريع، المراجِع، المخطِّط).

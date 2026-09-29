@@ -141,6 +141,7 @@ class Session:
         self.origin = self.root          # the project this thread belongs to (its root is a worktree of it)
         self.worktree = False
         self.base = ""                   # a worktree thread: the commit it started from
+        self.dirs = []                   # more folders it may read and edit (/add-dir, --add-dir)
         self.title = title
         self.model = model or cfg.get("model") or "auto"
         self.mode = settings.normal_mode(mode or cfg.get("mode"))
@@ -169,7 +170,7 @@ class Session:
         return {"id": self.id, "root": self.root, "title": self.title, "model": self.model, "mode": self.mode,
                 "reasoning": self.reasoning, "created": self.created, "updated": self.updated, "turn": self.turn,
                 "goal": self.goal, "usage": self.usage, "todo": self.todo, "team": self.team,
-                "origin": self.origin, "worktree": self.worktree, "base": self.base}
+                "origin": self.origin, "worktree": self.worktree, "base": self.base, "dirs": self.dirs}
 
     def _append(self, rec):
         os.makedirs(settings.SESSIONS, exist_ok=True)
@@ -227,6 +228,7 @@ class Session:
         s.origin = meta.get("origin") or s.root
         s.worktree = bool(meta.get("worktree"))
         s.base = meta.get("base", "")
+        s.dirs = list(meta.get("dirs") or [])
         s.turn = meta.get("turn", 0)
         s.goal = meta.get("goal", "")
         s.usage = meta.get("usage", s.usage)

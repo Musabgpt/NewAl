@@ -83,9 +83,13 @@ def rel(ctx, path):
 
 
 def inside(ctx, path):
-    root = os.path.normcase(os.path.abspath(ctx.root))
+    """Whether `path` is in the project, or in a folder added to the session (/add-dir, --add-dir)."""
     p = os.path.normcase(os.path.abspath(path))
-    return p == root or p.startswith(root.rstrip(os.sep) + os.sep)
+    for d in [ctx.root] + list(getattr(getattr(ctx, "session", None), "dirs", None) or []):
+        root = os.path.normcase(os.path.abspath(d))
+        if p == root or p.startswith(root.rstrip(os.sep) + os.sep):
+            return True
+    return False
 
 
 def read_text(path):
@@ -143,7 +147,7 @@ def t_read(ctx, path, offset=1, limit=0):
     if not os.path.exists(p):
         near = _similar_paths(ctx, path)
         raise ToolError("no such file: %s%s" % (path, ("\nDid you mean: " + ", ".join(near)) if near else ""))
-    text = read_text(p)
+    text = render_notebook(_notebook(p)) if p.lower().endswith(".ipynb") else read_text(p)
     lines = text.split("\n")
     if lines and lines[-1] == "":
         lines.pop()
@@ -175,6 +179,135 @@ def t_write(ctx, path, content):
     diff = _diff(old or "", content, rel(ctx, p))
     return ("Wrote %s (%d lines)%s" % (rel(ctx, p), n, _problems(p, content))), {
         "path": rel(ctx, p), "diff": diff, "new": old is None, **_counts(diff)}
+
+
+# ------------------------------------------------------------------ Jupyter notebooks (Claude Code's NotebookEdit)
+
+def _notebook(p):
+    try:
+        with open(p, encoding="utf-8") as f:
+            nb = json.load(f)
+    except ValueError as e:
+        raise ToolError("%s is not valid notebook JSON: %s" % (os.path.basename(p), e))
+    if not isinstance(nb, dict) or not isinstance(nb.get("cells"), list):
+        raise ToolError("%s is not a Jupyter notebook" % os.path.basename(p))
+    return nb
+
+
+def _joined(src):
+    return "".join(src) if isinstance(src, list) else str(src or "")
+
+
+def render_notebook(nb):
+    """A notebook the way read shows it: every cell with its number, type and id, its source, and its text output."""
+    out = []
+    for i, c in enumerate(nb["cells"]):
+        head = "# cell %d (%s%s)" % (i, c.get("cell_type", "code"), ", id " + c["id"] if c.get("id") else "")
+        out.append(head + "\n" + _joined(c.get("source")))
+        shown = []
+        for o in c.get("outputs") or []:
+            kind = o.get("output_type")
+            if kind == "stream":
+                shown.append(_joined(o.get("text")))
+            elif kind in ("execute_result", "display_data"):
+                data = o.get("data") or {}
+                if "text/plain" in data:
+                    shown.append(_joined(data["text/plain"]))
+                elif any(k.startswith("image/") for k in data):
+                    shown.append("[image]")
+            elif kind == "error":
+                shown.append("%s: %s" % (o.get("ename", "Error"), o.get("evalue", "")))
+        if shown:
+            t = "\n".join(x.rstrip("\n") for x in shown)
+            out.append("# output of cell %d\n%s" % (i, t if len(t) <= 2000 else t[:2000] + "…"))
+    return "\n\n".join(out) if out else "(a notebook with no cells)"
+
+
+def _cell_index(cells, cell):
+    if cell in (None, ""):
+        return None
+    for i, c in enumerate(cells):
+        if c.get("id") and c["id"] == str(cell):
+            return i
+    try:
+        i = int(str(cell).strip().lstrip("#"))
+    except ValueError:
+        raise ToolError("no cell %r (use a cell number from read, or a cell id)" % cell)
+    if not 0 <= i < len(cells):
+        raise ToolError("no cell %d: the notebook has %d cells (0-%d)" % (i, len(cells), len(cells) - 1))
+    return i
+
+
+@tool("notebook_edit", "Change a Jupyter notebook (.ipynb) cell. mode=replace (default) sets the cell's source; "
+      "insert adds a new cell after `cell` (at the top without one); delete removes it. cell: its number as read "
+      "shows it, or its id.",
+      {"path": _s("notebook path"), "cell": _s("cell number or id"), "source": _s("the cell's new source"),
+       "cell_type": _s("code or markdown (for insert; replace keeps the type unless given)"),
+       "mode": _s("replace, insert or delete")}, ["path"], "edit")
+def t_notebook_edit(ctx, path, cell="", source="", cell_type="", mode="replace"):
+    p = resolve(ctx, path)
+    nb = _notebook(p)
+    cells = nb["cells"]
+    before = render_notebook(nb)
+    i = _cell_index(cells, cell)
+    mode = (mode or "replace").lower()
+    lines = str(source or "").splitlines(True)
+    if mode == "insert":
+        c = {"cell_type": cell_type or "code", "metadata": {}, "source": lines}
+        if c["cell_type"] == "code":
+            c.update(execution_count=None, outputs=[])
+        if (nb.get("nbformat", 4), nb.get("nbformat_minor", 0)) >= (4, 5):
+            c["id"] = os.urandom(4).hex()
+        i = 0 if i is None else i + 1
+        cells.insert(i, c)
+    elif i is None:
+        raise ToolError("say which cell to %s" % mode)
+    elif mode == "delete":
+        cells.pop(i)
+    elif mode == "replace":
+        c = cells[i]
+        c["source"] = lines
+        if cell_type and cell_type != c.get("cell_type"):
+            c["cell_type"] = cell_type
+        if c.get("cell_type") == "code":
+            c["outputs"], c["execution_count"] = [], None      # its old output no longer belongs to it
+        else:
+            c.pop("outputs", None)
+            c.pop("execution_count", None)
+    else:
+        raise ToolError("mode must be replace, insert or delete")
+    write_text(ctx, p, json.dumps(nb, indent=1, ensure_ascii=False) + "\n")
+    diff = _diff(before, render_notebook(nb), rel(ctx, p))
+    return ("%s cell %d of %s (%d cells now)%s" % ({"insert": "Inserted", "delete": "Deleted"}.get(mode, "Replaced"),
+                                                   i, rel(ctx, p), len(cells), _notebook_problems(cells))), {
+        "path": rel(ctx, p), "diff": diff, **_counts(diff)}
+
+
+def _notebook_problems(cells):
+    """The code cells checked together, as the kernel runs them (IPython's %magics and !commands left out)."""
+    code = "\n".join(_joined(c.get("source")) for c in cells if c.get("cell_type") == "code")
+    code = "\n".join("" if l.lstrip().startswith(("%", "!")) else l for l in code.split("\n"))
+    try:
+        from . import diagnostics
+        found = [x for x in diagnostics.check_python(code)
+                 if not any("'%s'" % n in x for n in ("display", "get_ipython", "In", "Out"))]
+    except Exception:  # noqa: BLE001
+        return ""
+    return ("\nProblems now in the notebook's code:\n" + "\n".join(found)) if found else ""
+
+
+def has_notebooks(root, limit=3000):
+    """Whether the project has Jupyter notebooks (then the notebook tool is offered)."""
+    n = 0
+    for dirpath, dirs, files in os.walk(root):
+        dirs[:] = [d for d in dirs if d not in IGNORED_DIRS and not d.startswith(".")]
+        for f in files:
+            if f.endswith(".ipynb"):
+                return True
+            n += 1
+        if n > limit:
+            return False
+    return False
 
 
 def _problems(path, text):
@@ -549,7 +682,8 @@ def command_argv(ctx, command, sandbox=True):
     if not sandbox or session is None or settings.user().get("sandbox", "auto") == "off":
         return full, False
     from . import sandbox as sb
-    return sb.wrap(full, ctx.root, session.mode, network=settings.user().get("sandbox_network", True))
+    return sb.wrap(full, ctx.root, session.mode, network=settings.user().get("sandbox_network", True),
+                   extra=getattr(session, "dirs", None) or ())
 
 
 def run_command(ctx, command, timeout=120, on_line=None, sandbox=True):
@@ -829,11 +963,14 @@ def t_skill(ctx, name):
 READ_ONLY = {"read", "glob", "grep", "todo", "job", "skill", "task"}
 
 
-def default_set(model_profile=None):
-    """The tools offered to a model. apply_patch replaces edit for models trained on Codex's format."""
+def default_set(model_profile=None, root=None):
+    """The tools offered to a model. apply_patch replaces edit for models trained on Codex's format; notebook_edit
+    comes with projects that have notebooks (a tool nobody uses would only cost every request its description)."""
     names = ["read", "edit", "write", "glob", "grep", "bash", "job", "todo", "task"]
     if (model_profile or {}).get("patch"):
         names[names.index("edit")] = "apply_patch"
+    if root and has_notebooks(root):
+        names.append("notebook_edit")
     if settings.user().get("web", True):
         names += ["web_search", "web_fetch"]
     return names

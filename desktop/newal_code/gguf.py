@@ -77,7 +77,8 @@ def metadata(path, keep_template=False):
 
 def info(path):
     """What planning needs: {arch, name, context, layers, attention_layers, kv_bytes_per_token (f16 cache),
-    experts, active_experts, size}."""
+    draft_kv_bytes_per_token (MTP heads), state_bytes (fixed-size state of one conversation), experts,
+    active_experts, nextn, size}."""
     md = metadata(path)
     arch = md.get("general.architecture", "")
 
@@ -85,6 +86,8 @@ def info(path):
         return md.get("%s.%s" % (arch, key), default)
 
     layers = int(g("block_count", 0) or 0)
+    nextn = int(g("nextn_predict_layers", 0) or 0)      # multi-token-prediction heads (MTP drafting)
+    main_layers = layers - nextn                          # the heads are extra blocks after the model's own
     heads = g("attention.head_count", 0)
     kv_heads = g("attention.head_count_kv", heads)
     embd = int(g("embedding_length", 0) or 0)
@@ -100,19 +103,28 @@ def info(path):
     per_layer = kv_heads if isinstance(kv_heads, list) else [kv_heads] * layers
     interval = g("full_attention_interval")
     if interval and not isinstance(kv_heads, list):
-        per_layer = [kv_heads if (i + 1) % int(interval) == 0 else 0 for i in range(layers)]
-    per_layer = [int(x or 0) for x in per_layer]
+        per_layer = [kv_heads if (i + 1) % int(interval) == 0 else 0 for i in range(main_layers)]
+    per_layer = [int(x or 0) for x in per_layer][:main_layers]
     attn_layers = sum(1 for x in per_layer if x)
     swa = int(g("attention.sliding_window", 0) or 0)
     kv = sum(x * (k_len + v_len) * 2 for x in per_layer)
+    top_kv = max(per_layer) if per_layer else 0
+    # The recurrent layers' state (Mamba, Gated DeltaNet): one per conversation, f32, whatever the context length.
+    # llama.cpp also keeps copies of it ("context checkpoints") to step back on these models.
+    state = 0
+    d_state, d_inner = int(g("ssm.state_size", 0) or 0), int(g("ssm.inner_size", 0) or 0)
+    if d_state and d_inner:
+        conv = int(g("ssm.conv_kernel", 4) or 4)
+        groups = int(g("ssm.group_count", 0) or 0)
+        state = (main_layers - attn_layers) * (d_state * d_inner + (conv - 1) * (d_inner + 2 * groups * d_state)) * 4
     return {
         "arch": arch, "name": md.get("general.name") or os.path.basename(path),
-        "context": int(g("context_length", 0) or 0), "layers": layers, "attention_layers": attn_layers,
-        "kv_heads": max(per_layer) if per_layer else 0, "head_dim": k_len,
-        "kv_bytes_per_token": kv, "sliding_window": swa,
+        "context": int(g("context_length", 0) or 0), "layers": main_layers, "attention_layers": attn_layers,
+        "kv_heads": top_kv, "head_dim": k_len,
+        "kv_bytes_per_token": kv, "draft_kv_bytes_per_token": nextn * top_kv * (k_len + v_len) * 2,
+        "state_bytes": state, "sliding_window": swa,
         "experts": int(g("expert_count", 0) or 0), "active_experts": int(g("expert_used_count", 0) or 0),
-        "nextn": int(g("nextn_predict_layers", 0) or 0),      # multi-token-prediction heads (MTP drafting)
-        "size": os.path.getsize(path),
+        "nextn": nextn, "size": os.path.getsize(path),
     }
 
 

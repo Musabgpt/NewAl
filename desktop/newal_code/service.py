@@ -7,7 +7,7 @@ import threading
 import time
 
 from . import agent as agentmod
-from . import catalog, extensions, hardware, models, prompts, runtime, session as sessmod, settings, util
+from . import catalog, extensions, hardware, hooks, models, prompts, runtime, session as sessmod, settings, util
 
 BUILTIN_COMMANDS = [
     ("help", "", "Show the commands"),
@@ -31,10 +31,14 @@ BUILTIN_COMMANDS = [
     ("hooks", "", "List the configured hooks"),
     ("resume", "[id]", "List threads, or reopen one"),
     ("title", "<text>", "Rename this thread"),
+    ("security-review", "[focus]", "Review the changes for security problems (a reviewer sub-agent)"),
+    ("permissions", "", "Show the permission mode and the allow / ask / deny rules"),
     ("export", "", "Save this thread as Markdown in the project"),
     ("memory", "", "Show the instruction files (# <note> adds a note to AGENTS.md)"),
+    ("add-dir", "<folder>", "Let this thread read and edit another folder too"),
+    ("plugin", "[install <git URL|folder> | remove <name>]", "List, install or remove plugins (Claude Code's layout)"),
 ]
-ALIASES = {"approvals": "mode", "permissions": "mode", "models": "model", "context": "status", "sessions": "resume",
+ALIASES = {"approvals": "mode", "models": "model", "context": "status", "sessions": "resume",
            "exit": "exit", "quit": "exit", "new-thread": "new"}
 
 
@@ -72,7 +76,7 @@ class Service:
 
     # ------------------------------------------------------------ sessions
 
-    def create(self, root, model=None, mode=None, worktree=False):
+    def create(self, root, model=None, mode=None, worktree=False, dirs=()):
         root = os.path.abspath(os.path.expanduser(root))
         if not os.path.isdir(root):
             raise ValueError("no such folder: %s" % root)
@@ -84,6 +88,7 @@ class Service:
         s.origin = root
         s.worktree = bool(worktree)
         s.base = base
+        s.dirs = [os.path.abspath(os.path.expanduser(d)) for d in dirs if os.path.isdir(os.path.expanduser(d))]
         s.save_meta()
         with self.lock:
             self.sessions[s.id] = s
@@ -113,10 +118,32 @@ class Service:
 
     def delete(self, sid):
         self.interrupt(sid)
+        s = self.sessions.get(sid)
+        if s:
+            self._hook(s, "SessionEnd", {"reason": "other"}, wait=True)
         with self.lock:
             self.sessions.pop(sid, None)
             self.agents.pop(sid, None)
         sessmod.delete(sid)
+
+    def _hook(self, s, event, payload, wait=False):
+        """Runs the project's hooks for an event that is not the agent's own (Notification, SessionEnd), with Claude
+        Code's payload; in the background unless `wait`."""
+        cfg = settings.project(s.root).get("hooks") or {}
+        if not hooks.configured(cfg, event):
+            return
+        body = dict(payload, session_id=s.id, transcript_path=getattr(s, "path", ""), cwd=s.root,
+                    hook_event_name=event)
+
+        def run():
+            try:
+                hooks.run(cfg, event, body, s.root)
+            except Exception:  # noqa: BLE001 - a broken hook never stops the app
+                pass
+        if wait:
+            run()
+        else:
+            threading.Thread(target=run, daemon=True).start()
 
     def projects(self):
         cfg = settings.user()
@@ -144,6 +171,10 @@ class Service:
             self.approvals[key] = rec
         a = self.agents.get(req.get("session"))
         cancel = a.cancel if a else None
+        s = self.sessions.get(req.get("session"))
+        if s:
+            self._hook(s, "Notification",
+                       {"message": "NewAl Code needs your permission to use %s" % req.get("tool", "a tool")})
         while not ev.wait(0.25):
             if cancel is not None and cancel.is_set():
                 rec["answer"] = "deny"
@@ -261,6 +292,7 @@ class Service:
                 lines.append("Custom: " + ", ".join("/" + k for k in sorted(custom)))
             return {"reply": "\n".join(lines)}
         if name in ("new", "clear"):
+            self._hook(s, "SessionEnd", {"reason": "clear"})
             ns = self.create(s.root, model=s.model, mode=s.mode)
             return {"reply": "New thread.", "session": ns.id, "new": True}
         if name == "model":
@@ -317,6 +349,22 @@ class Service:
             files = s.undo()
             return {"reply": ("Reverted: " + ", ".join(os.path.relpath(f, s.root) for f in files)) if files
                     else "Nothing to undo."}
+        if name == "permissions":
+            if args:
+                return self.command(s, "/mode " + args)
+            rules = dict(settings.project(s.root).get("permissions") or {})
+            rules["allow"] = list(rules.get("allow") or []) + list(s.allowed)
+            lines = ["Mode: %s" % s.mode]
+            for k in ("allow", "ask", "deny"):
+                lines.append("%s: %s" % (k, ", ".join(rules.get(k) or []) or "-"))
+            from . import sandbox
+            lines.append("Sandbox: %s" % ("on (commands write only in the project)" if sandbox.abi() and
+                                          settings.user().get("sandbox", "auto") != "off" else "off"))
+            return {"reply": "\n".join(lines)}
+        if name == "security-review":
+            return self.command(s, "/review " + ("security: " + args if args else
+                                                  "security problems only: injection, unsafe deserialization, path "
+                                                  "traversal, secrets in code, missing auth or validation"))
         if name == "review":
             ch = s.changes()
             diff = "\n".join(c["diff"] for c in ch)
@@ -383,7 +431,36 @@ class Service:
             s.title = args or s.title
             s.save_meta()
             return {"reply": "Title: %s" % s.title}
+        if name in ("plugin", "plugins"):
+            from . import plugins
+            verb, _, arg = args.partition(" ")
+            try:
+                if verb == "install" and arg.strip():
+                    p = plugins.install(arg.strip())
+                    return {"reply": "Installed %s (%s) in %s. New threads use it." % (
+                        p["name"], ", ".join(p["has"]) or "empty", p["dir"])}
+                if verb in ("remove", "uninstall") and arg.strip():
+                    return {"reply": "Removed %s." % plugins.remove(arg.strip(), s.root)}
+            except (ValueError, OSError) as e:
+                return {"reply": "Plugin: %s" % e}
+            items = plugins.listing(s.root)
+            if not items:
+                return {"reply": "No plugins. /plugin install <git URL or folder> adds one (commands, agents, skills, "
+                                 "hooks and MCP servers in Claude Code's plugin layout)."}
+            return {"reply": "\n".join("%s %s - %s [%s]" % (p["name"], p["version"], p["description"] or "",
+                                                            ", ".join(p["has"])) for p in items)}
+        if name == "add-dir":
+            if not args:
+                return {"reply": "Folders this thread works in: " + ", ".join([s.root] + s.dirs)}
+            d = os.path.abspath(os.path.join(s.root, os.path.expanduser(args)))
+            if not os.path.isdir(d):
+                return {"reply": "No such folder: %s" % d}
+            if d not in s.dirs:
+                s.dirs.append(d)
+                s.save_meta()
+            return {"reply": "Added %s: NewAl Code may read and edit it too (in auto-edit mode without asking)." % d}
         if name == "exit":
+            self._hook(s, "SessionEnd", {"reason": "prompt_input_exit"}, wait=True)
             return {"reply": "bye", "exit": True}
         custom = extensions.custom_commands(s.root)
         if name in custom:

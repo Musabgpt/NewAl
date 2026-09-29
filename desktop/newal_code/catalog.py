@@ -1,7 +1,8 @@
 """Local models NewAl Code can download and run on llama.cpp, and which one each RAM tier uses by default.
 
 Sizes are the files on Hugging Face. `kv` is the KV cache per token of context with an f16 cache (half with q8_0);
-hybrid models (Qwen3.5/3.6) keep attention in one layer of four, so their cache is small. "mtp" files carry the
+hybrid models (Qwen3.5/3.6) keep attention in one layer of four, so their cache is small, and the other layers keep a
+fixed-size state per conversation (`state`, what gguf.info reads from the file once it is downloaded). "mtp" files carry the
 model's own multi-token-prediction heads: llama.cpp drafts the next tokens with them and checks them in one pass,
 which makes writing faster on a CPU at no cost in quality."""
 
@@ -16,30 +17,37 @@ HF = "https://huggingface.co/"
 
 MODELS = [
     {"id": "qwen3.5-2b", "title": "Qwen3.5 2B", "repo": "unsloth/Qwen3.5-2B-MTP-GGUF",
-     "file": "Qwen3.5-2B-Q4_K_M.gguf", "size": 1330000000, "kv": 24576, "active_b": 2.0, "mtp": True,
+     "file": "Qwen3.5-2B-Q4_K_M.gguf", "size": 1330000000, "kv": 12288, "state": 20201472, "active_b": 2.0,
+     "mtp": True,
      "min_ram_gb": 6, "context": 32768, "good_for": ["fast"],
      "about": "Small and quick: titles, summaries and exploring on the smallest computers."},
     {"id": "qwen3.5-4b", "title": "Qwen3.5 4B", "repo": "unsloth/Qwen3.5-4B-MTP-GGUF",
-     "file": "Qwen3.5-4B-Q4_K_M.gguf", "size": 2830000000, "kv": 32768, "active_b": 4.2, "mtp": True,
+     "file": "Qwen3.5-4B-Q4_K_M.gguf", "size": 2830000000, "kv": 32768, "state": 52690944, "active_b": 4.2,
+     "mtp": True,
      "min_ram_gb": 8, "context": 32768, "good_for": ["main", "fast"],
-     "about": "The 8 GB pick: a real coding agent (tool calls, edits, tests) in under 4 GB of RAM."},
+     "about": "The 8 GB pick: a real coding agent (tool calls, edits, tests) in about 4.5 GB of RAM with a 32k "
+              "context."},
     {"id": "qwen3.5-9b", "title": "Qwen3.5 9B", "repo": "unsloth/Qwen3.5-9B-MTP-GGUF",
-     "file": "Qwen3.5-9B-Q4_K_M.gguf", "size": 5870000000, "kv": 32768, "active_b": 9.0, "mtp": True,
+     "file": "Qwen3.5-9B-Q4_K_M.gguf", "size": 5870000000, "kv": 32768, "state": 52690944, "active_b": 9.0,
+     "mtp": True,
      "min_ram_gb": 12, "context": 32768, "good_for": ["main", "review"],
-     "about": "Stronger than 4B at the same speed class of a dense model; for 12 GB and up."},
+     "about": "Stronger than 4B; the 12 GB and 16 GB pick (about 7.5 GB of RAM with a 32k context)."},
     {"id": "qwen3.6-35b-a3b-q2", "title": "Qwen3.6 35B-A3B (2-bit)", "repo": "unsloth/Qwen3.6-35B-A3B-MTP-GGUF",
-     "file": "Qwen3.6-35B-A3B-UD-IQ2_XXS.gguf", "size": 11819399456, "kv": 20480, "active_b": 3.0, "mtp": True,
-     "min_ram_gb": 16, "context": 32768, "good_for": ["main", "review", "plan"],
-     "about": "Mixture of experts: 35B of knowledge, 3B active per token, so it writes as fast as a 3B model; the "
-              "16 GB pick."},
+     "file": "Qwen3.6-35B-A3B-UD-IQ2_XXS.gguf", "size": 11819399456, "kv": 20480, "state": 65863680,
+     "active_b": 3.0, "mtp": True, "min_ram_gb": 18, "context": 32768, "good_for": ["main", "review", "plan"],
+     "about": "Mixture of experts: 35B of knowledge, 3B active per token, so it writes as fast as a 3B model. It "
+              "needs about 12.5 GB, which a 16 GB computer cannot spare next to Windows and a browser: for 18 GB "
+              "and up."},
     {"id": "qwen3.6-35b-a3b", "title": "Qwen3.6 35B-A3B", "repo": "unsloth/Qwen3.6-35B-A3B-MTP-GGUF",
-     "file": "Qwen3.6-35B-A3B-UD-IQ3_S.gguf", "size": 15350000000, "kv": 20480, "active_b": 3.0, "mtp": True,
+     "file": "Qwen3.6-35B-A3B-UD-IQ3_S.gguf", "size": 15350000000, "kv": 20480, "state": 65863680,
+     "active_b": 3.0, "mtp": True,
      "min_ram_gb": 24, "context": 32768, "good_for": ["main", "review", "plan"],
      "about": "NewAl desktop's brain (with MTP): the best local coder here, for 24 GB and up."},
     {"id": "gpt-oss-20b", "title": "gpt-oss 20B", "repo": "ggml-org/gpt-oss-20b-GGUF",
      "file": "gpt-oss-20b-MXFP4.gguf", "size": 12110000000, "kv": 24576, "active_b": 3.6, "mtp": False,
-     "min_ram_gb": 24, "context": 32768, "good_for": ["main", "review"],
-     "about": "OpenAI's open-weight model (the Codex family's style), 3.6B active; for 24 GB and up."},
+     "min_ram_gb": 16, "context": 32768, "good_for": ["main", "review"],
+     "about": "OpenAI's open-weight model (the Codex family's style), 3.6B active; fits 16 GB with little to "
+              "spare, comfortable from 24 GB."},
 ]
 
 # The default local model(s) per RAM tier: main does the work; fast (optional) helps with small jobs.
@@ -84,13 +92,24 @@ def path(m):
 
 
 def has_mtp_file(m):
+    """Whether the file on disk has multi-token-prediction heads (read from the file: NewAl desktop's downloads
+    have them under other names)."""
     p = path(m)
-    return bool(p and m.get("mtp") and os.path.basename(p) == _local_name(m))
+    if not p:
+        return False
+    try:
+        return gguf.info(p)["nextn"] > 0
+    except (OSError, ValueError):
+        return False
 
 
 def fits(m, total=None):
-    """Whether the model runs on a computer with this much RAM (weights + a working context + buffers)."""
-    need = m["size"] + 16384 * m["kv"] // 2 + 600 * 1024 * 1024
+    """Whether the model runs on a computer with this much RAM: what runtime.plan counts once the file is here, with
+    a 16k context (q8_0)."""
+    from . import runtime
+    mtp = bool(m.get("mtp"))
+    kv = m["kv"] * (9 if mtp else 8) // 8          # the MTP head: about one attention layer more
+    need = runtime.need_bytes(m["size"], kv, 16384, state=m.get("state", 0), factor=0.53, mtp=mtp)
     return need <= hardware.budget(total)
 
 

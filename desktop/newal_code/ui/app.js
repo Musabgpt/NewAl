@@ -629,6 +629,9 @@
           paintIcons(chips);
         }
         S.live = null;
+        if (!replay && document.hidden && window.Notification && Notification.permission === "granted") {
+          new Notification("NewAl Code", { body: (ev.answer || "Done").slice(0, 160), icon: "icon.svg" });
+        }
         if (!replay) {
           setBusyUI(false);
           $("#todo-pin").hidden = true;
@@ -732,6 +735,7 @@
   }
 
   async function send(text) {
+    if (window.Notification && Notification.permission === "default") Notification.requestPermission().catch(() => {});
     text = (text != null ? text : $("#input").value).trim();
     if (!text && !S.attachments.length) return;
     if (S.current && S.busy.has(S.current)) return;
@@ -925,7 +929,7 @@
     diff.innerHTML = "";
     let plus = 0, minus = 0;
     changes.forEach(c => { plus += c.plus; minus += c.minus; });
-    $("#review-stats").innerHTML = changes.length ? changes.length + " files · <span class=\"plus\">+" + plus + '</span> <span class="minus">−' + minus + "</span>" : "";
+    $("#review-stats").innerHTML = changes.length ? changes.length + (changes.length === 1 ? " file" : " files") + " · <span class=\"plus\">+" + plus + '</span> <span class="minus">−' + minus + "</span>" : "";
     $("#commit-form").hidden = !git || !changes.length;
     if (!changes.length) { diff.innerHTML = '<div class="review-empty">No changes in this thread yet.</div>'; return; }
     if (!changes.find(c => c.path === S.reviewSel)) S.reviewSel = null;
@@ -1086,14 +1090,15 @@
     let d;
     try { d = await api("/api/extensions?root=" + encodeURIComponent(root)); } catch (e) { toast(e.message); return; }
     const list = (items, f) => items.length ? items.map(f).join("") : '<div class="muted">None.</div>';
-    const body = h("div", "", '<div class="section-title">Instructions (AGENTS.md / CLAUDE.md)</div>' +
+    const body = h("div", "", '<div class="section-title">Plugins</div><div class="card-list">' + list(d.plugins || [], p => '<div class="card"><div class="grow"><div class="name">' + esc(p.name) + (p.version ? ' <span class="badge">' + esc(p.version) + "</span>" : "") + '</div><div class="desc">' + esc(p.description) + (p.has.length ? " · " + esc(p.has.join(", ")) : "") + "</div></div></div>") + "</div>" +
+      '<div class="section-title">Instructions (AGENTS.md / CLAUDE.md)</div>' +
       list(d.instructions, p => '<div class="card"><div class="grow"><div class="name">' + esc(p) + "</div></div></div>") +
       '<div class="section-title">Skills</div><div class="card-list">' + list(d.skills, s => '<div class="card"><div class="grow"><div class="name">' + esc(s.name) + '</div><div class="desc">' + esc(s.description) + " · " + esc(s.dir) + "</div></div></div>") + "</div>" +
       '<div class="section-title">Sub-agents</div><div class="card-list">' + list(d.agents, a => '<div class="card"><div class="grow"><div class="name">' + esc(a.name) + (a.model ? ' <span class="badge">' + esc(a.model) + "</span>" : "") + (a.mode ? ' <span class="badge">' + esc(a.mode) + "</span>" : "") + '</div><div class="desc">' + esc(a.description) + "</div></div></div>") + "</div>" +
       '<div class="section-title">Slash commands</div><div class="card-list">' + list(d.commands.filter(c => c.custom), c => '<div class="card"><div class="grow"><div class="name">/' + esc(c.name) + '</div><div class="desc">' + esc(c.description) + "</div></div></div>") + "</div>" +
       '<div class="section-title">MCP servers</div><div class="card-list">' + list(d.mcp, m => '<div class="card"><div class="grow"><div class="name">' + esc(m.name) + '</div><div class="desc">' + esc(m.url || [m.command].concat(m.args || []).join(" ")) + "</div></div></div>") + "</div>" +
       '<div class="section-title">Hooks</div>' + (Object.keys(d.hooks).length ? "<pre class=\"out\">" + esc(JSON.stringify(d.hooks, null, 1)) + "</pre>" : '<div class="muted">None.</div>') +
-      '<p class="muted">Add skills in .newal/skills or .claude/skills (a folder with SKILL.md), sub-agents in .newal/agents or .claude/agents, commands in .newal/commands or .claude/commands, MCP servers in .mcp.json, hooks in .newal/settings.json or .claude/settings.json. Codex\'s ~/.codex files work too.</p>');
+      '<p class="muted">Add skills in .newal/skills or .claude/skills (a folder with SKILL.md), sub-agents in .newal/agents or .claude/agents, commands in .newal/commands or .claude/commands, MCP servers in .mcp.json, hooks in .newal/settings.json or .claude/settings.json. Codex\'s ~/.codex files work too. /plugin install &lt;git URL or folder&gt; adds a plugin (Claude Code\'s layout).</p>');
     modal("Skills, agents & MCP" + (root ? " · " + base(root) : ""), body);
   }
 
@@ -1155,9 +1160,15 @@
     };
     $("#commit-form").onsubmit = async e => {
       e.preventDefault();
-      const r = await api("/api/sessions/" + S.current + "/commit", { message: $("#commit-msg").value || (S.meta && S.meta.title) })
+      const then = $("#commit-then").value;
+      const r = await api("/api/sessions/" + S.current + "/commit", { message: $("#commit-msg").value || (S.meta && S.meta.title), then })
         .catch(x => toast(x.message));
-      if (r) { toast(r.ok ? "Committed" : "Commit failed"); $("#commit-msg").value = ""; refreshChanges(); }
+      if (!r) return;
+      if (r.error) { toast(r.error, 6000); return; }
+      if (r.ok && r.url) { toast(then === "pr" ? "Pull request: " + r.url : "Pushed", 8000); window.open(r.url, "_blank"); }
+      else if (r.ok) toast(r.pushed ? "Committed and pushed" : "Committed");
+      else toast((r.committed ? "Committed, but the push failed: " : "Commit failed: ") + (r.output || "").trim().split("\n").pop(), 8000);
+      $("#commit-msg").value = ""; refreshChanges();
     };
     $("#toggle-terminal").onclick = () => { $("#terminal").hidden = !$("#terminal").hidden; if (!$("#terminal").hidden) $("#term-input").focus(); };
     $("#term-close").onclick = () => { $("#terminal").hidden = true; };
@@ -1171,7 +1182,13 @@
       try { sid = await ensureSession(); } catch (x) { toast(x.message); return; }
       api("/api/sessions/" + sid + "/terminal", { command: cmd }).catch(x => toast(x.message));
     };
-    document.querySelectorAll(".picker-btn").forEach(b => b.onclick = e => {
+    pickerMenu("open-picker", [{ value: "code", title: "VS Code" }, { value: "cursor", title: "Cursor" },
+      { value: "files", title: "File manager" }], async v => {
+      if (!S.current) { toast("Open a thread first"); return; }
+      const r = await api("/api/sessions/" + S.current + "/open", { app: v }).catch(e => toast(e.message));
+      if (r && r.error) toast(r.error);
+    });
+    document.querySelectorAll(".picker-btn, .picker-btn-plain").forEach(b => b.onclick = e => {
       const p = b.parentElement;
       const was = p.classList.contains("open");
       document.querySelectorAll(".picker.open").forEach(x => x.classList.remove("open"));

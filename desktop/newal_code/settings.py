@@ -116,6 +116,10 @@ def project(root):
         _merge(data, {k: claude[k] for k in ("permissions", "hooks") if k in claude})
         _merge(data, _read_json(os.path.join(root, ".claude", "settings.local.json")))
         _merge(data, _read_json(os.path.join(root, ".newal", "settings.json")))
+    from . import plugins      # (imports settings)
+    for event, groups in plugins.hooks(root).items():
+        hooks = data.setdefault("hooks", {})
+        hooks[event] = list(hooks.get(event) or []) + groups
     return data
 
 

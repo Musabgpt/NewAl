@@ -30,6 +30,8 @@ def configs(root):
             data = _json(f)
             add(data.get("mcpServers") or data.get("mcp_servers") or {})
     add(settings.user().get("mcp_servers"))
+    from . import plugins
+    add(plugins.mcp_servers(root))
     codex = util.home(".codex", "config.toml")
     if os.path.isfile(codex):
         try:

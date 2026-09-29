@@ -250,6 +250,8 @@ pre.out { margin: 0; background: var(--bg-code); border: 1px solid var(--border)
   overflow: auto; background: var(--bg); border: 1px solid var(--border-strong); border-radius: 12px; box-shadow: var(--shadow);
   padding: 5px; z-index: 30; }
 .picker.up-right .menu { left: auto; right: 0; }
+.picker.down .menu { bottom: auto; top: calc(100% + 6px); }
+.picker-btn-plain i[data-icon="chevron"] { width: 12px; height: 12px; opacity: .7; }
 .picker.open .menu { display: block; }
 .menu-item { display: flex; align-items: flex-start; gap: 9px; width: 100%; border: 0; background: none; text-align: left;
   padding: 7px 9px; border-radius: 8px; font-size: 13px; }
@@ -309,6 +311,8 @@ pre.out { margin: 0; background: var(--bg-code); border: 1px solid var(--border)
 #review-diff { flex: 1; overflow: auto; padding: 10px; }
 #review-diff .diff { max-height: none; }
 #commit-form { display: flex; gap: 8px; padding: 10px; border-top: 1px solid var(--border); }
+#commit-form select { border: 1px solid var(--border-strong); border-radius: 9px; padding: 5px 8px; background: var(--bg);
+  color: var(--fg); font: inherit; font-size: 12.5px; }
 #commit-form input { flex: 1; border: 1px solid var(--border-strong); border-radius: 9px; padding: 6px 10px; background: var(--bg); }
 .review-empty { color: var(--fg-faint); text-align: center; padding: 40px 20px; font-size: 13px; }
 

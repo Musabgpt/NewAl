@@ -49,16 +49,33 @@ def _mac_sysctl(name):
 
 
 def _cgroup_limit():
-    """A container's memory limit (cgroup v2 / v1), when it is lower than the machine's RAM."""
-    for p in ("/sys/fs/cgroup/memory.max", "/sys/fs/cgroup/memory/memory.limit_in_bytes"):
+    """The memory limit of the cgroup this process runs in (a container, a systemd slice, a test that simulates a
+    smaller computer), or of any cgroup above it: the lowest one. 0 when there is none."""
+    files = []
+    try:
+        with open("/proc/self/cgroup", encoding="ascii") as f:
+            for line in f:
+                _, controllers, path = line.rstrip("\n").split(":", 2)
+                if "memory" in controllers.split(","):
+                    base, name = "/sys/fs/cgroup/memory", "memory.limit_in_bytes"
+                elif not controllers:
+                    base, name = "/sys/fs/cgroup", "memory.max"
+                else:
+                    continue
+                parts = [p for p in path.split("/") if p]
+                files += [os.path.join(base, *parts[:i] + [name]) for i in range(len(parts), -1, -1)]
+    except (OSError, ValueError):
+        pass
+    limits = []
+    for p in files + ["/sys/fs/cgroup/memory.max", "/sys/fs/cgroup/memory/memory.limit_in_bytes"]:
         try:
             with open(p, encoding="ascii") as f:
                 v = f.read().strip()
             if v.isdigit() and int(v) < 1 << 60:
-                return int(v)
+                limits.append(int(v))
         except OSError:
             pass
-    return 0
+    return min(limits) if limits else 0
 
 
 def total_ram():

@@ -104,12 +104,12 @@ def temp_dirs():
     return sorted(p for p in out if os.path.isdir(p))
 
 
-def wrap(argv, root, mode, network=True):
+def wrap(argv, root, mode, network=True, extra=()):
     """The command line that runs argv inside the sandbox for this permission mode (or argv unchanged when there is
-    no sandbox here, or in full-auto)."""
+    no sandbox here, or in full-auto). `extra`: more folders the session may change (/add-dir)."""
     if mode == "full-auto" or not abi():
         return argv, False
-    writable = temp_dirs() + ([root] if mode != "read-only" else [])
+    writable = temp_dirs() + ([root] + list(extra) if mode != "read-only" else [])
     cmd = [sys.executable, os.path.abspath(__file__)]        # a script: it needs nothing else on the path
     for w in writable:
         cmd += ["--write", w]

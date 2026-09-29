@@ -18,7 +18,7 @@ ALLOW, ASK, DENY = "allow", "ask", "deny"
 
 TOOL_NAMES = {"bash": "Bash", "edit": "Edit", "write": "Write", "apply_patch": "Edit", "read": "Read", "glob": "Glob",
               "grep": "Grep", "web_fetch": "WebFetch", "web_search": "WebSearch", "task": "Task", "todo": "TodoWrite", "skill": "Skill",
-              "job": "BashOutput"}
+              "job": "BashOutput", "notebook_edit": "NotebookEdit"}
 
 # Commands that only look: fine in every mode.
 READ_ONLY_CMD = re.compile(
@@ -73,7 +73,7 @@ def matches(rule, tool, args, root=""):
     if name.startswith("mcp__"):
         return tool == name or tool.startswith(name + "__")
     canonical = TOOL_NAMES.get(tool, tool)
-    if name not in (canonical, tool) and not (name == "Edit" and tool in ("write", "apply_patch")):
+    if name not in (canonical, tool) and not (name == "Edit" and tool in ("write", "apply_patch", "notebook_edit")):
         return False
     if spec is None or spec in ("", "*"):
         return True
@@ -184,7 +184,7 @@ def always_rule(tool, args):
     if tool == "bash":
         words = str(args.get("command") or "").split()
         return "Bash(%s:*)" % " ".join(words[:2]) if words else "Bash"
-    if tool in ("edit", "write", "apply_patch"):
+    if tool in ("edit", "write", "apply_patch", "notebook_edit"):
         return "Edit"
     if tool == "web_fetch":
         host = urllib.parse.urlsplit(str(args.get("url") or "")).hostname or ""

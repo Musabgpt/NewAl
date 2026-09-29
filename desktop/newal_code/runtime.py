@@ -23,13 +23,20 @@ from . import gguf, hardware, providers, settings
 
 MB = 1024 * 1024
 GB = 1024 * MB
-CONTEXTS = (65536, 49152, 32768, 24576, 16384, 12288, 8192, 6144, 4096)
-MTP_ARGS = ["--spec-draft-n-max", "3", "--spec-draft-p-min", "0.6"]
+# The contexts a plan picks from, longest first. Below 16k an agent cannot work: the system prompt and the tools take
+# ~2k tokens, the first request with its files ~1-3k, and every step adds its tool results.
+CONTEXTS = (65536, 49152, 32768, 24576, 16384)
+MTP_DRAFT = 3              # tokens drafted ahead; on a hybrid model each slot keeps that many more copies of its state
+MTP_ARGS = ["--spec-draft-n-max", str(MTP_DRAFT), "--spec-draft-p-min", "0.6"]
 # Drafts from text already in the context (opt-in, speculative = "ngram"): an edit's old text is a copy of the file.
 # Measured on Qwen3.5-4B (4 cores): rewriting a whole file 6.3 -> 9.1 tokens/s; but in agent steps (short tool calls)
 # only 10-50% of the drafts were accepted and a two-task run was slower, so it is off unless chosen. MTP (the model's
 # own draft heads, ~99% accepted) is what "auto" uses: 6.3 -> 9.4 tokens/s.
 NGRAM_ARGS = ["--spec-ngram-mod-n-match", "8", "--spec-ngram-mod-n-min", "4", "--spec-ngram-mod-n-max", "32"]
+# On hybrid models (Qwen3.5/3.6) llama.cpp keeps copies of each conversation's recurrent state to step back to
+# ("context checkpoints"), 32 per slot by default: up to 1.6 GB per conversation on Qwen3.5-4B, growing with every
+# request. A conversation here only grows, so it only ever steps back to the end of its previous request.
+CHECKPOINTS = 3
 
 
 def find_server():
@@ -57,38 +64,52 @@ def _free_port():
     return port
 
 
-def plan(path, budget=None, want_ctx=0, slots=2, draft_bytes=0):
+def plan(path, budget=None, want_ctx=0, slots=2, draft_bytes=0, mtp=False):
     """How to run `path` inside `budget` bytes: {ctx, cache_type, need, weights, kv, fits, info}. The context is the
     longest that fits (up to the model's own and to want_ctx), with an f16 KV cache when it fits and q8_0 when that
     buys a longer context."""
     info = gguf.info(path)
     budget = budget if budget is not None else hardware.budget(setting_gb=settings.user().get("ram_budget_gb"))
     weights = info["size"] + draft_bytes
-    per_tok = info["kv_bytes_per_token"] or 64 * 1024
+    per_tok = (info["kv_bytes_per_token"] or 64 * 1024) + (info.get("draft_kv_bytes_per_token", 0) if mtp else 0)
     trained = info["context"] or 32768
     top = min(want_ctx or 32768, trained)
-    # Compute buffers grow with the model's width and the batch; a small fixed part for the server itself.
-    overhead = 300 * MB + int(min(info["size"], 8 * GB) * 0.04) + 16 * MB * slots
+    state = info.get("state_bytes", 0)
+    if not state and info.get("sliding_window"):      # the checkpoints of a sliding-window cache
+        state = info["sliding_window"] * info["kv_bytes_per_token"]
     best = None
-    for ctx in CONTEXTS:
-        if ctx > top and ctx != CONTEXTS[-1]:
-            continue
+    # (a model trained on less than 16k gets its own context: more would not work)
+    for ctx in [c for c in CONTEXTS if c <= top] or [top]:
         for cache, factor in (("f16", 1.0), ("q8_0", 0.53)):
-            kv = int(ctx * per_tok * factor)
-            need = weights + kv + overhead
+            need = need_bytes(weights, per_tok, ctx, state, slots, factor, mtp)
             if need <= budget:
-                best = {"ctx": ctx, "cache_type": cache, "need": need, "weights": weights, "kv": kv, "fits": True}
+                best = {"ctx": ctx, "cache_type": cache, "need": need, "weights": weights,
+                        "kv": int(ctx * per_tok * factor), "fits": True}
                 break
         if best:
             break
     if not best:
-        ctx = CONTEXTS[-1]
-        kv = int(ctx * per_tok * 0.53)
-        best = {"ctx": ctx, "cache_type": "q8_0", "need": weights + kv + overhead, "weights": weights, "kv": kv,
-                "fits": False}
+        ctx = min(CONTEXTS[-1], top)
+        best = {"ctx": ctx, "cache_type": "q8_0", "need": need_bytes(weights, per_tok, ctx, state, slots, 0.53, mtp),
+                "weights": weights, "kv": int(ctx * per_tok * 0.53), "fits": False}
     best["info"] = info
     best["budget"] = budget
     return best
+
+
+def need_bytes(weights, kv_per_token, ctx, state=0, slots=2, factor=1.0, mtp=False):
+    """Everything a llama-server holds for a model (measured with llama.cpp on CPU, --kv-unified, 2 slots; Qwen3.5 4B
+    and 9B, Qwen3.6 35B-A3B, each with MTP: the formula is 0.1-0.4 GB above what they held):
+    - the weights: the file is mapped and read. llama.cpp also copies some tensors into a faster layout ("repack",
+      1.5 GB on 4B Q4_K_M), but then never reads those tensors' pages of the file again, and the OS takes them back
+      when it needs the RAM, so they are counted once;
+    - the KV cache for ctx tokens (the MTP head's own included; factor 0.53 for q8_0);
+    - per slot, the recurrent layers' state, one more copy of it per drafted token (MTP rolls back rejected drafts)
+      and CHECKPOINTS more (50 MB each on Qwen3.5 4B/9B, 63 MB on 35B-A3B);
+    - compute buffers and the server itself: ~330 MB, and ~180 MB more for the MTP head."""
+    copies = 1 + (MTP_DRAFT if mtp else 0) + CHECKPOINTS
+    return (weights + int(ctx * kv_per_token * factor) + slots * state * copies
+            + 330 * MB + (180 * MB if mtp else 0))
 
 
 class Server:
@@ -99,7 +120,7 @@ class Server:
         self.port = 0
         self.proc = None
         self.used = time.time()
-        self.plan = plan(path, budget=budget, want_ctx=ctx, slots=slots)
+        self.plan = plan(path, budget=budget, want_ctx=ctx, slots=slots, mtp=mtp)
         self.ctx = self.plan["ctx"]
         self.threads = threads or hardware.physical_cores()
         self.mtp = mtp
@@ -125,7 +146,8 @@ class Server:
         a = [exe, "-m", self.path, "--host", "127.0.0.1", "--port", str(self.port), "--no-webui",
              "-c", str(self.ctx), "-np", str(self.slots), "--kv-unified", "--jinja",
              "-t", str(cores), "-tb", str(max(cores, logical)),
-             "--slot-save-path", settings.SLOTS, "--cache-ram", str(self.cache_ram_mb())]
+             "--slot-save-path", settings.SLOTS, "--cache-ram", str(self.cache_ram_mb()),
+             "--ctx-checkpoints", str(CHECKPOINTS)]
         if self.plan["cache_type"] != "f16":
             a += ["-fa", "on", "-ctk", self.plan["cache_type"], "-ctv", self.plan["cache_type"]]
         kinds = []

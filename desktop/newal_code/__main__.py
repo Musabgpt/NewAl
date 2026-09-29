@@ -39,6 +39,13 @@ def main(argv=None):
     ap.add_argument("--no-browser", action="store_true")
     ap.add_argument("--download", default="")
     ap.add_argument("--version", action="store_true")
+    ap.add_argument("--continue", "-c", dest="cont", action="store_true", help="continue the last thread here")
+    ap.add_argument("--resume", default="", help="exec: continue this thread")
+    ap.add_argument("--add-dir", action="append", default=[], metavar="DIR",
+                    help="another folder the agent may read and edit (repeatable)")
+    ap.add_argument("--output-last-message", "-o", default="", metavar="FILE",
+                    help="exec: also write the final answer to this file")
+    ap.add_argument("--max-steps", type=int, default=0, help="exec: stop after this many tool rounds")
     a = ap.parse_intermixed_args(argv)
     if a.version:
         print("%s %s" % (NAME, __version__))
@@ -53,11 +60,17 @@ def main(argv=None):
         from newal_code import server
         server.main(a.port, open_browser=not a.no_browser)
         return 0
+    last = ""
+    if a.cont:
+        from newal_code import session
+        items = session.listing(root, limit=1)
+        last = items[0]["id"] if items else ""
     if cmd == "exec":
         from newal_code import tui
         prompt = rest or sys.stdin.read()
         return tui.exec_once(root, prompt, model=a.model, mode=mode or "auto-edit", json_out=a.json,
-                             full_auto=a.full_auto)
+                             full_auto=a.full_auto, resume=a.resume or last, dirs=a.add_dir,
+                             output=a.output_last_message, max_steps=a.max_steps)
     if cmd == "models":
         return cmd_models(a.download)
     if cmd == "doctor":
@@ -70,7 +83,9 @@ def main(argv=None):
             return 0
         return tui.run(root, resume=rest)
     from newal_code import tui
-    return tui.run(root, model=a.model, mode=mode, prompt=rest or None)
+    if last:
+        return tui.run(root, resume=last, prompt=rest or None)
+    return tui.run(root, model=a.model, mode=mode, prompt=rest or None, dirs=a.add_dir)
 
 
 COMMANDS = ("app", "serve", "web", "ui", "exec", "models", "doctor", "resume", "bench")

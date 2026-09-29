@@ -33,6 +33,7 @@
         <span id="branch-chip" class="chip" hidden></span>
       </div>
       <div class="top-actions">
+        <div class="picker up-right down" id="open-picker"><button type="button" class="btn picker-btn-plain" title="Open the folder"><i data-icon="folder"></i><span>Open</span><i data-icon="chevron"></i></button><div class="menu"></div></div>
         <button id="btn-commit" class="btn" hidden><i data-icon="commit"></i><span>Commit</span></button>
         <button id="toggle-terminal" class="icon-btn" title="Terminal (Ctrl `)"><i data-icon="terminal"></i></button>
         <button id="toggle-review" class="btn review-btn" title="Review changes"><i data-icon="diff"></i><span id="changes-count">0</span></button>
@@ -101,7 +102,12 @@
     <div id="review-diff"></div>
     <form id="commit-form" hidden>
       <input id="commit-msg" placeholder="Commit message">
-      <button class="btn primary" type="submit">Commit</button>
+      <select id="commit-then" title="After the commit">
+        <option value="">Commit</option>
+        <option value="push">Commit and push</option>
+        <option value="pr">Commit and create PR</option>
+      </select>
+      <button class="btn primary" type="submit">Go</button>
     </form>
   </aside>
 </div>

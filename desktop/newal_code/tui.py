@@ -188,13 +188,13 @@ def header(s, model_name):
     return "\n".join(out)
 
 
-def run(root, model=None, mode=None, prompt=None, resume=None):
+def run(root, model=None, mode=None, prompt=None, resume=None, dirs=()):
     settings.ensure_dirs()
     svc = Service()
     if resume:
         s = svc.get(resume)
     else:
-        s = svc.create(root, model=model, mode=mode)
+        s = svc.create(root, model=model, mode=mode, dirs=dirs)
     printer = Printer()
     agent = None
 
@@ -237,6 +237,7 @@ def run(root, model=None, mode=None, prompt=None, resume=None):
         return a
 
     agent = make_agent()
+    _completion(svc, s.root)
 
     def warm():
         try:
@@ -297,11 +298,50 @@ def run(root, model=None, mode=None, prompt=None, resume=None):
     return 0
 
 
-def exec_once(root, prompt, model=None, mode="auto-edit", json_out=False, full_auto=False):
-    """Headless run (like `codex exec` / `claude -p`): one request, final answer on stdout (or JSONL events)."""
+def _completion(svc, root):
+    """Tab completes slash commands (and @files) where readline exists."""
+    try:
+        import readline
+    except ImportError:
+        return
+    names = ["/" + c["name"] for c in svc.commands(root)]
+
+    def complete(text, state):
+        if text.startswith("/"):
+            hits = [n for n in names if n.startswith(text)]
+        elif text.startswith("@"):
+            from . import tools as t
+
+            class Ctx:
+                pass
+            Ctx.root = root
+            hits = ["@" + r for _, r in t.files_in(Ctx, limit=5000) if r.startswith(text[1:])][:50]
+        else:
+            hits = []
+        return hits[state] if state < len(hits) else None
+    readline.set_completer_delims(" \t\n")
+    readline.set_completer(complete)
+    readline.parse_and_bind("tab: complete")
+
+
+def exec_once(root, prompt, model=None, mode="auto-edit", json_out=False, full_auto=False, resume="", dirs=(),
+              output="", max_steps=0):
+    """Headless run (like `codex exec` / `claude -p`): one request, final answer on stdout (or JSONL events).
+    resume: continue that thread (`codex exec resume`, `claude -c -p`)."""
     import json
     settings.ensure_dirs()
-    s = sessmod.Session(root, model=model, mode="full-auto" if full_auto else mode)
+    if resume:
+        s = sessmod.Session.load(resume)
+        if model:
+            s.model = model
+        if full_auto or mode:
+            s.mode = "full-auto" if full_auto else settings.normal_mode(mode)
+    else:
+        s = sessmod.Session(root, model=model, mode="full-auto" if full_auto else mode)
+    for d in dirs:
+        d = os.path.abspath(os.path.expanduser(d))
+        if os.path.isdir(d) and d not in s.dirs:
+            s.dirs.append(d)
     from .agent import Agent
     printer = Printer(sys.stderr) if not json_out else None
 
@@ -313,7 +353,13 @@ def exec_once(root, prompt, model=None, mode="auto-edit", json_out=False, full_a
         else:
             printer.event(ev)
     a = Agent(s, emit=emit, approve=None)
+    if max_steps:
+        a.cfg["max_steps"] = max_steps
     answer = a.run(prompt)
+    if output:
+        with open(output, "w", encoding="utf-8") as f:
+            f.write(answer + "\n")
     if not json_out:
         print(answer)
+        sys.stderr.write(c(DIM, "(thread %s: newal-code exec --resume %s \"...\")\n" % (s.id, s.id)))
     return 0

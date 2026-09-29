@@ -106,6 +106,7 @@ class Handler(BaseHTTPRequestHandler):
                                               for s in extensions.skills(root).values()],
                                    "commands": svc.commands(root),
                                    "instructions": extensions.instruction_files(root),
+                                   "plugins": __import__("newal_code.plugins", fromlist=["x"]).listing(root),
                                    "hooks": settings.project(root).get("hooks") or {},
                                    "mcp": [dict(name=k, **{x: y for x, y in v.items() if x != "env"})
                                            for k, v in __import__("newal_code.mcp", fromlist=["x"]).configs(root).items()]})
@@ -162,7 +163,10 @@ class Handler(BaseHTTPRequestHandler):
                 if action == "revert":
                     return self._json(_revert_file(s, b.get("path", "")))
                 if action == "commit":
-                    return self._json(_commit(s, b.get("message") or s.title or "NewAl Code changes"))
+                    return self._json(_commit(s, b.get("message") or s.title or "NewAl Code changes",
+                                              b.get("then", "")))
+                if action == "open":
+                    return self._json(_open_in(s.root, b.get("app", "files")))
                 if action == "apply":
                     from .service import apply_worktree
                     return self._json(apply_worktree(s))
@@ -257,17 +261,50 @@ def _revert_file(s, rel):
     return {"ok": True, "path": rel}
 
 
-def _commit(s, message):
+def _commit(s, message, then=""):
+    """Commits the thread's changed files; then="push" pushes the branch, then="pr" also opens a pull request (on a
+    new branch when the thread is on main/master), like the Codex app's commit menu."""
     if not util.git_root(s.root):
         return {"error": "not a git repository"}
     files = [c["abs"] for c in s.changes()]
     if not files:
         return {"error": "no changes"}
-    code, out = util.git(s.root, "add", "--", *files)
+    out = ""
+    if then == "pr":
+        code, branch = util.git(s.root, "rev-parse", "--abbrev-ref", "HEAD")
+        if branch.strip() in ("main", "master", "HEAD"):
+            slug = re.sub(r"[^a-z0-9]+", "-", message.lower()).strip("-")[:40] or "changes"
+            code, out = util.git(s.root, "checkout", "-b", "newal/" + slug)
+            if code:
+                return {"error": out}
+    code, o = util.git(s.root, "add", "--", *files)
     if code:
-        return {"error": out}
-    code, out = util.git(s.root, "commit", "-m", message)
-    return {"ok": code == 0, "output": out[-2000:]}
+        return {"error": o}
+    code, o = util.git(s.root, "commit", "-m", message)
+    out += o
+    if code or not then:
+        return {"ok": code == 0, "output": out[-2000:]}
+    code, o = util.git(s.root, "push", "-u", "origin", "HEAD", timeout=120)
+    out += o
+    if code:
+        return {"ok": False, "committed": True, "output": out[-2000:]}
+    result = {"ok": True, "pushed": True, "output": out[-2000:]}
+    m = re.search(r"https://\S+/pull/new/\S+", o)
+    if then == "pr":
+        import shutil
+        if shutil.which("gh"):
+            try:
+                p = subprocess.run(["gh", "pr", "create", "--fill"], cwd=s.root, capture_output=True, text=True,
+                                   timeout=120, creationflags=0x08000000 if os.name == "nt" else 0)
+                link = re.search(r"https://\S+/pull/\d+", p.stdout or "")
+                if link:
+                    result["url"] = link.group(0)
+                result["output"] += (p.stdout or "") + (p.stderr or "")
+            except (OSError, subprocess.SubprocessError) as e:
+                result["output"] += str(e)
+        if "url" not in result and m:
+            result["url"] = m.group(0)          # GitHub's "create a pull request" page for the branch
+    return result
 
 
 def _terminal(svc, s, command):
@@ -287,6 +324,25 @@ def _terminal(svc, s, command):
         svc.broadcast({"type": "terminal_end", "session": s.id, "exit": code})
     threading.Thread(target=run, daemon=True).start()
     return {"ok": True}
+
+
+def _open_in(root, app):
+    """Opens the thread's folder in an editor (VS Code, Cursor) or the file manager."""
+    import shutil
+    import sys
+    try:
+        if app in ("code", "cursor"):
+            exe = shutil.which(app) or shutil.which(app + ".cmd")
+            if not exe:
+                return {"error": "%s is not installed (or not on PATH)" % app}
+            subprocess.Popen([exe, root], creationflags=0x08000000 if os.name == "nt" else 0)
+        elif os.name == "nt":
+            os.startfile(root)  # noqa: S606 - the user's own folder
+        else:
+            subprocess.Popen(["open" if sys.platform == "darwin" else "xdg-open", root])
+        return {"ok": True}
+    except OSError as e:
+        return {"error": str(e)}
 
 
 def _browse(path):

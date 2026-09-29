@@ -84,6 +84,8 @@ class Agent:
         self.pending = {}          # approval id -> threading.Event, answer
         self.sub_count = 0
         self._schemas = None
+        self._first_context = None     # the first message's project context, made once (see _context_block)
+        self._context_lock = threading.Lock()
 
     # ------------------------------------------------------------ plumbing
 
@@ -113,7 +115,7 @@ class Agent:
         if self.agent_def and self.agent_def.get("tools"):
             names = [t for t in self.agent_def["tools"] if t in tools.REGISTRY]
         else:
-            names = tools.default_set(spec)
+            names = tools.default_set(spec, self.session.root)
         if self.skills and "skill" not in names and not (self.agent_def and self.agent_def.get("tools")):
             names.append("skill")
         if self.depth >= MAX_DEPTH and "task" in names:
@@ -162,6 +164,7 @@ class Agent:
         started = time.time()
         prefix = self._prefix_text(client, system, defs)
         if prefix and client.server.restore_slot(slot, name):
+            self._warm_context(client, system, defs, slot)
             self.emit({"type": "warm", "restored": True, "seconds": round(time.time() - started, 2)})
             return time.time() - started
         try:
@@ -175,8 +178,32 @@ class Agent:
                             owner=self.session.id, max_tokens=1)
         except Exception as e:  # noqa: BLE001 - only a speed-up
             self.emit({"type": "status", "text": "warm-up skipped: %s" % e})
+        if prefix:
+            self._warm_context(client, system, defs, slot)
         self.emit({"type": "warm", "restored": False, "seconds": round(time.time() - started, 2)})
         return time.time() - started
+
+    def _warm_context(self, client, system, defs, slot):
+        """Reads the thread's project context too (the start of its first message: AGENTS.md, the files, git) while
+        the user types, so the first request only reads the request. If the text the request renders differs at the
+        very end, llama.cpp goes back to its checkpoint a few tokens before it."""
+        if self.depth or any(m.get("role") == "user" for m in self.session.messages):
+            return
+        mark = "\u2063NEWAL\u2063"
+        try:
+            block = self._context_block()
+            r = providers.post_json(client.server.url + "/apply-template",
+                                    {"messages": [{"role": "system", "content": system},
+                                                  {"role": "user", "content": block + "\n\n" + mark}],
+                                     "tools": defs}, timeout=60)
+            text = r.get("prompt") or ""
+            i = text.find(mark)
+            if i > 0:
+                providers.post_json(client.server.url + "/completion",
+                                    {"prompt": text[:i].rstrip(), "n_predict": 0, "cache_prompt": True,
+                                     "id_slot": slot}, timeout=3600)
+        except Exception:  # noqa: BLE001 - only a speed-up
+            pass
 
     def _prefix_text(self, client, system, defs):
         """The exact text the template renders before the first user message: a slot holding exactly this continues
@@ -216,7 +243,9 @@ class Agent:
         self.last_change_step = -1
         self.last_test_ok_step = -1
         self.fail_streak = 0
-        self.think_next = False
+        # A question gets a short think before its answer: nothing will run to check it (a task is checked by running
+        # it instead, so it starts straight away).
+        self.think_next = looks_like_question(text)
         self.last_error = ""
         self.emit({"type": "turn_start", "turn": s.turn, "text": text, "model": client.id, "mode": s.mode})
         cfg = self.cfg
@@ -321,34 +350,48 @@ class Agent:
         prefetch = None
         first = not any(m.get("role") == "user" for m in s.messages)
         if first and self.depth == 0:
-            env = prompts.environment(s.root, self.shell)
-            parts.append("<context>\nProject folder: %s\nDate: %s" % (s.root, env["date"]))
-            instr = extensions.instructions(s.root)
-            if instr:
-                parts.append("Project instructions (follow them):\n" + instr)
-            idx = extensions.skills_index(self.skills)
-            if idx:
-                parts.append(idx)
-            hook_cfg = self.cfg.get("hooks") or {}
-            if hooks.configured(hook_cfg, "SessionStart"):
-                h = hooks.run(hook_cfg, "SessionStart", {"session_id": s.id, "source": "startup",
-                                                        "transcript_path": s.path}, s.root)
-                parts += h.context
+            parts.append(self._context_block())
             prefetch = ctxmod.gather(ToolContext(self), text, auto_files=self.cfg.get("auto_context", True))
-            parts.append(prefetch["head"])
-            parts.append("</context>")
         elif first and self.depth > 0:
             parts.append("Project folder: %s" % s.root)
         note = prompts.MODE_NOTES.get(s.mode, "")
         if note and (first or getattr(self, "_mode_noted", None) != s.mode):
             parts.append(note)
         self._mode_noted = s.mode
+        if s.dirs and getattr(self, "_dirs_noted", None) != s.dirs and self.depth == 0:
+            parts.append("You may also read and edit these folders (use their full paths): " + ", ".join(s.dirs))
+        self._dirs_noted = list(s.dirs)
         parts += extra_context
         parts.append(text)
         if self.depth == 0 and self.client is not None and self.client.local:
             # Small models follow the last thing they read best: the reply rule again, where it is read last.
             parts.append("(When done, reply in one or two sentences.)")
         return "\n\n".join(p for p in parts if p), prefetch
+
+    def _context_block(self):
+        """The project context that starts a session's first message (the same whatever the request): made once,
+        when the thread opens (warm) or at the first request, so what was read in advance is what is sent. The
+        SessionStart hooks run here, at the session's start, as in Claude Code."""
+        with self._context_lock:
+            if self._first_context is None:
+                s = self.session
+                env = prompts.environment(s.root, self.shell)
+                parts = ["<context>\nProject folder: %s\nDate: %s" % (s.root, env["date"])]
+                instr = extensions.instructions(s.root)
+                if instr:
+                    parts.append("Project instructions (follow them):\n" + instr)
+                idx = extensions.skills_index(self.skills)
+                if idx:
+                    parts.append(idx)
+                hook_cfg = self.cfg.get("hooks") or {}
+                if hooks.configured(hook_cfg, "SessionStart"):
+                    h = hooks.run(hook_cfg, "SessionStart", {"session_id": s.id, "source": "startup",
+                                                            "transcript_path": s.path}, s.root)
+                    parts += h.context
+                parts.append(ctxmod.gather(ToolContext(self), "", auto_files=False)["head"])
+                parts.append("</context>")
+                self._first_context = "\n\n".join(p for p in parts if p)
+            return self._first_context
 
     def _prefetched(self, prefetch):
         """The code the request names, as tool calls already made: the model sees it has read those files (and
@@ -386,7 +429,8 @@ class Agent:
             # Think when stuck: a local model answers straight away (fast), but right after a change fails its check it
             # thinks before its next step - longer when it failed before. What goes well costs no thinking at all.
             reasoning = "on"
-            extra["thinking_budget_tokens"] = 384 if self.fail_streak <= 1 else 1024
+            extra["thinking_budget_tokens"] = (256 if not self.fail_streak else 384 if self.fail_streak == 1
+                                               else 1024)
         self.think_next = False
         buf = {"text": 0}
 
@@ -670,13 +714,16 @@ class Agent:
         client = self.client
         want = adef.get("model") or ""
         if want and want not in ("inherit", "default"):
-            mid = models.role_model(want) if want in models.ROLES else want
-            try:
-                spec = models.resolve(mid)
-                if spec["id"] != client.id:
-                    client = models.connect(spec)
-            except Exception:  # noqa: BLE001 - the parent's model does the work instead
-                client = self.client
+            mid = models.role_model(want, self.session.team) if want in models.ROLES else want
+            if mid:
+                try:
+                    spec = models.resolve(mid)
+                    if spec["id"] != client.id:
+                        client = models.connect(spec)
+                except Exception as e:  # noqa: BLE001 - the parent's model does the work instead
+                    self.emit({"type": "notice", "text": "%s's model %s is not available (%s); using %s" % (
+                        adef["name"], mid, e, client.id)})
+                    client = self.client
         sub = Session(self.session.root, sid="%s-sub%d" % (self.session.id, self.sub_count), model=client.id,
                       mode=adef.get("mode") or self.session.mode)
         sub.turn = self.session.turn
@@ -704,6 +751,20 @@ class Agent:
         self.emit({"type": "subagent_end", "sub": sid, "agent": adef["name"], "report": report[:4000],
                    "steps": agent.step})
         return "Report from %s:\n%s" % (adef["name"], report), {"agent": adef["name"], "steps": agent.step}
+
+
+_QUESTION_START = re.compile(
+    r"^(what|which|why|how|where|when|who|whose|does|do|did|is|are|was|were|can|could|should|would|will|explain|"
+    r"describe|summari[sz]e|tell me|list|show me|ما|ماذا|شو|ليش|لماذا|كيف|وين|أين|متى|مين|من|هل|اشرح|وضح|قديش|كم)\b",
+    re.I)
+
+
+def looks_like_question(text):
+    """A question (to answer) rather than a task (to do)."""
+    t = re.sub(r"\s+", " ", str(text or "")).strip()
+    if not t or t.startswith("/"):
+        return False
+    return t.endswith(("?", "؟")) or bool(_QUESTION_START.match(t))
 
 
 def error_signature(output):

@@ -153,17 +153,14 @@ def auto(reg=None):
 
 
 def role_model(role, team=None):
-    """The model id serving a role: the team's, the settings' roles, else the main model."""
+    """The model id configured for a role (the team's, else the settings' roles), or None: then the thread's own
+    model does that job too (no second model is loaded)."""
     cfg = settings.user()
     teams = cfg.get("teams") or {}
     if team and team in teams and teams[team].get(role):
         return teams[team][role]
     roles = cfg.get("roles") or {}
-    if roles.get(role):
-        return roles[role]
-    if role != "main":
-        return role_model("main", team)
-    return cfg.get("model") or "auto"
+    return roles.get(role) or None
 
 
 def _key(spec):

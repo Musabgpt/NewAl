@@ -4,13 +4,14 @@
   with @path imports
 - skills: <dir>/SKILL.md folders (name + description in the prompt, the body loaded on demand by the skill tool)
 - custom slash commands: .newal/commands, .claude/commands, ~/.codex/prompts (Markdown with $ARGUMENTS)
-- sub-agents: .newal/agents, .claude/agents (Markdown with name, description, tools, model)"""
+- sub-agents: .newal/agents, .claude/agents (Markdown with name, description, tools, model)
+- and the same from plugins (plugins.py)"""
 
 import os
 import re
 import subprocess
 
-from . import settings, util
+from . import plugins, settings, util
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 INSTRUCTION_FILES = ("AGENTS.md", "CLAUDE.md", "CLAUDE.local.md", os.path.join(".newal", "INSTRUCTIONS.md"))
@@ -86,9 +87,9 @@ def skill_dirs(root):
     if root:
         dirs += [os.path.join(root, ".newal", "skills"), os.path.join(root, ".claude", "skills"),
                  os.path.join(root, ".agents", "skills")]
-    dirs += [os.path.join(settings.HOME, "skills"), util.home(".claude", "skills"), util.home(".codex", "skills"),
-             os.path.join(HERE, "skills")]
-    return dirs
+    dirs += [os.path.join(settings.HOME, "skills"), util.home(".claude", "skills"), util.home(".codex", "skills")]
+    dirs += [os.path.join(p, "skills") for p in plugins.dirs(root)]
+    return dirs + [os.path.join(HERE, "skills")]
 
 
 def skills(root):
@@ -126,7 +127,7 @@ def command_dirs(root):
     if root:
         dirs += [os.path.join(root, ".newal", "commands"), os.path.join(root, ".claude", "commands")]
     dirs += [os.path.join(settings.HOME, "commands"), util.home(".claude", "commands"), util.home(".codex", "prompts")]
-    return dirs
+    return dirs + [os.path.join(p, "commands") for p in plugins.dirs(root)]
 
 
 def custom_commands(root):
@@ -205,7 +206,7 @@ def agent_dirs(root):
     if root:
         dirs += [os.path.join(root, ".newal", "agents"), os.path.join(root, ".claude", "agents")]
     dirs += [os.path.join(settings.HOME, "agents"), util.home(".claude", "agents"), util.home("NewAl", "agents")]
-    return dirs
+    return dirs + [os.path.join(p, "agents") for p in plugins.dirs(root)]
 
 
 _TOOL_ALIASES = {"bash": "bash", "read": "read", "edit": "edit", "multiedit": "edit", "write": "write",
