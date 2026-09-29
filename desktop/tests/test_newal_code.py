@@ -179,7 +179,7 @@ class ToolsTest(unittest.TestCase):
         root = make_project({})
         c = self.ctx(root)
         text, meta = tools.call(c, "bash", {"command": "sleep 5", "timeout": 1})
-        self.assertEqual(meta["exit"], 124)
+        self.assertEqual(meta["exit"], 124, text)
         text, meta = tools.call(c, "bash", {"command": "echo started; sleep 30", "background": True})
         self.assertIn("job1", text)
         text, _ = tools.call(c, "job", {"id": "job1"})
@@ -359,6 +359,19 @@ class SandboxTest(unittest.TestCase):
         m = self.run_in("auto-edit", "echo a > in.txt && echo ok")
         self.assertEqual(m["exit"], 0, m)
         self.assertTrue(os.path.exists(os.path.join(self.root, "in.txt")))
+
+    def test_external_commands_in_the_sandbox(self):
+        """Programs found on PATH (not only shell builtins) run in the sandbox; on Windows with a Git Bash also
+        running at normal integrity (the case that needs MSYS2's separate namespace)."""
+        other = None
+        if self.sb.kind() == "low-integrity" and tools.shell_command()[1] == "bash":
+            other = subprocess.Popen(tools.shell_command()[0] + ["sleep 20"])
+            self.addCleanup(other.kill)
+            time.sleep(3)
+        m = self.run_in("auto-edit", "sleep 0 && ls > listing.txt && cat listing.txt && type sleep")
+        print("\n[external commands] exit %s:\n%s" % (m["exit"], m["output"][-1500:]))
+        self.assertEqual(m["exit"], 0, m["output"])
+        self.assertTrue(os.path.exists(os.path.join(self.root, "listing.txt")))
 
     def test_windows_labels_the_project_once(self):
         if self.sb.kind() != "low-integrity":

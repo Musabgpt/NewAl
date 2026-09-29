@@ -16,11 +16,21 @@ from . import gguf, hardware, settings
 HF = "https://huggingface.co/"
 
 MODELS = [
+    {"id": "qwen3.5-0.8b-iq3", "title": "Qwen3.5 0.8B (3-bit)", "repo": "unsloth/Qwen3.5-0.8B-GGUF",
+     "file": "Qwen3.5-0.8B-UD-IQ3_XXS.gguf", "size": 398237952, "kv": 12288, "state": 20201472, "active_b": 0.8,
+     "mtp": False, "min_ram_gb": 2, "context": 32768, "good_for": ["main", "fast"],
+     "about": "For 2 GB phones (NewAl Code Lite): short edits, explanations and small scripts in about 0.65 GB."},
+    {"id": "qwen3.5-0.8b", "title": "Qwen3.5 0.8B", "repo": "unsloth/Qwen3.5-0.8B-GGUF",
+     "file": "Qwen3.5-0.8B-Q4_K_M.gguf", "size": 532517120, "kv": 12288, "state": 20201472, "active_b": 0.8,
+     "mtp": False, "min_ram_gb": 3, "context": 32768, "good_for": ["main", "fast"],
+     "about": "For 3 GB phones (NewAl Code Lite): simple edits, explanations and small scripts in about 0.75-1 GB "
+              "of RAM."},
     {"id": "qwen3.5-2b", "title": "Qwen3.5 2B", "repo": "unsloth/Qwen3.5-2B-MTP-GGUF",
      "file": "Qwen3.5-2B-Q4_K_M.gguf", "size": 1330000000, "kv": 12288, "state": 20201472, "active_b": 2.0,
      "mtp": True,
-     "min_ram_gb": 6, "context": 32768, "good_for": ["fast"],
-     "about": "Small and quick: titles, summaries and exploring on the smallest computers."},
+     "min_ram_gb": 4, "context": 32768, "good_for": ["main", "fast"],
+     "about": "Phones with 4 GB and the smallest computers; on bigger ones, the quick helper for titles and "
+              "summaries."},
     {"id": "qwen3.5-4b", "title": "Qwen3.5 4B", "repo": "unsloth/Qwen3.5-4B-MTP-GGUF",
      "file": "Qwen3.5-4B-Q4_K_M.gguf", "size": 2830000000, "kv": 32768, "state": 52690944, "active_b": 4.2,
      "mtp": True,
@@ -52,6 +62,10 @@ MODELS = [
 
 # The default local model(s) per RAM tier: main does the work; fast (optional) helps with small jobs.
 TIER_DEFAULTS = {
+    "2gb": {"main": "qwen3.5-0.8b-iq3"},
+    "3gb": {"main": "qwen3.5-0.8b"},
+    "4gb": {"main": "qwen3.5-2b"},
+    "6gb": {"main": "qwen3.5-2b"},
     "8gb": {"main": "qwen3.5-4b"},
     "12gb": {"main": "qwen3.5-9b"},
     "16gb": {"main": "qwen3.5-9b"},
@@ -104,13 +118,11 @@ def has_mtp_file(m):
 
 
 def fits(m, total=None):
-    """Whether the model runs on a computer with this much RAM: what runtime.plan counts once the file is here, with
-    a 16k context (q8_0)."""
+    """Whether the model runs on a computer with this much RAM: runtime's plan for it (with the MTP head's cache,
+    about one attention layer more) finds a context of 16k, or on a phone 8k and up."""
     from . import runtime
-    mtp = bool(m.get("mtp"))
-    kv = m["kv"] * (9 if mtp else 8) // 8          # the MTP head: about one attention layer more
-    need = runtime.need_bytes(m["size"], kv, 16384, state=m.get("state", 0), factor=0.53, mtp=mtp)
-    return need <= hardware.budget(total)
+    return runtime.fit(m["size"], m["kv"], m["kv"] // 8 if m.get("mtp") else 0, m.get("state", 0), 16384,
+                       hardware.budget(total), mtp=bool(m.get("mtp")))["fits"]
 
 
 def recommended(total=None):

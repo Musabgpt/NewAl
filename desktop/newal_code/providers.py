@@ -7,8 +7,10 @@ the Anthropic provider converts on the way in and out. Every call streams, can b
 cache and written, and how long each part took."""
 
 import http.client
+import io
 import json
 import os
+import select
 import socket
 import ssl
 import threading
@@ -69,8 +71,42 @@ def _proxy_for(scheme, host):
     return urllib.parse.urlsplit(var) if var else None
 
 
+class _Watched:
+    """A connection's socket that waits for data at most 0.25 s at a time and checks whether its stream was closed:
+    a close() from another thread then ends a read at once on every system (a shutdown does not end a read blocked
+    in another thread on Windows, nor always on macOS)."""
+
+    def __init__(self, sock, stream):
+        self._s, self._stream = sock, stream
+
+    def __getattr__(self, name):
+        return getattr(self._s, name)
+
+    def makefile(self, mode="rb", *args, **kwargs):
+        self._s._io_refs += 1                  # as socket.makefile: the response outlives the connection's close()
+        return io.BufferedReader(socket.SocketIO(self, "rb"))
+
+    def _ready(self):
+        pending = getattr(self._s, "pending", None)        # TLS: data already decrypted
+        if pending and pending():
+            return True
+        if hasattr(select, "poll"):
+            p = select.poll()
+            p.register(self._s.fileno(), select.POLLIN | select.POLLERR | select.POLLHUP)
+            return bool(p.poll(250))
+        return bool(select.select([self._s], [], [], 0.25)[0])
+
+    def recv_into(self, buf, nbytes=0, flags=0):
+        while not self._ready():
+            if self._stream.closed:
+                raise ConnectionAbortedError("cancelled")
+        if self._stream.closed:
+            raise ConnectionAbortedError("cancelled")
+        return self._s.recv_into(buf, nbytes, flags)
+
+
 class Stream:
-    """One streaming POST. close() from another thread aborts a blocked read."""
+    """One streaming POST. close() from another thread aborts a blocked read (within 0.25 s)."""
 
     def __init__(self, url, body, headers, timeout=1800):
         u = urllib.parse.urlsplit(url)
@@ -101,6 +137,8 @@ class Stream:
         hdrs = {"Content-Type": "application/json", "Accept": "text/event-stream", "User-Agent": "NewAl-Code"}
         hdrs.update(headers or {})
         self.conn.request("POST", path, body=data, headers=hdrs)
+        self.conn.sock = _Watched(self.conn.sock, self)
+        self._owner = threading.get_ident()
 
     @property
     def resp(self):
@@ -136,23 +174,21 @@ class Stream:
             return ""
 
     def close(self):
+        """Ends the request. From another thread (a cancel), the reading thread stops within 0.25 s and closes
+        the connection itself: closing it here could wait on the lock that thread's read holds."""
         self.closed = True
         sock = getattr(self.conn, "sock", None)
-        if sock is not None:
+        real = getattr(sock, "_s", sock)
+        if real is not None:
             try:
-                sock.shutdown(socket.SHUT_RDWR)          # Linux, macOS: ends a read blocked in another thread
+                real.shutdown(socket.SHUT_RDWR)          # tells the server at once (it stops generating)
             except OSError:
                 pass
-            # Windows: a shutdown does not end that read (the response's file object keeps the socket open), but
-            # closing the handle does. The socket object lets go of it first, so nothing closes it twice.
+        if threading.get_ident() == getattr(self, "_owner", None):
             try:
-                socket.close(sock.detach())
-            except (OSError, ValueError):
+                self.conn.close()
+            except OSError:
                 pass
-        try:
-            self.conn.close()
-        except OSError:
-            pass
 
 
 def _watch(stream, cancel):

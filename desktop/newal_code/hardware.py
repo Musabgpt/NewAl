@@ -11,6 +11,7 @@ import sys
 GB = 1024 ** 3
 IS_WINDOWS = os.name == "nt"
 IS_MAC = sys.platform == "darwin"
+IS_ANDROID = hasattr(sys, "getandroidapilevel")
 
 _cache = {}
 
@@ -189,7 +190,11 @@ def cpu_features():
 
 # RAM tiers: what a computer of this size can give a local model while the OS, a browser and an editor keep running.
 TIERS = [
-    # (name, up to total GB, GB kept for everything else)
+    # (name, up to total GB, GB kept for everything else). A phone reports less than its size (2 GB: ~1.8-1.9).
+    ("2gb", 2.6, 1.2),
+    ("3gb", 3.6, 1.6),
+    ("4gb", 5.0, 2.0),
+    ("6gb", 7.0, 2.4),
     ("8gb", 10.5, 2.8),
     ("12gb", 13.5, 3.3),
     ("16gb", 20.0, 3.8),
@@ -211,8 +216,8 @@ def budget(total_bytes=None, setting_gb=0):
     if setting_gb:
         return int(float(setting_gb) * GB)
     total = total_bytes or total_ram()
-    reserve = next(r for name, upto, r in TIERS if total / GB <= upto)
-    return max(int(1.5 * GB), int(total - reserve * GB))
+    reserve = next((r for name, upto, r in TIERS if total / GB <= upto), TIERS[-1][2])
+    return max(int((0.5 if total < 5 * GB else 1.5) * GB), int(total - reserve * GB))
 
 
 def summary():

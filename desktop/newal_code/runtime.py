@@ -23,9 +23,15 @@ from . import gguf, hardware, providers, settings
 
 MB = 1024 * 1024
 GB = 1024 * MB
-# The contexts a plan picks from, longest first. Below 16k an agent cannot work: the system prompt and the tools take
-# ~2k tokens, the first request with its files ~1-3k, and every step adds its tool results.
-CONTEXTS = (65536, 49152, 32768, 24576, 16384)
+# The contexts a plan picks from, longest first. Below 16k an agent is cramped: the system prompt and the tools take
+# ~2k tokens, the first request with its files ~1-3k, and every step adds its tool results; 12k and 8k are only for
+# phones and computers that cannot give a model more (the conversation is compacted sooner).
+CONTEXTS = (65536, 49152, 32768, 24576, 16384, 12288, 8192)
+# Below this budget (phones with 2-4 GB, the smallest computers) a model runs "lite": one conversation slot, one
+# state checkpoint, 256-token batches (smaller buffers), no MTP on models under 1 GB (measured on Qwen3.5-0.8B: 17.6
+# tokens/s with MTP, 21 without), and without the faster weight copy ("repack") when even that does not fit.
+# Measured with 0.8B Q4_K_M after a 7k-token prompt: 926 MB held, 737 MB without repack (1402 MB as a desktop runs it).
+LITE_BUDGET = int(2.5 * 1024 ** 3)
 MTP_DRAFT = 3              # tokens drafted ahead; on a hybrid model each slot keeps that many more copies of its state
 
 
@@ -76,39 +82,53 @@ def _free_port():
 
 
 def plan(path, budget=None, want_ctx=0, slots=2, draft_bytes=0, mtp=False):
-    """How to run `path` inside `budget` bytes: {ctx, cache_type, need, weights, kv, fits, info}. The context is the
-    longest that fits (up to the model's own and to want_ctx), with an f16 KV cache when it fits and q8_0 when that
-    buys a longer context."""
+    """How to run `path` inside `budget` bytes: {ctx, cache_type, need, weights, kv, fits, info, slots, mtp, lite,
+    repack, checkpoints}. The context is the longest that fits (up to the model's own and to want_ctx), with an f16
+    KV cache when it fits and q8_0 when that buys a longer context; 16k and up first, then (lite) the rest."""
     info = gguf.info(path)
     budget = budget if budget is not None else hardware.budget(setting_gb=settings.user().get("ram_budget_gb"))
-    weights = info["size"] + draft_bytes
-    per_tok = (info["kv_bytes_per_token"] or 64 * 1024) + (info.get("draft_kv_bytes_per_token", 0) if mtp else 0)
-    trained = info["context"] or 32768
-    top = min(want_ctx or 32768, trained)
     state = info.get("state_bytes", 0)
     if not state and info.get("sliding_window"):      # the checkpoints of a sliding-window cache
         state = info["sliding_window"] * info["kv_bytes_per_token"]
-    best = None
-    # (a model trained on less than 16k gets its own context: more would not work)
-    for ctx in [c for c in CONTEXTS if c <= top] or [top]:
-        for cache, factor in (("f16", 1.0), ("q8_0", 0.53)):
-            need = need_bytes(weights, per_tok, ctx, state, slots, factor, mtp)
-            if need <= budget:
-                best = {"ctx": ctx, "cache_type": cache, "need": need, "weights": weights,
-                        "kv": int(ctx * per_tok * factor), "fits": True}
-                break
-        if best:
-            break
-    if not best:
-        ctx = min(CONTEXTS[-1], top)
-        best = {"ctx": ctx, "cache_type": "q8_0", "need": need_bytes(weights, per_tok, ctx, state, slots, 0.53, mtp),
-                "weights": weights, "kv": int(ctx * per_tok * 0.53), "fits": False}
+    best = fit(info["size"] + draft_bytes, info["kv_bytes_per_token"] or 64 * 1024,
+               info.get("draft_kv_bytes_per_token", 0), state, min(want_ctx or 32768, info["context"] or 32768),
+               budget, mtp=mtp, slots=slots)
     best["info"] = info
     best["budget"] = budget
     return best
 
 
-def need_bytes(weights, kv_per_token, ctx, state=0, slots=2, factor=1.0, mtp=False):
+def fit(weights, kv_per_token, draft_kv_per_token, state, top, budget, mtp=False, slots=2):
+    """The plan for a model of these sizes in `budget` bytes (see plan). A lite plan gives up MTP, then the faster
+    weight copy, before it gives up context; 16k is its most (a phone reads a long prompt slowly anyway)."""
+    lite = budget < LITE_BUDGET
+    if lite:
+        slots, checkpoints, top = 1, 1, min(top, 16384)
+        mtp = mtp and weights >= GB
+        options = [(r, m) for r in (True, False) for m in ((True, False) if mtp else (False,))]
+    else:
+        checkpoints, options = CHECKPOINTS, [(True, mtp)]
+    # (a model trained on less than 16k gets its own context: more would not work)
+    contexts = [c for c in CONTEXTS if c <= top and (lite or c >= 16384)] or [top]
+    for ctx in contexts:
+        for repack, use_mtp in options:
+            per_tok = kv_per_token + (draft_kv_per_token if use_mtp else 0)
+            for cache, factor in (("f16", 1.0), ("q8_0", 0.53)):
+                need = need_bytes(weights, per_tok, ctx, state, slots, factor, use_mtp, checkpoints, lite, repack)
+                if need <= budget:
+                    return {"ctx": ctx, "cache_type": cache, "need": need, "weights": weights, "fits": True,
+                            "kv": int(ctx * per_tok * factor), "slots": slots, "mtp": use_mtp, "lite": lite,
+                            "checkpoints": checkpoints, "repack": repack}
+    ctx = contexts[-1]
+    repack, use_mtp = options[-1]
+    per_tok = kv_per_token + (draft_kv_per_token if use_mtp else 0)
+    return {"ctx": ctx, "cache_type": "q8_0", "weights": weights, "fits": False, "kv": int(ctx * per_tok * 0.53),
+            "slots": slots, "mtp": use_mtp, "lite": lite, "checkpoints": checkpoints, "repack": repack,
+            "need": need_bytes(weights, per_tok, ctx, state, slots, 0.53, use_mtp, checkpoints, lite, repack)}
+
+
+def need_bytes(weights, kv_per_token, ctx, state=0, slots=2, factor=1.0, mtp=False, checkpoints=CHECKPOINTS,
+               lite=False, repack=True):
     """Everything a llama-server holds for a model (measured with llama.cpp on CPU, --kv-unified, 2 slots; Qwen3.5 4B
     and 9B, Qwen3.6 35B-A3B, each with MTP: the formula is 0.1-0.4 GB above what they held):
     - the weights: the file is mapped and read. llama.cpp also copies some tensors into a faster layout ("repack",
@@ -117,8 +137,14 @@ def need_bytes(weights, kv_per_token, ctx, state=0, slots=2, factor=1.0, mtp=Fal
     - the KV cache for ctx tokens (the MTP head's own included; factor 0.53 for q8_0);
     - per slot, the recurrent layers' state, one more copy of it per drafted token (MTP rolls back rejected drafts)
       and CHECKPOINTS more (50 MB each on Qwen3.5 4B/9B, 63 MB on 35B-A3B);
-    - compute buffers and the server itself: ~330 MB, and ~180 MB more for the MTP head."""
-    copies = 1 + (mtp_draft() if mtp else 0) + CHECKPOINTS
+    - compute buffers and the server itself: ~330 MB, and ~180 MB more for the MTP head.
+    Lite (see LITE_BUDGET): 256-token batches need ~130 MB of buffers; the repacked copy is counted as well (0.36 of
+    the weights, measured on 0.8B), since a phone has no RAM for the OS to take those file pages back from, and
+    without repack there is none."""
+    copies = 1 + (mtp_draft() if mtp else 0) + checkpoints
+    if lite:
+        return (weights + int(ctx * kv_per_token * factor) + slots * state * copies + 130 * MB
+                + (int(weights * 0.36) if repack else 0) + (180 * MB if mtp else 0))
     return (weights + int(ctx * kv_per_token * factor) + slots * state * copies
             + 330 * MB + (180 * MB if mtp else 0))
 
@@ -134,14 +160,14 @@ class Server:
         self.plan = plan(path, budget=budget, want_ctx=ctx, slots=slots, mtp=mtp)
         self.ctx = self.plan["ctx"]
         self.threads = threads or hardware.physical_cores()
-        self.mtp = mtp
+        self.mtp = self.plan["mtp"]
         self.speculative = speculative
-        self.slots = slots
+        self.slots = self.plan["slots"]
         self.extra_args = list(extra_args or [])
         name = os.path.splitext(os.path.basename(path))[0]
         self.log_path = os.path.join(settings.LOGS, "llama-%s.log" % name)
         self.lock = threading.Lock()
-        self.free_slots = list(range(slots))
+        self.free_slots = list(range(self.slots))
         self.slot_owner = {}
         self._slot_used = {}
 
@@ -158,7 +184,11 @@ class Server:
              "-c", str(self.ctx), "-np", str(self.slots), "--kv-unified", "--jinja",
              "-t", str(cores), "-tb", str(max(cores, logical)),
              "--slot-save-path", settings.SLOTS, "--cache-ram", str(self.cache_ram_mb()),
-             "--ctx-checkpoints", str(CHECKPOINTS)]
+             "--ctx-checkpoints", str(self.plan.get("checkpoints", CHECKPOINTS))]
+        if self.plan.get("lite"):
+            a += ["-ub", "256", "-b", "256"]
+            if not self.plan.get("repack", True):
+                a.append("--no-repack")
         if self.plan["cache_type"] != "f16":
             a += ["-fa", "on", "-ctk", self.plan["cache_type"], "-ctv", self.plan["cache_type"]]
         kinds = []
