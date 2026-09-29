@@ -48,6 +48,8 @@ def fail(why):
 
 
 def main(dist, gguf):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")      # a Windows runner's pipe is cp1252 otherwise
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
     cli = cli_command(dist)
     if not os.path.isfile(cli[-1]):
         fail("no %s" % cli[-1])
@@ -74,6 +76,10 @@ def main(dist, gguf):
     r = run(cli + ["exec", "write the files", "--model", "scripted", "--mode", "auto-edit", "--json",
              "--cd", project], env)
     llm.close()
+    for line in r.stdout.splitlines():
+        if "\ufffd" in line:                                          # where a byte was not UTF-8
+            i = line.index("\ufffd")
+            print("not UTF-8 here: %r" % line[max(0, i - 200):i + 100])
     events = [json.loads(line) for line in r.stdout.splitlines() if line.startswith("{")]
     ends = [e for e in events if e.get("type") == "tool_end" and e.get("name") == "bash"]
     if r.returncode != 0 or not ends:

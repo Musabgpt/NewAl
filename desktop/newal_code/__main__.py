@@ -25,11 +25,24 @@ if __package__ in (None, ""):
 from newal_code import NAME, __version__, catalog, hardware, models, runtime, settings  # noqa: E402
 
 
+def utf8_output():
+    """UTF-8 on standard output and error, as the other agents write it. Without this a Windows pipe gets the ANSI
+    code page (cp1252): the packaged app ignores PYTHONIOENCODING, and a character that page lacks stops the
+    program."""
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            if stream is not None and (stream.encoding or "").lower().replace("-", "") != "utf8":
+                stream.reconfigure(encoding="utf-8", errors="replace")
+        except (AttributeError, ValueError, OSError):
+            pass
+
+
 def main(argv=None):
     argv = list(sys.argv[1:] if argv is None else argv)
     if argv and argv[0] == "--newal-sandbox":          # a packaged newal-code as the sandbox's launcher
         from newal_code import sandbox
         return sandbox.main(argv[1:])
+    utf8_output()
     if argv and argv[0] == "cloud":                    # its own options (see cloud.main)
         from newal_code import cloud
         return cloud.main(argv[1:], os.getcwd())

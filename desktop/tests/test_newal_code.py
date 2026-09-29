@@ -435,6 +435,52 @@ class SandboxTest(unittest.TestCase):
         for part in (("usr", "bin", "msys-2.0.dll"), ("etc", "fstab"), ("usr", "bin", "bash.exe")):
             self.assertTrue(os.path.isfile(os.path.join(root, *part)), part)
 
+    def test_msys_copy_is_made_once_per_set_of_files(self):
+        """The copy of an MSYS2 install for sandboxed commands (on a made-up install here; junctions become
+        symbolic links off Windows): linked or copied, reused while Git's files are the same, made again and the
+        old one removed when they change, and Git's folder never touched."""
+        git = tempfile.mkdtemp(prefix="nc-git-")
+        home = tempfile.mkdtemp(prefix="nc-msys-")
+        self.addCleanup(shutil.rmtree, git, True)
+        self.addCleanup(self.sb._remove, home)
+        for part, text in ((("usr", "bin", "msys-2.0.dll"), "dll"), (("usr", "bin", "bash.exe"), "bash"),
+                           (("usr", "bin", "ls.exe"), "ls"), (("usr", "share", "terminfo", "x"), "t"),
+                           (("etc", "fstab"), "none /tmp usertemp"), (("mingw64", "bin", "git.exe"), "git"),
+                           (("git-bash.exe",), "launcher")):
+            os.makedirs(os.path.join(git, *part[:-1]), exist_ok=True)
+            with open(os.path.join(git, *part), "w") as f:
+                f.write(text)
+        self.assertEqual(self.sb.git_root(os.path.join(git, "usr", "bin", "bash.exe")), git)
+        self.assertEqual(self.sb.git_root(os.path.join(git, "bin", "bash.exe")), git)
+        self.assertIsNone(self.sb.git_root(os.path.join(git, "usr", "bin", "ls.exe")))
+        orig = self.sb._junction
+        if os.name != "nt":
+            self.sb._junction = lambda target, link: os.symlink(target, link)
+            self.addCleanup(setattr, self.sb, "_junction", orig)
+        first = self.sb.msys_copy(git, home=home)
+        self.assertTrue(first, self.sb.msys_copy.error)
+        self.assertEqual(self.sb.msys_copy.made["linked"], 3)
+        with open(os.path.join(first, "usr", "bin", "bash.exe")) as f:
+            self.assertEqual(f.read(), "bash")
+        with open(os.path.join(first, "etc", "fstab")) as f:
+            self.assertIn("usertemp", f.read())
+        self.assertTrue(os.path.isfile(os.path.join(first, "usr", "share", "terminfo", "x")))
+        self.assertTrue(os.path.isfile(os.path.join(first, "mingw64", "bin", "git.exe")))
+        self.assertFalse(os.path.exists(os.path.join(first, "git-bash.exe")))
+        self.sb.msys_copy.made = None
+        self.assertEqual(self.sb.msys_copy(git, home=home), first)            # the same files: reused as it is
+        self.assertIsNone(self.sb.msys_copy.made)
+        with open(os.path.join(git, "usr", "bin", "ls.exe"), "w") as f:     # Git updated
+            f.write("ls, newer")
+        second = self.sb.msys_copy(git, home=home, hardlinks=False)
+        self.assertTrue(second and second != first, self.sb.msys_copy.error)
+        self.assertEqual(self.sb.msys_copy.made["copied"], 3)
+        self.assertFalse(os.path.exists(first))                              # the old copy is gone...
+        self.assertEqual(sorted(os.listdir(home)), [os.path.basename(second)])
+        for part in (("usr", "bin", "msys-2.0.dll"), ("etc", "fstab"), ("usr", "share", "terminfo", "x"),
+                     ("mingw64", "bin", "git.exe")):
+            self.assertTrue(os.path.isfile(os.path.join(git, *part)), part)  # ...and Git's files are all there
+
     def test_removing_a_copy_never_follows_its_links(self):
         outside = tempfile.mkdtemp(prefix="nc-outside-")
         self.addCleanup(shutil.rmtree, outside, True)

@@ -400,6 +400,29 @@ def _remove(path):
         pass
 
 
+def _junction(target, link):
+    """A directory junction at `link` (no admin rights needed, unlike a symbolic link). Python's own call can report
+    an error after making it (without the restore privilege it returns the last error of an earlier call), so what
+    is on disk decides; cmd's mklink /J is the fallback."""
+    try:
+        import _winapi
+        _winapi.CreateJunction(target, link)
+        return
+    except (OSError, ImportError, AttributeError) as e:
+        first = e
+    try:
+        if os.lstat(link).st_file_attributes & 0x400:
+            return
+        os.rmdir(link)                              # the empty folder of an attempt that stopped half way
+    except OSError:
+        pass
+    import subprocess
+    r = subprocess.run(["cmd", "/c", "mklink", "/J", link, target], capture_output=True, text=True,
+                       creationflags=0x08000000)    # CREATE_NO_WINDOW
+    if r.returncode:
+        raise OSError("cannot make a junction to %s (%s; mklink: %s)" % (target, first, (r.stdout + r.stderr).strip()))
+
+
 def msys_copy(root, hardlinks=True, home=None):
     """NewAl Code's own copy of an MSYS2 install (Git for Windows) for sandboxed commands: its usr\\bin as hard links
     to the same files (no space taken), or copies where Windows allows no link (an install in Program Files for a
@@ -426,7 +449,6 @@ def msys_copy(root, hardlinks=True, home=None):
         dest = os.path.join(home, tag)
         if all(os.path.isfile(os.path.join(dest, "usr", "bin", n)) for n in ("msys-2.0.dll", "bash.exe")):
             return dest
-        import _winapi
         os.makedirs(home, exist_ok=True)
         part = "%s.%d.part" % (dest, os.getpid())
         _remove(part)
@@ -435,11 +457,11 @@ def msys_copy(root, hardlinks=True, home=None):
         for src, out, skip in ((root, part, "usr"), (os.path.join(root, "usr"), os.path.join(part, "usr"), "bin")):
             for e in os.scandir(src):
                 if e.name.lower() != skip and e.is_dir():
-                    _winapi.CreateJunction(e.path, os.path.join(out, e.name))
+                    _junction(e.path, os.path.join(out, e.name))
         for e in files:
             target = os.path.join(part, "usr", "bin", e.name)
             if e.is_dir():
-                _winapi.CreateJunction(e.path, target)
+                _junction(e.path, target)
                 continue
             if hardlinks:
                 try:
@@ -451,12 +473,17 @@ def msys_copy(root, hardlinks=True, home=None):
             shutil.copyfile(e.path, target)
             stats["copied"] += 1
             stats["bytes"] += e.stat().st_size
-        try:
-            os.rename(part, dest)
-        except OSError:
-            _remove(part)                           # made at the same time by another NewAl Code
-            if not os.path.isfile(os.path.join(dest, "usr", "bin", "msys-2.0.dll")):
-                raise
+        for attempt in range(6):
+            try:
+                os.rename(part, dest)
+                break
+            except OSError:
+                if os.path.isfile(os.path.join(dest, "usr", "bin", "msys-2.0.dll")):
+                    _remove(part)                   # made at the same time by another NewAl Code
+                    break
+                if attempt == 5:
+                    raise
+                time.sleep(0.3)                     # a virus scanner still reading a new file
         msys_copy.made = stats
         for name in os.listdir(home):               # copies of versions Git no longer has
             old = os.path.join(home, name)
