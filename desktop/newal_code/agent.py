@@ -870,7 +870,9 @@ def shown(text):
     keeps the text as written, so the model's cache still matches)."""
     t = re.sub(r"(?s)<think>.*?</think>", "", text or "")
     t = t.replace("(When done, reply in one sentence.)", "")     # a small model echoing its reminder
-    return re.sub(r"</?think>", "", t).strip()
+    t = re.sub(r"</?think>", "", t).strip()
+    bare = re.sub(r"^\(?(?:in )?one sentence\)?\s*[:\-\u2013\u2014]\s*", "", t, flags=re.I)   # ...or answering it
+    return bare[:1].upper() + bare[1:] if bare != t else t
 
 
 def _title(text):

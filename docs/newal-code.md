@@ -2,9 +2,11 @@
 
 NewAl Code is NewAl's coding agent. It works like Claude Code and Codex: the model answers, calls tools, sees what
 they return, and keeps going until the task is done. It then checks the work with the project's own tests. It runs
-**any model or set of models**: local GGUF files on llama.cpp sized to the computer's RAM (8 GB and up), any
-OpenAI-compatible endpoint, or Anthropic's API. It has a **Codex-style interface**, as a desktop window, a web app
-or a terminal UI.
+**any model or set of models**: local GGUF files on llama.cpp sized to the computer's RAM (8 GB and up, and phones
+with 2-4 GB), any OpenAI-compatible endpoint, or Anthropic's API. It has a **Codex-style interface**, as a desktop
+window, a web app or a terminal UI, on **Windows, Linux and macOS**, and as **NewAl Code Lite on Android**. Commands
+run in an **OS sandbox** on all three desktop systems; tasks can run **in the cloud** (GitHub Actions); and a
+**GitHub app** answers `@newal` in issues and pull requests.
 
 Code: `desktop/newal_code/` (standard library only). Tests: `desktop/tests/test_newal_code.py`. Speed test:
 `desktop/bench/`.
@@ -26,6 +28,13 @@ Code: `desktop/newal_code/` (standard library only). Tests: `desktop/tests/test_
 | Models for this computer | `python -m newal_code models [--download qwen3.5-4b]` |
 | Check the setup | `python -m newal_code doctor` |
 | Speed test on this computer | `python -m newal_code bench [--model ID]` |
+| A task in the cloud (see "Cloud tasks") | `newal-code cloud "add a --json flag"`, then `status`, `show`, `apply`, `pr ID` |
+| The GitHub app in a repository (see "GitHub app") | `newal-code github install --pr` |
+
+**Downloads** (built and checked on each system by `.github/workflows/newal-code.yml`, see "Builds"): the
+pre-releases `newal-code-b<N>` of this repository: Windows x64 (zip: `NewAlCode.exe` and `newal-code.exe`), Linux x64
+(tar.gz), macOS Apple silicon and Intel (`NewAl Code.app`; not notarized: the first time, right-click it and choose
+Open). llama.cpp is inside each. NewAl Code Lite for Android: the pre-releases `newal-code-lite-b<N>` (APK).
 
 It uses NewAl desktop's `llama-server` and the models NewAl already downloaded (`~/NewAl/models`). Elsewhere, set
 `NEWAL_LLAMA_SERVER` or `"llama_server"` in `~/.newal-code/config.json`.
@@ -86,7 +95,7 @@ It uses NewAl desktop's `llama-server` and the models NewAl already downloaded (
 | Permission modes | default, acceptEdits, plan, bypass | read-only, auto, full access | read-only, ask, auto-edit, full-auto (their names are accepted too) |
 | Allow / ask / deny rules | ✓ `Bash(npm test:*)`, `Edit(src/**)`… | – | ✓ same syntax; "always allow" is kept in `.newal/settings.json` |
 | Catastrophic commands refused | – | sandbox | ✓ refused in every mode (`rm -rf /`, `mkfs`, fork bomb…); risky ones ask even in auto-edit |
-| OS sandbox for commands | – | ✓ Seatbelt / Landlock | ✓ Linux (Landlock, no root needed): commands write only inside the project and temp folders; read-only mode writes nowhere; optional no-network; when the sandbox blocks a command, the user may let it run once without it (Codex's "on failure"). Windows/macOS: modes and rules only |
+| OS sandbox for commands | – | ✓ Seatbelt / Landlock (Windows: experimental) | ✓ Linux (Landlock), macOS (Seatbelt), Windows (low integrity), none needing admin rights: commands write only inside the project, the added folders and temp; read-only mode writes nowhere; no network on request (Linux, macOS); when the sandbox blocks a command, the user may let it run once without it (Codex's "on failure"). See "Command sandbox" |
 | More folders than the project | ✓ `/add-dir`, `--add-dir` | ✓ `--add-dir` | ✓ `/add-dir`, `--add-dir` (edits there are treated like the project's; the sandbox lets commands write there) |
 | Project instructions | CLAUDE.md, @imports | AGENTS.md | ✓ both, user-wide and from the repository root down, with @imports; `# note` adds to them |
 | Custom slash commands | ✓ `.claude/commands` ($ARGUMENTS, !`cmd`, @file) | ✓ `~/.codex/prompts` | ✓ both locations, same syntax |
@@ -108,11 +117,17 @@ It uses NewAl desktop's `llama-server` and the models NewAl already downloaded (
 | Context and speed shown | ✓ | ✓ | ✓ context used, tokens read (cached) and written, tokens/s |
 | Terminal pane | – | ✓ | ✓ |
 | Worktree threads | – | ✓ (app) | ✓ "Worktree" under the composer: the thread works in its own git worktree; Apply to project / Discard |
+| Cloud tasks | ✓ Claude Code on the web | ✓ Codex cloud | ✓ on GitHub Actions: `newal-code cloud "task"` or Cloud under the composer; the diff comes back to review, apply here or open as a pull request (see "Cloud tasks") |
+| GitHub app | ✓ `@claude` | ✓ `@codex` | ✓ `@newal` in issues, pull requests and review comments: answers, reviews with inline comments, or makes the change (see "GitHub app") |
+| Windows, Linux, macOS; phones | macOS, Linux, Windows | macOS, Linux, Windows | ✓ all three (built and checked by CI) and NewAl Code Lite for Android phones with 2-4 GB |
 | Any model | Anthropic | OpenAI + providers | local GGUF (llama.cpp), any OpenAI-compatible API, Anthropic, Ollama/LM Studio found by themselves |
 | Several models on one task | sub-agent `model:` | profiles | roles (main, fast, review, plan), sub-agents with their own model, local models kept within the RAM budget |
 | Runs offline on 8–16 GB RAM | – | – | ✓ (below) |
 
-Not implemented: cloud tasks, a GitHub app, a sandbox on Windows and macOS.
+Differences that remain: a cloud task is one attempt (Codex can run several and let you pick; a follow-up is a new
+task on the same branch); the GitHub app is a workflow in the repository rather than an installed app with its own
+account (its commits are "NewAl Code" via Actions' token, which does not start other workflows); the Windows sandbox
+does not block the network; the macOS app is not notarized.
 
 ## Any model, or a set of models
 
@@ -166,6 +181,49 @@ here); the runs in the next section did not.
 The current NewAl's brain, Qwen3.6-35B-A3B IQ3_S (15.35 GB), fits none of these computers. Its 2-bit version
 (11.8 GB) needs about 12.7 GB with its buffers (measured), more than a 16 GB computer can spare, so NewAl Code offers
 it from 18 GB.
+
+## Phones: 2 GB to 4 GB (NewAl Code Lite)
+
+A phone keeps more of its RAM for Android than a computer keeps for Windows, and reports less than its size (a 2 GB
+phone: 1.8-1.9 GB). Below 2.5 GB of budget a model runs **lite**: one conversation slot, one state checkpoint,
+256-token batches (smaller buffers), a context of 16k at most (8k-12k when that is what fits), no MTP on models under
+1 GB (on Qwen3.5-0.8B it was slower: 17.6 against 21 tokens/s), and without llama.cpp's faster weight copy
+("repack") when even that does not fit. Measured with Qwen3.5-0.8B Q4_K_M after a 7k-token prompt: 1402 MB held as
+a desktop runs it, 926 MB lite, 737 MB lite without repack, at the same speed on this computer.
+
+| Phone | Kept for Android | Model (the default there) | Plan |
+|---|---|---|---|
+| 2 GB | 1.1 GB | Qwen3.5 0.8B Q4_K_M (0.53 GB) | 16k context, no repack, ~0.8 GB |
+| 3 GB | 1.6 GB | Qwen3.5 0.8B Q4_K_M | 16k context, ~1.06 GB |
+| 4 GB | 2.0 GB | Qwen3.5 2B Q4_K_M (1.33 GB) | 16k context, no repack, no MTP, ~1.6 GB |
+| 6 GB | 2.4 GB | Qwen3.5 2B with MTP | 32k context, ~2.4 GB |
+
+Small models make mistakes big ones do not, and NewAl Code now absorbs the common ones (found with the 0.8B models on
+these plans): a long absolute path copied wrong is mapped to the project (the longest tail of it that fits, only when
+the path as written cannot be meant), a write never creates a folder tree outside the project, a call or command that
+fails the same way is flagged the second time and ends the turn the fourth, and a model under 1.5 GB is given the
+project folder by name only. With them, the task "Create hello.py that prints 'hello from the phone', then run it
+with python3" took 3 steps with each phone plan on this computer: 17 s (3 GB), 21 s (4 GB, 2B), and with the 2 GB plan
+14 s of requests (the 4-bit 0.8B without repack, after its model loaded from a cold disk; 19 s with the 3-bit one).
+
+**NewAl Code Lite** (`android-lite/`) is the Android app: a WebView showing NewAl Code's own interface (it adapts
+to a phone's width), started by a foreground service so Android does not stop it mid-answer. It carries python.org's
+official Python 3.14 for Android with a small launcher compiled with the NDK (`libnewalpy.so`: it runs NewAl Code, and
+is `python3` for the agent's commands), llama-server built for phones (an ARMv8 build that runs everywhere and a
+dot-product build picked on CPUs that have it), and NewAl Code itself. Commands run in Android's `sh` with its tools
+and `python3`; there is no git on the phone, and Android's app sandbox confines what commands can touch.
+`.github/workflows/newal-code-android.yml` builds the APK and runs it in Android emulators the size of a 3 GB and a
+2 GB phone, where the app downloads the model its RAM gets and the agent does the task above
+(`android-lite/tests/phone_test.py`):
+
+| Emulated phone | Model | Task | llama-server (peak) | NewAl Code's Python | The app | Least free RAM |
+|---|---|---|---|---|---|---|
+| 3 GB (2985 MB) | Qwen3.5 0.8B Q4_K_M (16k context) | done, 3 steps, 25 s | 1023 MB | 35 MB | 185 MB | 1381 MB |
+| 2 GB (1980 MB) | Qwen3.5 0.8B Q4_K_M (16k context, no repack) | done, 3 steps, 29 s | 770 MB | 29 MB | 133 MB | 809 MB |
+
+(NewAl Code Lite build 2; the first build ran the 3 GB phone the same way, 20 s. On the 2 GB phone it first got the
+3-bit 0.8B, which fit with 703 MB to spare but printed "Hello, World!" instead of the text asked for, hence the 4-bit
+one; the 3-bit file stays for phones where even that does not fit.)
 
 ## Speed
 
@@ -255,6 +313,85 @@ and tests come with the task. It edits a few exact lines, the computer checks th
 instead of more model calls, and it thinks only before answering a question and after a failed check (see "How it
 works").
 
+## Command sandbox
+
+In the read-only and auto-edit modes, commands run in the operating system's sandbox (`sandbox.py`): they can read
+and run anything, but write only inside the project, the folders added to the thread and the temp folders (only
+temp in read-only mode, where commands are then allowed without asking). Full-auto runs them as they are.
+
+| System | How | Network off (`"sandbox_network": false`) |
+|---|---|---|
+| Linux | Landlock (kernel 5.13+), set in the command's process by a small launcher | ✓ (Landlock ABI 4+) |
+| macOS | Seatbelt: `sandbox-exec` with a profile that denies writes outside those folders (as Codex does) | ✓ |
+| Windows | The command runs at low integrity (the level browsers use for their sandboxes), in a job object that ends with it. Windows lets such a process write only where the mandatory label is low: the first sandboxed command in a folder labels it low once, and the temp folder is under `AppData\LocalLow`. | – |
+
+Git Bash on Windows needed one more step: MSYS2 keeps its programs' shared state in kernel objects named after a hash
+of the real folder of `msys-2.0.dll` (junctions and symbolic links are resolved first), and those made by a Git Bash
+at normal integrity (a terminal left open) cannot be opened at low integrity (seen on the CI runner:
+`NtCreateDirectoryObject ... 0xC0000022`); they should not be shared with a sandboxed command anyway. So sandboxed
+commands run from NewAl Code's own copy of Git's `usr\bin` in `%LOCALAPPDATA%\NewAlCode\msys\<tag>`: hard links to
+the same files (a hard link is a name of its own, and takes no space), or copies where Windows makes no link (Git in
+`Program Files` for a user who cannot write there, another drive: for Git 2.55, 365 files and 96 MB, copied once),
+with junctions to the rest of the Git folder.
+It is made once for each set of Git files (a Git update makes a new one and removes the old, never following its
+junctions). If it cannot be made, the command runs from Git's folder, and an MSYS2 access error offers to run it
+outside the sandbox. The packaged app is its own launcher (`--newal-sandbox`).
+
+The same tests run on real Windows, macOS and Linux machines in CI: a command writes in the project and not next to
+it, programs from PATH work (on Windows with a Git Bash open alongside), the temp folder and files already there can
+be changed, read-only mode writes nothing, cancelling stops everything a command started, and (Linux, macOS) no
+connection gets out with the network off.
+
+## Builds
+
+`.github/workflows/newal-code.yml` runs on Windows x64, Linux x64, macOS Apple silicon and macOS Intel: the tests
+(sandbox included), then the app (`newal_code.spec`: the window and the `newal-code` program side by side;
+`NewAl Code.app` on macOS) with llama.cpp's release build for that system (`tools/fetch_llama.py`), then
+`tools/smoke_newal_code.py`, which checks the built app the way a user runs it: it starts, finds its llama-server, runs
+a command in the sandbox from inside the packaged app (driven by a scripted model), and answers with a real GGUF
+through the bundled llama-server. Each build that passes is published in a pre-release `newal-code-b<N>`.
+
+## Cloud tasks
+
+Like Codex cloud and Claude Code on the web, a task can run on a GitHub Actions runner with the repository instead of
+on this computer, and comes back as a diff (`cloud.py`):
+
+- `newal-code cloud "task"` (or **Cloud** under the message box, then the **Cloud tasks** window) makes a commit on
+  top of the checkout's HEAD (`--with-changes`: with its uncommitted changes) that adds `.newal/cloud/task.json`, and
+  the workflow `.github/workflows/newal-code-cloud.yml` when the repository lacks it. It is pushed to a branch
+  `newal-cloud/<id>`, without touching the checkout, and the push starts the workflow.
+- On the runner, `newal-code cloud run` does the task in full-auto with the task's model: an API model whose key is a
+  repository secret, or a local GGUF on the runner's CPU (Qwen3.5 4B by default, cached after the first task). The
+  answer, the diff (without the task's own files) and the log are the run's artifact; unless `--no-push`, the result
+  is also committed on the task branch.
+- `newal-code cloud list | status ID | show ID | apply ID | pr ID | delete ID`, and the app's window, show the state,
+  the answer and the diff, apply it here (three-way when files moved on) or open a pull request.
+
+Measured on this repository: the task "Add a file docs/cloud-hello.md with one line: Hello from a NewAl Code cloud
+task." ran on an ubuntu-latest runner; it downloaded NewAl Code and Qwen3.5 4B (2.8 GB) and made exactly that file,
+in 78.8 s in all. The diff applies to the checkout here. The tests (`CloudTest`) run the whole round trip without
+GitHub: a bare repository for git, a fake REST API (including the artifact link that refuses GitHub's token), a
+scripted model.
+
+## GitHub app
+
+Like the Claude and Codex GitHub apps (`github_app.py`): `newal-code github install --pr` opens a pull request that
+adds `.github/workflows/newal-code-github.yml`. Once it is merged, `@newal` in an issue, a pull request or a review
+comment starts NewAl Code on a runner:
+
+- **a question** gets an answer;
+- **`@newal review`** on a pull request reviews its diff: findings on changed lines become inline comments, the rest go
+  in the review's text (the repository variable `NEWAL_AUTO_REVIEW=true` reviews each new pull request);
+- **a change**: on a pull request it is pushed to the pull request's branch (from a fork, the change is posted as a
+  patch); on an issue it goes to a new branch with a pull request that closes the issue.
+
+A comment on the issue shows that it is working (with a link to the run), then the answer. Only the repository's
+owner, members and collaborators can start it (checked by the workflow and again by NewAl Code). The model is
+`NEWAL_MODEL` or, as for cloud tasks, an API key in the secrets or a local model on the runner. The tests
+(`GitHubAppTest`) drive it with simulated GitHub events against a fake API: a pull request made from an issue, a
+review with an inline comment on the right line, a change pushed to a pull request's branch, and nothing at all for
+people who may not start it or comments that do not mention it.
+
 ## Files
 
 | Path | What |
@@ -270,3 +407,7 @@ works").
 | `newal_code/service.py`, `server.py`, `ui/` | the app: sessions, slash commands, approvals, JSON API + events, the Codex-style web UI |
 | `newal_code/tui.py`, `__main__.py`, `app.py` | terminal UI, command line, desktop window |
 | `newal_code/benchmark.py`, `desktop/bench/` | the speed test; drivers for the current NewAl and NewAl Code |
+| `newal_code/sandbox.py` | the command sandbox: Landlock, Seatbelt, low integrity |
+| `newal_code/cloud.py`, `github_app.py` | cloud tasks; the GitHub app |
+| `newal_code.spec`, `tools/fetch_llama.py`, `tools/smoke_newal_code.py` | the builds for Windows, Linux and macOS, and their check |
+| `android-lite/` | NewAl Code Lite for Android: the app, `native/prepare.sh` (Python, llama-server), `tests/phone_test.py` |
