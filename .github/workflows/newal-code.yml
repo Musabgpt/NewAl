@@ -51,7 +51,7 @@ jobs:
 
       - name: Python packages
         run: |
-          python -m pip install --upgrade pip pyinstaller
+          python -m pip install --upgrade pip pyinstaller pytest
           if [ "$RUNNER_OS" != Linux ]; then python -m pip install pywebview; fi
 
       - name: Tests, with this system's command sandbox
@@ -111,8 +111,9 @@ jobs:
           retention-days: 14
 
   release:
+    # Every build that passed its checks (a build uploads only after its smoke test), even when another failed.
     needs: build
-    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+    if: ${{ !cancelled() && (github.event_name == 'push' || github.event_name == 'workflow_dispatch') }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4
@@ -126,7 +127,8 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -e
-          ls -la out
+          ls -la out || true
+          if [ -z "$(ls out 2>/dev/null)" ]; then echo "no build passed: nothing to publish"; exit 1; fi
           tag="newal-code-b${{ github.run_number }}"
           cat > notes.md <<'EOF'
           NewAl Code, built and checked on each system by the workflow "NewAl Code for Windows, Linux and macOS".
