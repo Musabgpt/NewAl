@@ -602,7 +602,7 @@ class Agent:
             raise
         except Exception as e:  # noqa: BLE001 - a tool failure is information for the model
             ok, text = False, "error: %s: %s" % (type(e).__name__, e)
-        if repeats[key] >= 3 and ok:
+        if repeats[key] >= 3 and ok and name != "phone":     # the phone's screen does change between looks
             text += "\n(Note: you already made this exact call %d times; the result will not change.)" % (repeats[key] - 1)
         failed = not ok or (name == "bash" and meta.get("exit") not in (0, None))
         if failed and repeats[key] >= 2:

@@ -26,6 +26,11 @@ def main():
                         r = webview.windows[0].create_file_dialog(webview.FOLDER_DIALOG)
                         return r[0] if r else ""
 
+                    def open_url(self, link):
+                        """A web page (an API key page, GitHub) in the system's browser, not in this window."""
+                        if str(link).startswith(("https://", "http://")):
+                            webbrowser.open(link)
+
                 webview.create_window(NAME, url, width=1360, height=880, min_size=(760, 520), text_select=True,
                                       js_api=Api())
                 webview.start(private_mode=False)

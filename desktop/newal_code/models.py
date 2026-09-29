@@ -15,6 +15,7 @@ import os
 import re
 
 from . import catalog, gguf, hardware, providers, runtime, settings
+from . import connect as onetap
 
 PRESETS = {
     "openai": ("https://api.openai.com/v1", "OPENAI_API_KEY"),
@@ -74,6 +75,7 @@ def registry():
                 s = local_spec(p)
                 out.setdefault(s["id"], dict(s, downloaded=True))
                 known_files.add(p)
+    out.update(onetap.registered())                  # Gemini, DeepSeek... connected in one tap
     for mid, spec in (settings.user().get("models") or {}).items():
         s = dict(spec, id=mid)
         s.setdefault("name", mid)
@@ -124,10 +126,11 @@ def resolve(mid):
         prov, name = mid.split("/", 1)
         prov = prov.lower()
         if prov == "anthropic":
-            return {"id": mid, "name": name, "provider": "anthropic", "model": name, "api_key_env": "ANTHROPIC_API_KEY"}
+            return {"id": mid, "name": name, "provider": "anthropic", "model": name, "api_key_env": "ANTHROPIC_API_KEY",
+                    "preset": "anthropic"}
         if prov in PRESETS:
             base, key = PRESETS[prov]
-            return {"id": mid, "name": name, "provider": "openai", "base_url": base, "model": name,
+            return {"id": mid, "name": name, "provider": "openai", "base_url": base, "model": name, "preset": prov,
                     "api_key_env": key, "patch": prov == "openai" or name.startswith(("gpt-", "o3", "o4", "codex"))}
     raise ValueError("unknown model %r: add it in settings, or use provider/model (e.g. ollama/qwen3-coder:30b)" % mid)
 
@@ -144,6 +147,9 @@ def auto(reg=None):
              and (s.get("size") or 0) < budget * 0.9]
     if local:
         return max(local, key=lambda s: s.get("size") or 0)
+    for pid, c in (settings.user().get("connected") or {}).items():      # an API connected in one tap
+        if c.get("default") and "%s/%s" % (pid, c["default"]) in reg:
+            return reg["%s/%s" % (pid, c["default"])]
     if os.environ.get("ANTHROPIC_API_KEY"):
         return resolve("anthropic/claude-sonnet-4-5")
     if os.environ.get("OPENAI_API_KEY"):
@@ -167,7 +173,9 @@ def _key(spec):
     if spec.get("api_key"):
         return spec["api_key"]
     env = spec.get("api_key_env")
-    return os.environ.get(env, "") if env else ""
+    if env and os.environ.get(env):
+        return os.environ[env]
+    return onetap.key_for(spec.get("preset") or "")
 
 
 class Client:

@@ -104,7 +104,9 @@ def save(values):
         data = _read_json(CONFIG)
         data.update(values)
         tmp = CONFIG + ".tmp"
-        with open(tmp, "w", encoding="utf-8") as f:
+        # Readable by this user only: API keys and the GitHub token live here.
+        fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=1, ensure_ascii=False)
         os.replace(tmp, CONFIG)
         _cache["data"] = None

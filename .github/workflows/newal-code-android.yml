@@ -64,13 +64,14 @@ jobs:
   phone:
     needs: apk
     runs-on: ubuntu-latest
-    timeout-minutes: 75
+    timeout-minutes: 100
     strategy:
       fail-fast: false
       matrix:
         include:
-          - { ram: 3072, label: "3 GB phone" }
-          - { ram: 2048, label: "2 GB phone" }
+          # The 3 GB phone also checks the phone features: git, screen control, Termux (see phone_test.py).
+          - { ram: 3072, label: "3 GB phone", extra: "--features" }
+          - { ram: 2048, label: "2 GB phone", extra: "" }
     name: ${{ matrix.label }}
     steps:
       - uses: actions/checkout@v4
@@ -87,6 +88,8 @@ jobs:
 
       - name: NewAl Code Lite on a ${{ matrix.label }}
         uses: reactivecircus/android-emulator-runner@v2
+        env:
+          GH_TOKEN: ${{ github.token }}
         with:
           api-level: 30
           arch: x86_64
@@ -96,7 +99,7 @@ jobs:
           cores: 4
           emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none
           disable-animations: true
-          script: python3 android-lite/tests/phone_test.py NewAlCodeLite.apk "${{ matrix.label }}"
+          script: python3 android-lite/tests/phone_test.py NewAlCodeLite.apk "${{ matrix.label }}" ${{ matrix.extra }}
 
   release:
     needs: [apk, phone]

@@ -2,19 +2,37 @@
 the app, let it download the model this phone's RAM gets, ask the agent to write a Python file and run it, and record
 the memory the phone had and what NewAl Code's processes held.
 
-    python3 android-lite/tests/phone_test.py app.apk [label]      (adb on PATH, one emulator or phone attached)
-Prints a JSON summary; exits non-zero when the task was not done."""
+With --features (the 3 GB phone), the phone features too, driven by a scripted model on this computer (the emulator
+reaches it at 10.0.2.2), so the checks do not depend on what a small model does:
+  git      the phone's git (dulwich): init, commit, log; clone from and push to a git server on this computer; a
+           clone from github.com over HTTPS
+  phone    screen control through the accessibility service: device, open Settings, read the screen, back
+  termux   Termux installed, set up with the app's one command, NewAl Code running in it, a task done there with the
+           phone's own model (the app's /v1)
+
+    python3 android-lite/tests/phone_test.py app.apk [label] [--features]   (adb on PATH, one emulator attached)
+Prints JSON summaries; exits non-zero when something was not done."""
 
 import json
+import os
 import re
+import shutil
 import subprocess
 import sys
+import tempfile
 import time
+import urllib.error
 import urllib.request
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, os.path.join(HERE, "..", "..", "desktop", "tests"))
 
 PKG = "dev.newal.code.lite"
 BASE = "http://127.0.0.1:8790"
+TERMUX_BASE = "http://127.0.0.1:8791"
 TASK = "Create hello.py that prints 'hello from the phone', then run it with python3."
+KEY = ""
+FAILED = []
 
 
 def adb(*args, check=True, timeout=300):
@@ -24,11 +42,19 @@ def adb(*args, check=True, timeout=300):
     return r.stdout
 
 
-def api(path, body=None, timeout=60):
+def api(path, body=None, timeout=60, base=BASE):
     data = json.dumps(body).encode() if body is not None else None
-    req = urllib.request.Request(BASE + path, data=data, headers={"Content-Type": "application/json"})
-    with urllib.request.urlopen(req, timeout=timeout) as r:
+    req = urllib.request.Request(base + path, data=data, headers={"Content-Type": "application/json",
+                                                                   "X-NewAl-Key": KEY})
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    with opener.open(req, timeout=timeout) as r:
         return json.loads(r.read() or b"null")
+
+
+def check(name, ok, detail=""):
+    print("%s %s%s" % ("PASS" if ok else "FAIL", name, (": " + str(detail)[:600]) if detail else ""), flush=True)
+    if not ok:
+        FAILED.append(name)
 
 
 def memory():
@@ -44,23 +70,38 @@ def memory():
     return out
 
 
-def main():
-    apk = sys.argv[1]
-    label = sys.argv[2] if len(sys.argv) > 2 else ""
-    adb("install", "-r", "-g", apk, timeout=900)
-    adb("shell", "am", "start", "-n", PKG + "/.MainActivity")
-    adb("forward", "tcp:8790", "tcp:8790")
-    started = time.time()
-    state = None
-    while time.time() - started < 420:
-        try:
-            state = api("/api/state", timeout=5)
+def read_key():
+    """The app's key (kept in its own files): read as root, which the emulator's adb may be."""
+    adb("root", check=False, timeout=60)
+    adb("wait-for-device", timeout=120)
+    for _ in range(60):
+        out = adb("shell", "cat", "/data/data/%s/files/server-key" % PKG, check=False).strip()
+        if len(out) >= 16 and "No such file" not in out:
+            return out
+        time.sleep(2)
+    raise SystemExit("the app's key did not appear")
+
+
+def run_turn(sid, text, base=BASE, limit=1800):
+    api("/api/sessions/%s/send" % sid, {"text": text}, base=base)
+    t = time.time()
+    samples = []
+    while True:
+        time.sleep(4)
+        if base == BASE:
+            samples.append(memory())
+        d = api("/api/sessions/" + sid, timeout=120, base=base)
+        if not d.get("busy") or time.time() - t > limit:
             break
-        except Exception:  # noqa: BLE001 - not up yet
-            time.sleep(3)
-    if not state:
-        print(adb("logcat", "-d", "-t", "200", check=False)[-6000:])
-        raise SystemExit("NewAl Code did not start")
+    return d, time.time() - t, samples
+
+
+def tool_ends(d, name=None):
+    return [e for e in d.get("events") or [] if e.get("type") == "tool_end" and (name is None or e.get("name") == name)]
+
+
+def basic(label):
+    state = api("/api/state", timeout=10)
     hw = state["hardware"]
     print("phone: %s" % json.dumps(hw), flush=True)
     listing = api("/api/models")
@@ -83,20 +124,9 @@ def main():
     root = state["home"] + "/projects/hello"
     sid = api("/api/sessions", {"root": root, "model": model, "mode": "full-auto", "warm": False})["id"]
     before = memory()
-    api("/api/sessions/%s/send" % sid, {"text": TASK})
-    t = time.time()
-    samples = []
-    while True:
-        time.sleep(4)
-        samples.append(memory())
-        d = api("/api/sessions/" + sid, timeout=120)
-        if not d.get("busy") or time.time() - t > 1800:
-            break
-    seconds = time.time() - t
-    events = d.get("events") or []
-    outputs = [str((e.get("meta") or {}).get("output", "")) for e in events
-               if e.get("type") == "tool_end" and e.get("name") == "bash"]
-    end = next((e for e in reversed(events) if e.get("type") == "turn_end"), {})
+    d, seconds, samples = run_turn(sid, TASK)
+    outputs = [str((e.get("meta") or {}).get("output", "")) for e in tool_ends(d, "bash")]
+    end = next((e for e in reversed(d.get("events") or []) if e.get("type") == "turn_end"), {})
     try:
         hello = api("/api/file?root=%s&path=hello.py" % urllib.request.quote(root))
     except Exception as e:  # noqa: BLE001
@@ -113,9 +143,175 @@ def main():
     }
     print(json.dumps(summary, indent=1), flush=True)
     if not (ran and summary["hello_py"]):
-        for e in events[-40:]:
+        for e in (d.get("events") or [])[-40:]:
             print(json.dumps(e)[:400])
-        raise SystemExit("the task was not done")
+        FAILED.append("the task")
+    return state, model
+
+
+# ---------------------------------------------------------------------------------------------------- features
+
+def git_server():
+    """A git server on this computer (git daemon, pushes allowed) with one repository, shared.git."""
+    top = tempfile.mkdtemp(prefix="nc-gitd-")
+    src = os.path.join(top, "src")
+    os.makedirs(src)
+    with open(os.path.join(src, "README.md"), "w") as f:
+        f.write("# shared\n")
+    env = dict(os.environ, GIT_AUTHOR_NAME="CI", GIT_AUTHOR_EMAIL="ci@x", GIT_COMMITTER_NAME="CI",
+               GIT_COMMITTER_EMAIL="ci@x")
+    for cmd in (["git", "init", "-q", "-b", "main"], ["git", "add", "-A"], ["git", "commit", "-q", "-m", "start"]):
+        subprocess.run(cmd, cwd=src, env=env, check=True)
+    subprocess.run(["git", "clone", "-q", "--bare", src, os.path.join(top, "shared.git")], check=True)
+    d = subprocess.Popen(["git", "daemon", "--export-all", "--enable=receive-pack", "--reuseaddr",
+                          "--base-path=" + top, "--port=9418", top])
+    time.sleep(1)
+    return top, d
+
+
+def features(state):
+    from fake_llm import FakeLLM
+    home = state["home"]
+    top, daemon = git_server()
+    adb("shell", "settings", "put", "secure", "enabled_accessibility_services",
+        "%s/%s.PhoneControlService" % (PKG, PKG))
+    adb("shell", "settings", "put", "secure", "accessibility_enabled", "1")
+    script = [
+        {"tools": [("bash", {"command": "git --version && git init -q -b main && echo 'print(40 + 2)' > calc.py && "
+                                        "git add -A && git commit -q -m 'first on the phone' && git log --oneline && "
+                                        "git status --short && echo STATUS-OK"})]},
+        {"tools": [("bash", {"command": "git clone -q git://10.0.2.2/shared.git && cd shared && echo hi > phone.txt "
+                                        "&& git add phone.txt && git commit -q -m 'from the phone' && "
+                                        "git push -q origin HEAD && git log --oneline -1 && echo PUSH-OK"})]},
+        {"tools": [("bash", {"command": "git clone -q --depth 1 https://github.com/octocat/Hello-World.git hw && "
+                                        "ls hw && echo HTTPS-OK"})]},
+        {"tools": [("phone", {"action": "device"})]},
+        {"tools": [("phone", {"action": "open_app", "name": "Settings"})]},
+        {"tools": [("phone", {"action": "wait", "seconds": 2})]},
+        {"tools": [("phone", {"action": "screen"})]},
+        {"tools": [("phone", {"action": "key", "name": "back"})]},
+        "All done.",
+    ]
+    llm = FakeLLM(script)
+    port = llm.url.rsplit(":", 1)[1].split("/")[0]
+    api("/api/models/add", {"id": "scripted", "provider": "openai", "base_url": "http://10.0.2.2:%s/v1" % port,
+                            "model": "fake", "name": "scripted"})
+    root = home + "/projects/features"
+    sid = api("/api/sessions", {"root": root, "model": "scripted", "mode": "full-auto", "warm": False})["id"]
+    d, seconds, _ = run_turn(sid, "go", limit=900)
+    llm.close()
+    bash = [str((e.get("meta") or {}).get("output", "")) + e.get("text", "") for e in tool_ends(d, "bash")]
+    phone = [e.get("text", "") for e in tool_ends(d, "phone")]
+    print("tools: %s" % json.dumps([(e.get("name"), e.get("ok"), e.get("text", "")[:300]) for e in tool_ends(d)],
+                                   indent=1), flush=True)
+    check("git: init, commit, log, status", len(bash) > 0 and "STATUS-OK" in bash[0] and "first on the phone" in bash[0],
+          bash[:1])
+    pushed = subprocess.run(["git", "--git-dir", os.path.join(top, "shared.git"), "log", "--oneline", "-1", "main"],
+                            capture_output=True, text=True).stdout
+    check("git: clone and push over git://", len(bash) > 1 and "PUSH-OK" in bash[1] and "from the phone" in pushed,
+          (bash[1:2], pushed))
+    check("git: clone from github.com over HTTPS", len(bash) > 2 and "HTTPS-OK" in bash[2] and "README" in bash[2],
+          bash[2:3])
+    check("phone: device", len(phone) > 0 and "Android" in phone[0], phone[:1])
+    check("phone: open Settings", len(phone) > 1 and "opened Settings" in phone[1], phone[1:2])
+    check("phone: read the screen", len(phone) > 3 and "com.android.settings" in phone[3], phone[3:4])
+    check("phone: back", len(phone) > 4 and "pressed back" in phone[4], phone[4:5])
+    daemon.terminate()
+    shutil.rmtree(top, ignore_errors=True)
+    adb("shell", "am", "start", "-n", PKG + "/.MainActivity", check=False)
+
+
+def termux_apk():
+    """Termux's newest release for this emulator (its GitHub build, which adb may run commands in)."""
+    path = os.path.join(tempfile.gettempdir(), "termux.apk")
+    if os.path.exists(path):
+        return path
+    rel = json.loads(subprocess.run(["gh", "api", "repos/termux/termux-app/releases/latest"], capture_output=True,
+                                    text=True, check=True).stdout)
+    asset = next(a for a in rel["assets"] if re.search(r"github-debug_x86_64\.apk$", a["name"]))
+    subprocess.run(["curl", "-fsSL", "-o", path, asset["browser_download_url"]], check=True)
+    return path
+
+
+def in_termux(command, timeout=1200):
+    prefix = "/data/data/com.termux/files/usr"
+    env = ("export PREFIX=%s HOME=/data/data/com.termux/files/home PATH=%s/bin TMPDIR=%s/tmp "
+           "LD_PRELOAD=%s/lib/libtermux-exec.so LANG=en_US.UTF-8; cd \"$HOME\"; " % (prefix, prefix, prefix, prefix))
+    r = subprocess.run(["adb", "shell", "run-as", "com.termux", prefix + "/bin/bash", "-c",
+                        "'" + (env + command).replace("'", "'\\''") + "'"], capture_output=True, text=True,
+                       timeout=timeout)
+    return r.returncode, r.stdout + r.stderr
+
+
+def termux(state, model):
+    apk = termux_apk()
+    adb("install", "-r", "-g", apk, timeout=600)
+    adb("shell", "am", "start", "-n", "com.termux/.app.TermuxActivity")
+    for _ in range(90):                         # Termux unpacks its Linux on the first start
+        code, out = in_termux("test -x /data/data/com.termux/files/usr/bin/bash && echo ready", timeout=60)
+        if "ready" in out:
+            break
+        time.sleep(2)
+    check("termux: installed and ready", "ready" in out, out[-300:])
+    time.sleep(10)
+    cmd = api("/api/termux/link", {})["command"]
+    code, out = in_termux(cmd, timeout=1500)
+    print(out[-3000:], flush=True)
+    check("termux: set up with the app's command", code == 0 and "runs in Termux" in out, out[-600:])
+    adb("forward", "tcp:8791", "tcp:8791")
+    st = api("/api/state", timeout=20, base=TERMUX_BASE)
+    check("termux: NewAl Code answers in Termux with the app's key", st.get("name") == "NewAl Code", st.get("home"))
+    root = st["home"] + "/projects/hello"
+    in_termux("mkdir -p '%s'" % root, timeout=60)
+    sid = api("/api/sessions", {"root": root, "model": "phone", "mode": "full-auto", "warm": False},
+              base=TERMUX_BASE)["id"]
+    d, seconds, _ = run_turn(sid, TASK, base=TERMUX_BASE, limit=1200)
+    outputs = [str((e.get("meta") or {}).get("output", "")) for e in tool_ends(d, "bash")]
+    end = next((e for e in reversed(d.get("events") or []) if e.get("type") == "turn_end"), {})
+    print(json.dumps({"termux_task_seconds": round(seconds), "steps": end.get("steps"),
+                      "answer": (end.get("answer") or "")[:200], "error": end.get("error")}, indent=1), flush=True)
+    check("termux: a task with the phone's model, run in Termux's python",
+          any("hello from the phone" in o.lower() for o in outputs),
+          [json.dumps(e)[:300] for e in (d.get("events") or [])[-12:]])
+
+
+def main():
+    global KEY
+    args = [a for a in sys.argv[1:] if not a.startswith("--")]
+    apk = args[0]
+    label = args[1] if len(args) > 1 else ""
+    adb("install", "-r", "-g", apk, timeout=900)
+    adb("shell", "am", "start", "-n", PKG + "/.MainActivity")
+    KEY = read_key()
+    adb("forward", "tcp:8790", "tcp:8790")
+    started = time.time()
+    state = None
+    while time.time() - started < 420:
+        try:
+            state = api("/api/state", timeout=5)
+            break
+        except Exception:  # noqa: BLE001 - not up yet
+            time.sleep(3)
+    if not state:
+        print(adb("logcat", "-d", "-t", "200", check=False)[-6000:])
+        raise SystemExit("NewAl Code did not start")
+    try:
+        req = urllib.request.Request(BASE + "/api/state")
+        urllib.request.build_opener(urllib.request.ProxyHandler({})).open(req, timeout=10)
+        check("the server refuses a request without the key", False)
+    except urllib.error.HTTPError as e:
+        check("the server refuses a request without the key", e.code == 401)
+    state, model = basic(label)
+    if "--features" in sys.argv:
+        for part in (lambda: features(state), lambda: termux(state, model)):
+            try:
+                part()
+            except Exception as e:  # noqa: BLE001 - one part failing does not hide the others
+                import traceback
+                traceback.print_exc()
+                check("part failed: %s" % type(e).__name__, False, e)
+    if FAILED:
+        raise SystemExit("not done: " + ", ".join(FAILED))
 
 
 if __name__ == "__main__":

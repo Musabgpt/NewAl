@@ -377,3 +377,13 @@ pre.out { margin: 0; background: var(--bg-code); border: 1px solid var(--border)
   #topbar .title-wrap { min-width: 0; }
   #topbar #thread-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 }
+
+.key-needed { position: fixed; top: 0; left: 0; right: 0; z-index: 1000; padding: 10px 16px; background: #b3261e;
+  color: #fff; font-size: 14px; }
+.provider-row { display: flex; flex-wrap: wrap; gap: 8px; margin: 4px 0 6px; }
+.btn.provider { min-width: 104px; justify-content: center; }
+.btn.provider.connected { border-color: var(--good, #2e7d32); }
+.small-note { font-size: 12px; margin-bottom: 6px; }
+.connect-sheet p { margin: 0 0 8px; line-height: 1.5; }
+.connect-sheet input { flex: 1; min-width: 200px; }
+.form-row .good { color: var(--good, #2e7d32); }

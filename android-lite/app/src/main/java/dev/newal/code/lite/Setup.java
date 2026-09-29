@@ -4,6 +4,7 @@ import android.content.Context;
 import android.content.pm.PackageInfo;
 import android.os.Build;
 import android.system.Os;
+import android.util.Base64;
 
 import java.io.BufferedReader;
 import java.io.File;
@@ -14,6 +15,7 @@ import java.io.InputStream;
 import java.io.InputStreamReader;
 import java.io.OutputStream;
 import java.nio.charset.StandardCharsets;
+import java.security.SecureRandom;
 import java.util.Map;
 import java.util.zip.ZipEntry;
 import java.util.zip.ZipInputStream;
@@ -46,6 +48,29 @@ final class Setup {
         abi = Build.SUPPORTED_ABIS[0];
     }
 
+    /**
+     * The app's key: NewAl Code's server and the phone server answer only requests that carry it (other apps on the
+     * phone can reach 127.0.0.1 too). Made once, kept in the app's own files.
+     */
+    String key() {
+        File f = new File(files, "server-key");
+        try {
+            String k = read(f);
+            if (k.length() >= 16) {
+                return k;
+            }
+        } catch (IOException ignored) {
+        }
+        byte[] b = new byte[24];
+        new SecureRandom().nextBytes(b);
+        String k = Base64.encodeToString(b, Base64.URL_SAFE | Base64.NO_WRAP | Base64.NO_PADDING);
+        try {
+            write(f, k);
+        } catch (IOException ignored) {
+        }
+        return k;
+    }
+
     /** Unpacks the assets when this version of the app has not yet. */
     void prepare() throws IOException {
         String version;
@@ -64,10 +89,12 @@ final class Setup {
         unzip("python-stdlib.zip", python);
         unzip("python-dynload-" + abi + ".zip", new File(python, "lib/python3.14/lib-dynload"));
         unzip("newal_code.zip", app);
+        unzip("python-extra.zip", app);         // dulwich and urllib3: git on the phone
         copy("cacert.pem", new File(python, "cacert.pem"));
-        // `python3` and `python` for the agent's commands: links to the program in the native library folder.
+        // `python3`, `python` and `git` for the agent's commands: links to the program in the native library folder
+        // (called as git, it is NewAl Code's git).
         bin.mkdirs();
-        for (String name : new String[] {"python3", "python"}) {
+        for (String name : new String[] {"python3", "python", "git"}) {
             File link = new File(bin, name);
             link.delete();
             try {
@@ -106,6 +133,10 @@ final class Setup {
         env.put("LD_LIBRARY_PATH", libDir);
         env.put("SSL_CERT_FILE", new File(python, "cacert.pem").getPath());
         env.put("TMPDIR", ctx.getCacheDir().getPath());
+        env.put("NEWAL_SERVER_KEY", key());
+        env.put("NEWAL_PHONE_URL", "http://127.0.0.1:" + PhoneServer.PORT);
+        env.put("NEWAL_PHONE_KEY", key());
+        env.put("NEWAL_TERMUX_PORT", String.valueOf(Termux.PORT));
         String path = System.getenv("PATH");
         env.put("PATH", bin.getPath() + ":" + (path != null ? path : "/system/bin"));
         home.mkdirs();

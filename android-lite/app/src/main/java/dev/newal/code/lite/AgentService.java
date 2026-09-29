@@ -59,6 +59,7 @@ public class AgentService extends Service {
         try {
             Setup s = new Setup(this);
             s.prepare();
+            PhoneServer.start(this, s.key());
             python = s.start();
             error = "";
         } catch (Exception e) {

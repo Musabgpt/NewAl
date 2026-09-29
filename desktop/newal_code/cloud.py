@@ -150,6 +150,10 @@ def token():
     for k in ("GH_TOKEN", "GITHUB_TOKEN"):
         if os.environ.get(k):
             return os.environ[k]
+    from . import settings
+    connected = (settings.user().get("keys") or {}).get("github")     # connected in NewAl Code (Settings > GitHub)
+    if connected:
+        return connected
     if _token:
         return _token[0]
     _token.append(_ask_token())

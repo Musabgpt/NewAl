@@ -3,6 +3,7 @@ the agent loop end to end against a scripted model (tests/fake_llm.py)."""
 
 import json
 import os
+import re
 import shutil
 import socket
 import struct
@@ -13,6 +14,7 @@ import textwrap
 import threading
 import time
 import unittest
+import urllib.error
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 if os.environ.get("NEWAL_TEST_WATCHDOG"):            # CI: where a hung test is, then stop
@@ -523,6 +525,315 @@ def git(cwd, *args):
     if r.returncode:
         raise AssertionError("git %s: %s" % (" ".join(args), r.stderr))
     return r.stdout
+
+
+class ConnectTest(unittest.TestCase):
+    """An API in one tap: the key is recognised in the clipboard, checked against the provider (a fake one here), and
+    the provider's newest models land in the picker, with the key used for them."""
+
+    @classmethod
+    def setUpClass(cls):
+        from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+        class H(BaseHTTPRequestHandler):
+            def log_message(self, *a):
+                pass
+
+            def do_GET(self):
+                ok = self.headers.get("Authorization") == "Bearer AIza" + "k" * 35
+                body = json.dumps({"data": [{"id": "models/" + n} for n in (
+                    "gemini-2.0-flash", "gemini-2.5-flash", "gemini-2.5-flash-lite", "gemini-2.5-pro",
+                    "gemini-3-flash-preview", "text-embedding-004")]} if ok else
+                    {"error": {"message": "API key not valid"}}).encode()
+                self.send_response(200 if ok else 400)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+        cls.srv = ThreadingHTTPServer(("127.0.0.1", 0), H)
+        threading.Thread(target=cls.srv.serve_forever, daemon=True).start()
+        cls.base = "http://127.0.0.1:%d/v1beta/openai" % cls.srv.server_address[1]
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.srv.shutdown()
+
+    def setUp(self):
+        from unittest import mock
+        from newal_code import connect
+        self.connect = connect
+        p = mock.patch.dict(connect.PROVIDERS["gemini"], {"base_url": self.base})
+        p.start()
+        self.addCleanup(p.stop)
+        self.addCleanup(settings.save, {"keys": {}, "connected": {}, "model": "auto"})
+
+    def test_keys_are_recognised(self):
+        c = self.connect
+        self.assertEqual(c.detect("my key: AIza" + "x" * 35 + " thanks"), ("gemini", "AIza" + "x" * 35))
+        self.assertEqual(c.detect("sk-" + "a1" * 16)[0], "deepseek")
+        self.assertEqual(c.detect("sk-or-v1-" + "ab" * 32)[0], "openrouter")
+        self.assertEqual(c.detect("sk-ant-api03-" + "Z" * 60)[0], "anthropic")
+        self.assertEqual(c.detect("sk-proj-" + "Q" * 60)[0], "openai")
+        self.assertEqual(c.detect("gsk_" + "g" * 52)[0], "groq")
+        self.assertEqual(c.detect("hello world"), (None, ""))
+        self.assertEqual(c.pick("deepseek", ["deepseek-chat", "deepseek-reasoner"]), ["deepseek-chat", "deepseek-reasoner"])
+        self.assertEqual(c.pick("openai", ["gpt-4.1", "gpt-5", "gpt-5.1", "gpt-5-mini", "o3"]), ["gpt-5.1", "gpt-5-mini"])
+
+    def test_connect_checks_the_key_and_adds_the_newest_models(self):
+        c = self.connect
+        with self.assertRaises(c.ConnectError) as e:
+            c.connect("gemini", "AIza" + "w" * 35)
+        self.assertIn("refused", str(e.exception))
+        with self.assertRaises(c.ConnectError):
+            c.connect("gemini", "")
+        r = c.connect("gemini", "copied: AIza" + "k" * 35)            # the key found inside what was copied
+        self.assertEqual(r["default"], "gemini/gemini-3-flash-preview")
+        self.assertEqual(r["models"], ["gemini/gemini-3-flash-preview", "gemini/gemini-2.5-pro"])
+        self.assertEqual(settings.user()["model"], "gemini/gemini-3-flash-preview")
+        reg = models.registry()
+        spec = models.resolve("gemini/gemini-2.5-pro")
+        self.assertIn("gemini/gemini-3-flash-preview", reg)
+        self.assertEqual(spec["base_url"], self.base)
+        self.assertEqual(spec["model"], "gemini-2.5-pro")
+        self.assertEqual(models._key(spec), "AIza" + "k" * 35)
+        self.assertEqual(models._key(models.resolve("gemini/any-other-model")), "AIza" + "k" * 35)
+        ui = {p["id"]: p for p in c.listing_for_ui()}
+        self.assertTrue(ui["gemini"]["connected"])
+        self.assertFalse(ui["deepseek"]["connected"])
+        if os.name != "nt":
+            self.assertEqual(os.stat(settings.CONFIG).st_mode & 0o777, 0o600)
+        c.disconnect("gemini")
+        self.assertNotIn("gemini/gemini-2.5-pro", models.registry())
+        self.assertEqual(settings.user()["model"], "auto")
+
+
+class PhoneTest(unittest.TestCase):
+    """The phone tool against a stand-in for NewAl Code Lite's phone server (the app's Java side is tested in the
+    Android emulator: android-lite/tests/phone_test.py): the key goes with every call, looking never asks, acting asks
+    unless full-auto, and read-only mode only looks."""
+
+    def setUp(self):
+        from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+        from unittest import mock
+        calls = self.calls = []
+
+        class H(BaseHTTPRequestHandler):
+            def log_message(self, *a):
+                pass
+
+            def do_POST(self):
+                body = json.loads(self.rfile.read(int(self.headers.get("Content-Length") or 0)) or b"{}")
+                if self.headers.get("X-NewAl-Key") != "phone-key":
+                    out, code = {"error": "wrong key"}, 401
+                else:
+                    calls.append(body)
+                    out, code = {"ok": True, "text": {
+                        "screen": "Settings\n[1] Network & internet (tap)\n[2] Battery (tap)",
+                        "tap": "tapped [1] Network & internet"}.get(body["action"], "done")}, 200
+                data = json.dumps(out).encode()
+                self.send_response(code)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(data)))
+                self.end_headers()
+                self.wfile.write(data)
+
+        self.srv = ThreadingHTTPServer(("127.0.0.1", 0), H)
+        threading.Thread(target=self.srv.serve_forever, daemon=True).start()
+        self.addCleanup(self.srv.shutdown)
+        env = mock.patch.dict(os.environ, {"NEWAL_PHONE_URL": "http://127.0.0.1:%d" % self.srv.server_address[1],
+                                           "NEWAL_PHONE_KEY": "phone-key"})
+        env.start()
+        self.addCleanup(env.stop)
+
+    def test_permissions(self):
+        d = permissions.decide
+        self.assertEqual(d("auto-edit", "phone", "phone", {"action": "screen"}, "", {}).action, "allow")
+        self.assertEqual(d("read-only", "phone", "phone", {"action": "apps"}, "", {}).action, "allow")
+        self.assertEqual(d("auto-edit", "phone", "phone", {"action": "clipboard"}, "", {}).action, "allow")
+        self.assertEqual(d("auto-edit", "phone", "phone", {"action": "clipboard", "text": "x"}, "", {}).action, "ask")
+        self.assertEqual(d("auto-edit", "phone", "phone", {"action": "tap", "item": 3}, "", {}).action, "ask")
+        self.assertEqual(d("ask", "phone", "phone", {"action": "open_app", "name": "Camera"}, "", {}).action, "ask")
+        self.assertEqual(d("full-auto", "phone", "phone", {"action": "tap"}, "", {}).action, "allow")
+        self.assertEqual(d("read-only", "phone", "phone", {"action": "tap"}, "", {}).action, "deny")
+        self.assertEqual(d("auto-edit", "phone", "phone", {"action": "open_app"}, "",
+                           {"allow": ["Phone(open_app)"]}).action, "allow")
+        self.assertEqual(d("auto-edit", "phone", "phone", {"action": "sms"}, "",
+                           {"allow": ["Phone(open_app)"]}).action, "ask")
+        self.assertEqual(permissions.always_rule("phone", {"action": "torch", "on": True}), "Phone(torch)")
+
+    def test_the_agent_looks_then_taps_after_asking(self):
+        self.assertIn("phone", tools.default_set())
+        asked = []
+        _, ev, _, _, _ = run_agent([{"tools": [("phone", {"action": "screen"})]},
+                            {"tools": [("phone", {"action": "tap", "item": 1})]}, "Opened Network & internet."],
+                           approve=lambda r: asked.append(r) or "once")
+        self.assertEqual([c["action"] for c in self.calls], ["screen", "tap"])
+        self.assertEqual(self.calls[1]["item"], 1)
+        self.assertEqual(len(asked), 1)                       # the tap asked; the look did not
+        self.assertEqual(asked[0]["tool"], "phone")
+        ends = [e for e in ev if e.get("type") == "tool_end" and e.get("name") == "phone"]
+        self.assertIn("Network & internet", ends[0]["text"])
+        self.assertTrue(ends[1]["ok"])
+
+    def test_no_phone_no_tool_and_a_wrong_key_is_an_error(self):
+        from unittest import mock
+        from newal_code import phone
+        with mock.patch.dict(os.environ, {"NEWAL_PHONE_KEY": "wrong"}):
+            with self.assertRaises(phone.PhoneError) as e:
+                phone.call("battery")
+            self.assertIn("wrong key", str(e.exception))
+        with mock.patch.dict(os.environ, {"NEWAL_PHONE_URL": "", "NEWAL_PHONE_KEY": ""}):
+            with mock.patch.object(settings, "HOME", tempfile.mkdtemp()):
+                self.assertFalse(phone.available())
+                self.assertNotIn("phone", tools.default_set())
+
+
+class GitHubTest(unittest.TestCase):
+    """GitHub from NewAl Code against a fake API (and a local repository standing in for github.com): connect with a
+    token, list and clone repositories, open a pull request without gh."""
+
+    def setUp(self):
+        from unittest import mock
+        from fake_github import FakeGitHub
+        self.gh = FakeGitHub()
+        self.addCleanup(self.gh.close)
+        good = "ghp_" + "t" * 36
+
+        def user(m, b, h):
+            if h.get("Authorization") != "Bearer " + good:
+                return 401, {"message": "Bad credentials"}, {}
+            return 200, {"login": "musab", "name": "Musab", "id": 7, "email": None}, {}
+        self.gh.route("GET", r"/user", user)
+        self.gh.reply("GET", r"/user/emails", [{"email": "m@example.com", "primary": True, "verified": True}])
+        self.gh.reply("GET", r"/user/repos\?.*", [
+            {"full_name": "musab/newal", "private": False, "description": "the assistant", "default_branch": "main",
+             "clone_url": "x", "pushed_at": "2026-09-29T00:00:00Z"},
+            {"full_name": "musab/notes", "private": True, "description": "", "default_branch": "main",
+             "clone_url": "y", "pushed_at": "2026-09-28T00:00:00Z"}])
+        self.gh.reply("GET", r"/repos/musab/newal", {"default_branch": "main"})
+        self.gh.reply("GET", r"/repos/musab/newal/pulls\?.*", [])
+        self.gh.reply("POST", r"/repos/musab/newal/pulls", {"html_url": "https://github.com/musab/newal/pull/5"})
+        self.web = tempfile.mkdtemp(prefix="nc-ghweb-")
+        self.addCleanup(shutil.rmtree, self.web, True)
+        src = make_project({"README.md": "# newal\n"})
+        git(src, "init", "-q", "-b", "main")
+        git(src, "add", "-A")
+        git(src, "-c", "user.name=T", "-c", "user.email=t@x", "-c", "commit.gpgsign=false", "commit", "-q", "-m", "one")
+        os.makedirs(os.path.join(self.web, "musab"))
+        subprocess.run(["git", "clone", "-q", "--bare", src, os.path.join(self.web, "musab", "newal.git")], check=True)
+        self.projects = tempfile.mkdtemp(prefix="nc-projects-")
+        self.addCleanup(shutil.rmtree, self.projects, True)
+        env = mock.patch.dict(os.environ, {"NEWAL_GITHUB_API": self.gh.url, "NEWAL_GITHUB_WEB": self.web,
+                                           "GH_TOKEN": "", "GITHUB_TOKEN": ""})
+        env.start()
+        self.addCleanup(env.stop)
+        settings.save({"projects_dir": self.projects})
+        self.addCleanup(settings.save, {"keys": {}, "github": {}, "projects_dir": ""})
+        self.good = good
+
+    def test_connect_list_clone_and_pull_request(self):
+        from newal_code import github
+        with self.assertRaises(github.GitHubError):
+            github.connect("ghp_" + "w" * 36)
+        profile = github.connect("my token: " + self.good)
+        self.assertEqual(profile["login"], "musab")
+        self.assertEqual(profile["email"], "m@example.com")
+        self.assertTrue(github.account()["connected"])
+        self.assertEqual(github.token(), self.good)
+        from newal_code import cloud
+        self.assertEqual(cloud.token(), self.good)                  # cloud tasks use it too
+        self.assertEqual([r["full_name"] for r in github.repos("note")], ["musab/notes"])
+        root = github.clone("musab/newal")
+        self.assertEqual(root, os.path.join(self.projects, "newal"))
+        self.assertTrue(os.path.isfile(os.path.join(root, "README.md")))
+        self.assertEqual(github.clone("musab/newal"), root)          # already there: used as it is
+        git(root, "remote", "set-url", "origin", "https://github.com/musab/newal.git")
+        git(root, "checkout", "-q", "-b", "newal/fix")
+        self.assertEqual(github.pull_request(root, "Fix it"), "https://github.com/musab/newal/pull/5")
+        post = self.gh.calls("POST", "/repos/musab/newal/pulls")[0]
+        self.assertEqual(post["body"]["head"], "newal/fix")
+        self.assertEqual(post["body"]["base"], "main")
+        git(root, "checkout", "-q", "main")
+        with self.assertRaises(github.GitHubError):
+            github.pull_request(root, "on main")
+        github.disconnect()
+        self.assertFalse(github.account()["connected"])
+
+
+class MiniGitTest(unittest.TestCase):
+    """The phone's git (dulwich behind git's commands) against the computer's git: the same steps, the same output,
+    the same commits."""
+
+    STEPS = [["init", "-q", "-b", "main", "."], "W a.py print(1)", "W sub/b.txt x", ["status", "--short"], ["status"],
+             ["add", "-A"], ["status", "--short"], ["commit", "-q", "-m", "first commit"],
+             ["rev-parse", "--abbrev-ref", "HEAD"], ["log", "--oneline"], "W a.py print(2)", "R sub/b.txt",
+             "W c.txt new", ["status", "--short"], ["diff"], ["add", "."], ["diff", "--cached", "--stat"],
+             ["commit", "-q", "-m", "second"], ["checkout", "-q", "-b", "feature"], ["branch"], "W c.txt more",
+             ["commit", "-q", "-am", "on feature"], ["log", "--oneline", "-2"], ["remote", "add", "origin", "BARE"],
+             ["push", "-q", "-u", "origin", "HEAD"], ["status"], ["diff", "main..feature", "--name-only"],
+             ["show", "--stat", "HEAD"], ["log", "--format=%h %an %s", "-1"], ["rev-parse", "--short", "HEAD~1"]]
+
+    def run_steps(self, git_cmd):
+        top = tempfile.mkdtemp(prefix="nc-git-")
+        self.addCleanup(shutil.rmtree, top, True)
+        work = os.path.join(top, "w")
+        os.makedirs(work)
+        bare = os.path.join(top, "bare.git")
+        subprocess.run(["git", "init", "-q", "--bare", bare], check=True)
+        env = dict(os.environ, HOME=top, GIT_AUTHOR_NAME="T", GIT_AUTHOR_EMAIL="t@x", GIT_COMMITTER_NAME="T",
+                   GIT_COMMITTER_EMAIL="t@x", GIT_AUTHOR_DATE="2026-09-29T10:00:00Z",
+                   GIT_COMMITTER_DATE="2026-09-29T10:00:00Z", GIT_CONFIG_NOSYSTEM="1", LANG="C",
+                   PYTHONPATH=os.pathsep.join([os.path.dirname(os.path.dirname(os.path.abspath(__file__)))]
+                                              + [p for p in os.environ.get("PYTHONPATH", "").split(os.pathsep) if p]))
+        out = []
+        for step in self.STEPS:
+            if isinstance(step, str):
+                op, path, *text = step.split(" ")
+                full = os.path.join(work, path)
+                if op == "W":
+                    os.makedirs(os.path.dirname(full), exist_ok=True)
+                    with open(full, "a" if os.path.exists(full) and path == "c.txt" and text == ["more"] else "w",
+                              newline="\n") as f:
+                        f.write(" ".join(text) + "\n")
+                else:
+                    os.remove(full)
+                continue
+            args = [a.replace("BARE", bare) for a in step]
+            r = subprocess.run(git_cmd + args, cwd=work, env=env, capture_output=True, text=True, timeout=120)
+            out.append("== %s\n%s%s[exit %d]" % (" ".join(step), r.stdout, r.stderr.replace(bare, "BARE"),
+                                                   r.returncode))
+        return re.sub(r"\b[0-9a-f]{7,40}\b", "H", "\n".join(out))
+
+    def test_the_same_as_git(self):
+        try:
+            import dulwich  # noqa: F401
+        except ImportError:
+            self.skipTest("dulwich is not installed")
+        if not shutil.which("git"):
+            self.skipTest("git is not installed")
+        real = self.run_steps(["git"])
+        mine = self.run_steps([sys.executable, "-m", "newal_code.minigit"])
+        self.assertEqual(mine, real)
+
+    def test_github_token_goes_only_to_github(self):
+        try:
+            import dulwich.client as dc
+        except ImportError:
+            self.skipTest("dulwich is not installed")
+        from unittest import mock
+        from newal_code import minigit
+        seen = []
+        with mock.patch.object(dc, "get_transport_and_path", lambda loc, *a, **kw: seen.append((loc, kw)) or kw):
+            import dulwich.porcelain as dp
+            with mock.patch.object(dp, "get_transport_and_path", dc.get_transport_and_path):
+                minigit._auth("ghp_secret")
+                dc.get_transport_and_path("https://github.com/musab/newal.git")
+                dc.get_transport_and_path("https://gitlab.com/musab/newal.git")
+                dp.get_transport_and_path("https://github.com/musab/other")
+        self.assertEqual(seen[0][1], {"username": "x-access-token", "password": "ghp_secret"})
+        self.assertEqual(seen[1][1], {})
+        self.assertEqual(seen[2][1]["password"], "ghp_secret")
 
 
 class CloudTest(unittest.TestCase):
@@ -1283,7 +1594,8 @@ class ServerTest(unittest.TestCase):
         cls.llm = FakeLLM([])
         settings.save({"models": {"fake": {"provider": "openai", "base_url": cls.llm.url, "model": "fake"}},
                        "model": "fake"})
-        cls.httpd, cls.url = server.serve(0)
+        cls.httpd, cls.login = server.serve(0)
+        cls.url, cls.key = cls.httpd.base_url, cls.httpd.key
         threading.Thread(target=cls.httpd.serve_forever, daemon=True).start()
         cls.events = []
         threading.Thread(target=cls._listen, daemon=True).start()
@@ -1297,7 +1609,8 @@ class ServerTest(unittest.TestCase):
     @classmethod
     def _listen(cls):
         import urllib.request
-        with urllib.request.urlopen(cls.url + "api/events", timeout=120) as r:
+        req = urllib.request.Request(cls.url + "api/events", headers={"X-NewAl-Key": cls.key})
+        with urllib.request.urlopen(req, timeout=120) as r:
             for raw in r:
                 line = raw.decode().strip()
                 if line.startswith("data:"):
@@ -1306,9 +1619,146 @@ class ServerTest(unittest.TestCase):
     def call(self, path, body=None):
         import urllib.request
         req = urllib.request.Request(self.url + path.lstrip("/"), json.dumps(body).encode() if body is not None else None,
-                                     {"Content-Type": "application/json"})
+                                     {"Content-Type": "application/json", "Authorization": "Bearer " + self.key})
         with urllib.request.urlopen(req, timeout=30) as r:
             return json.loads(r.read())
+
+    def raw(self, path, headers=None, host=None):
+        """(status, headers, body) of a GET with exactly these headers (no key unless given)."""
+        import http.client
+        port = int(self.url.rsplit(":", 1)[1].strip("/"))
+        c = http.client.HTTPConnection("127.0.0.1", port, timeout=10)
+        h = dict(headers or {})
+        if host:
+            h["Host"] = host
+        c.request("GET", path, headers=h)
+        r = c.getresponse()
+        out = (r.status, dict(r.getheaders()), r.read())
+        c.close()
+        return out
+
+    def test_termux_link_command_works_once(self):
+        cmd = self.call("/api/termux/link", {})["command"]
+        token = cmd.split("once=")[1].split("'")[0]
+        status, _, body = self.raw("/termux/setup?once=" + token)
+        self.assertEqual(status, 200)
+        self.assertIn(b"newal-termux", body)
+        self.assertIn(self.key.encode(), body)                  # the key reaches Termux's own files only
+        self.assertEqual(self.raw("/termux/setup?once=" + token)[0], 401)       # once
+        self.assertEqual(self.raw("/termux/setup?once=made-up")[0], 401)
+        self.assertEqual(self.raw("/termux/app.zip")[0], 401)
+        status, _, data = self.raw("/termux/app.zip", {"X-NewAl-Key": self.key})
+        import io
+        import zipfile
+        names = zipfile.ZipFile(io.BytesIO(data)).namelist()
+        self.assertIn("newal_code/__main__.py", names)
+        self.assertIn("newal_code/ui/app.js", names)
+        self.assertFalse([n for n in names if n.endswith(".pyc")])
+
+    def test_termux_setup_script_end_to_end(self):
+        """The script Termux runs, run here: a made-up Termux (its paths, pkg, a HOME) with this machine's Python.
+        It fetches NewAl Code from the app's server, keeps the key, adds the phone's model, and starts NewAl Code on
+        its own port, answering with the app's key."""
+        if os.name == "nt" or not shutil.which("bash") or not shutil.which("curl"):
+            self.skipTest("bash and curl")
+        from unittest import mock
+        from newal_code import termux
+        fake = tempfile.mkdtemp(prefix="nc-termux-")
+        self.addCleanup(shutil.rmtree, fake, True)
+        home, prefix = os.path.join(fake, "home"), os.path.join(fake, "usr")
+        os.makedirs(os.path.join(prefix, "bin"))
+        os.makedirs(home)
+        os.symlink(sys.executable, os.path.join(prefix, "bin", "python"))
+        with open(os.path.join(prefix, "bin", "pkg"), "w") as f:
+            f.write("#!/bin/sh\necho pkg \"$@\" >> \"$HOME/pkg.log\"\n")
+        os.chmod(os.path.join(prefix, "bin", "pkg"), 0o755)
+        port = socket.socket()
+        port.bind(("127.0.0.1", 0))
+        free = port.getsockname()[1]
+        port.close()
+        with mock.patch.object(termux, "PORT", free):
+            script = termux.setup_script(int(self.url.rsplit(":", 1)[1].strip("/")), self.key)
+        script = script.replace("/data/data/com.termux/files/usr/bin/bash", shutil.which("bash"))
+        script = script.replace('curl -fsSL -H "X-NewAl-Key: $KEY" "$APP/termux/app.zip"',
+                                'curl -fsSL --noproxy "*" -H "X-NewAl-Key: $KEY" "$APP/termux/app.zip"')
+        script = script.replace('curl -s -o /dev/null', 'curl -s --noproxy "*" -o /dev/null')
+        env = {"HOME": home, "PREFIX": prefix, "PATH": os.path.join(prefix, "bin") + os.pathsep + os.environ["PATH"],
+               "LANG": "C.UTF-8"}
+        self.addCleanup(lambda: subprocess.run(["pkill", "-f", "newal_code app --port %d" % free]))
+        r = subprocess.run(["bash"], input=script, env=env, capture_output=True, text=True, timeout=120)   # curl | bash
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        self.assertIn("runs in Termux", r.stdout)
+        self.assertTrue(os.path.isfile(os.path.join(home, ".newal-code", "termux", "app", "newal_code", "server.py")))
+        with open(os.path.join(home, ".newal-code", "phone.json")) as f:
+            phone = json.load(f)
+        self.assertEqual(phone["key"], self.key)
+        self.assertEqual(os.stat(os.path.join(home, ".newal-code", "phone.json")).st_mode & 0o777, 0o600)
+        with open(os.path.join(home, ".newal-code", "config.json")) as f:
+            cfg = json.load(f)
+        self.assertEqual(cfg["model"], "phone")
+        self.assertTrue(cfg["models"]["phone"]["base_url"].endswith("/v1"))
+        with open(os.path.join(home, ".termux", "termux.properties")) as f:
+            self.assertIn("allow-external-apps = true", f.read())
+        import urllib.request
+        req = urllib.request.Request("http://127.0.0.1:%d/api/state" % free, headers={"X-NewAl-Key": self.key})
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        with opener.open(req, timeout=20) as resp:
+            self.assertEqual(json.loads(resp.read())["name"], "NewAl Code")
+        r2 = subprocess.run(["bash", "-c", "newal-termux status; newal-termux stop"], env=env, capture_output=True,
+                            text=True, timeout=30)
+        self.assertIn("running", r2.stdout)
+
+    def test_model_proxy_streams_the_local_model(self):
+        """/v1/chat/completions (what NewAl Code in Termux uses as the phone's model) answers from the local model."""
+        from unittest import mock
+        from newal_code import server as srv
+        llm = FakeLLM(["hello from the phone model"])
+        self.addCleanup(llm.close)
+
+        class Srv:
+            url = llm.base
+            used = 0
+
+        client = models.Client({"id": "p", "provider": "local"}, None, "model.gguf", Srv())
+        with mock.patch.object(srv, "local_model", lambda: {"id": "p", "provider": "local", "file": "x"}), \
+                mock.patch.object(srv.models, "connect", lambda spec: client):
+            import urllib.request
+            body = json.dumps({"model": "phone", "stream": True,
+                               "messages": [{"role": "user", "content": "hi"}]}).encode()
+            req = urllib.request.Request(self.url + "v1/chat/completions", body,
+                                         {"Content-Type": "application/json", "Authorization": "Bearer " + self.key})
+            with urllib.request.urlopen(req, timeout=30) as r:
+                text = r.read().decode()
+        self.assertIn("hello from the phone model", "".join(
+            json.loads(l[5:])["choices"][0]["delta"].get("content") or "" for l in text.splitlines()
+            if l.startswith("data:") and l.strip() != "data: [DONE]"))
+        self.assertEqual(llm.requests[-1]["model"], "model.gguf")
+        req = urllib.request.Request(self.url + "v1/chat/completions", body, {"Content-Type": "application/json"})
+        with self.assertRaises(urllib.error.HTTPError) as e:
+            urllib.request.urlopen(req, timeout=10)
+        self.assertEqual(e.exception.code, 401)
+
+    def test_the_key_and_the_host(self):
+        """Only whoever has the key gets the API; the interface's files are open; the key in the address becomes a
+        cookie; a request naming another host (a web page rebinding its name to 127.0.0.1) is refused."""
+        status, _, body = self.raw("/api/state")
+        self.assertEqual(status, 401)
+        self.assertTrue(json.loads(body)["key_needed"])
+        self.assertEqual(self.raw("/api/state", {"X-NewAl-Key": "wrong"})[0], 401)
+        self.assertEqual(self.raw("/api/state", {"X-NewAl-Key": self.key})[0], 200)
+        self.assertEqual(self.raw("/api/state", {"Authorization": "Bearer " + self.key})[0], 200)
+        self.assertEqual(self.raw("/api/state?key=" + self.key)[0], 200)
+        self.assertEqual(self.raw("/app.js")[0], 200)
+        status, headers, _ = self.raw("/?key=" + self.key)
+        self.assertEqual(status, 302)
+        cookie = headers.get("Set-Cookie", "")
+        self.assertIn("newal_key=" + self.key, cookie)
+        self.assertIn("HttpOnly", cookie)
+        self.assertEqual(headers.get("Location"), "/")
+        self.assertEqual(self.raw("/api/state", {"Cookie": "a=b; newal_key=" + self.key})[0], 200)
+        self.assertEqual(self.raw("/api/state", {"X-NewAl-Key": self.key}, host="evil.example:%s"
+                                  % self.url.rsplit(":", 1)[1].strip("/"))[0], 403)
+        self.assertTrue(self.login.endswith("?key=" + self.key))
 
     def wait_for(self, pred, timeout=20):
         end = time.time() + timeout

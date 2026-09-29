@@ -1,11 +1,15 @@
 """The web app's server: a JSON API and a live event stream (Server-Sent Events) over the Service, and the static
-files of the Codex-like interface (newal_code/ui). Local only (127.0.0.1)."""
+files of the Codex-like interface (newal_code/ui). Local only (127.0.0.1), and only for whoever has its key: other
+programs on the computer, other apps on a phone and web pages can reach 127.0.0.1 too. The key comes in the address
+the app opens (/?key=..., kept as a cookie), or as a header (Authorization: Bearer ..., X-NewAl-Key); requests that
+name another host (a web page rebinding its name to 127.0.0.1) are refused."""
 
 import json
 import mimetypes
 import os
 import queue
 import re
+import secrets
 import subprocess
 import sys
 import threading
@@ -21,7 +25,53 @@ UI = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ui")
 
 class Handler(BaseHTTPRequestHandler):
     service = None
+    key = ""
     protocol_version = "HTTP/1.1"
+    OPEN = ("/", "/index.html", "/app.js", "/markdown.js", "/style.css", "/icon.svg", "/favicon.ico")
+
+    def _host_ok(self):
+        port = self.server.server_address[1]
+        host = (self.headers.get("Host") or "").strip().lower()
+        return host in ("127.0.0.1:%d" % port, "localhost:%d" % port, "[::1]:%d" % port)
+
+    def _given_key(self):
+        auth = self.headers.get("Authorization") or ""
+        if auth.lower().startswith("bearer "):
+            return auth[7:].strip()
+        if self.headers.get("X-NewAl-Key"):
+            return self.headers.get("X-NewAl-Key").strip()
+        for part in (self.headers.get("Cookie") or "").split(";"):
+            name, _, value = part.strip().partition("=")
+            if name == "newal_key":
+                return value
+        return self._query().get("key", "")
+
+    def _gate(self, path):
+        """True when the request may go on; else the refusal is sent. The interface's own files are open to all (the
+        page asks for the key-bearing address itself); the rest needs the key."""
+        if not self._host_ok():
+            self._json({"error": "this server answers requests to 127.0.0.1 only"}, 403)
+            return False
+        given = self._given_key()
+        ok = bool(self.key) and secrets.compare_digest(given.encode(), self.key.encode())
+        q = self._query()
+        if ok and q.get("key") and self.command == "GET" and not path.startswith(("/api/", "/v1/", "/termux/")):
+            self.send_response(302)                 # the key into a cookie, and out of the address bar
+            self.send_header("Set-Cookie", "newal_key=%s; Path=/; HttpOnly; SameSite=Strict; Max-Age=31536000"
+                             % self.key)
+            self.send_header("Location", path)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return False
+        if ok or path in self.OPEN or path.startswith("/assets/"):
+            return True
+        if path == "/termux/setup" and self.command == "GET":
+            from . import termux
+            if termux.use_token(q.get("once")):       # the command pasted into Termux: once, for 15 minutes
+                return True
+        self._json({"error": "NewAl Code's key is needed: open NewAl Code from its app, or the address it printed "
+                             "(it carries the key)", "key_needed": True}, 401)
+        return False
 
     def log_message(self, *a):
         pass
@@ -63,6 +113,50 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(data)
 
+    def _text(self, data, ctype):
+        data = data.encode("utf-8") if isinstance(data, str) else data
+        self.send_response(200)
+        self.send_header("Content-Type", ctype)
+        self.send_header("Content-Length", str(len(data)))
+        self.send_header("Cache-Control", "no-store")
+        self.end_headers()
+        self.wfile.write(data)
+
+    def _model_proxy(self):
+        """/v1/chat/completions for NewAl Code in Termux (and any tool on the phone that has the key): answered by the
+        local model this NewAl Code runs (started within its RAM budget), streamed through as it comes."""
+        import http.client
+        n = int(self.headers.get("Content-Length") or 0)
+        try:
+            body = json.loads(self.rfile.read(n) or b"{}")
+            spec = local_model()
+            client = models.connect(spec)
+        except Exception as e:  # noqa: BLE001
+            return self._json({"error": {"message": "%s: %s" % (type(e).__name__, e)}}, 503)
+        body["model"] = client.model_name
+        if client.server:
+            client.server.used = time.time()
+        u = urllib.parse.urlsplit(client.server.url)
+        conn = http.client.HTTPConnection(u.hostname, u.port, timeout=900)
+        try:
+            conn.request("POST", "/v1/chat/completions", json.dumps(body).encode("utf-8"),
+                         {"Content-Type": "application/json"})
+            r = conn.getresponse()
+            self.send_response(r.status)
+            self.send_header("Content-Type", r.getheader("Content-Type") or "application/json")
+            self.send_header("Cache-Control", "no-cache")
+            self.send_header("Connection", "close")
+            self.end_headers()
+            self.close_connection = True
+            while True:
+                chunk = r.read1(65536)
+                if not chunk:
+                    break
+                self.wfile.write(chunk)
+                self.wfile.flush()
+        finally:
+            conn.close()
+
     def _query(self):
         return {k: v[0] for k, v in urllib.parse.parse_qs(urllib.parse.urlsplit(self.path).query).items()}
 
@@ -70,6 +164,8 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_GET(self):
         path = urllib.parse.urlsplit(self.path).path
+        if not self._gate(path):
+            return
         q = self._query()
         svc = self.service
         try:
@@ -98,6 +194,30 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json({"changes": s.changes(), "git": _git_info(s.root)})
             if path == "/api/models":
                 return self._json(svc.model_listing())
+            if path == "/termux/setup":
+                from . import termux
+                return self._text(termux.setup_script(self.server.server_address[1], self.key), "text/x-shellscript")
+            if path == "/termux/app.zip":
+                from . import termux
+                return self._text(termux.package_zip(), "application/zip")
+            if path == "/v1/models":
+                return self._json({"object": "list", "data": [{"id": "phone", "object": "model",
+                                                               "owned_by": "newal-code-lite"}]})
+            if path == "/api/github":
+                from . import github
+                return self._json(github.account())
+            if path == "/api/github/repos":
+                from . import github
+                try:
+                    return self._json({"repos": github.repos(q.get("q") or "")})
+                except github.GitHubError as e:
+                    return self._json({"error": str(e)}, 400)
+            if path == "/api/providers":
+                from . import connect
+                return self._json({"providers": connect.listing_for_ui()})
+            if path == "/api/clipboard":
+                from . import connect
+                return self._json({"text": connect.clipboard()})
             if path == "/api/commands":
                 return self._json(svc.commands(q.get("root") or ""))
             if path == "/api/extensions":
@@ -135,6 +255,10 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         path = urllib.parse.urlsplit(self.path).path
+        if not self._gate(path):
+            return
+        if path == "/v1/chat/completions":
+            return self._model_proxy()
         b = self._body()
         svc = self.service
         try:
@@ -216,6 +340,33 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json({"ok": True, "id": mid})
             if path == "/api/cloud" or path.startswith("/api/cloud/"):
                 return self._json(*_cloud_post(path, b))
+            if path in ("/api/github/connect", "/api/github/disconnect", "/api/github/clone"):
+                from . import github
+                try:
+                    if path.endswith("/connect"):
+                        return self._json(dict(github.connect(b.get("token")), ok=True))
+                    if path.endswith("/disconnect"):
+                        github.disconnect()
+                        return self._json({"ok": True})
+                    root = github.clone(b.get("repo"), b.get("dest") or None)
+                    svc._remember_project(root)
+                    return self._json({"ok": True, "root": root})
+                except github.GitHubError as e:
+                    return self._json({"error": str(e)}, 400)
+            if path == "/api/termux/link":
+                from . import termux
+                return self._json({"command": termux.link_command(self.server.server_address[1]),
+                                   "port": termux.PORT})
+            if path in ("/api/providers/connect", "/api/providers/disconnect"):
+                from . import connect
+                try:
+                    if path.endswith("/disconnect"):
+                        connect.disconnect(b.get("provider"))
+                        return self._json({"ok": True})
+                    return self._json(dict(connect.connect(b.get("provider"), b.get("key"), b.get("use", True)),
+                                           ok=True))
+                except connect.ConnectError as e:
+                    return self._json({"error": str(e)}, 400)
             if path == "/api/models/remove":
                 cur = settings.user().get("models") or {}
                 cur.pop(b.get("id"), None)
@@ -337,6 +488,15 @@ def _commit(s, message, then=""):
                 result["output"] += (p.stdout or "") + (p.stderr or "")
             except (OSError, subprocess.SubprocessError) as e:
                 result["output"] += str(e)
+        if "url" not in result:
+            from . import github
+            if github.token():
+                try:
+                    result["url"] = github.pull_request(s.root, message.splitlines()[0][:120],
+                                                        "\n".join(message.splitlines()[1:]).strip()
+                                                        + "\n\nMade with NewAl Code.")
+                except github.GitHubError as e:
+                    result["output"] += "\n" + str(e)
         if "url" not in result and m:
             result["url"] = m.group(0)          # GitHub's "create a pull request" page for the branch
     return result
@@ -432,9 +592,53 @@ class Server(ThreadingHTTPServer):
         super().handle_error(request, client_address)
 
 
+def local_model():
+    """The local model the /v1 proxy answers with: the chosen model when it is a local one, else the best
+    downloaded one for this RAM."""
+    chosen = settings.user().get("model")
+    if chosen and chosen != "auto":
+        try:
+            spec = models.resolve(chosen)
+            if spec.get("provider") == "local" and spec.get("file"):
+                return spec
+        except ValueError:
+            pass
+    spec = models.auto()
+    if spec.get("provider") != "local":
+        raise ValueError("no local model downloaded here: download one in NewAl Code (Models)")
+    return spec
+
+
+def server_key():
+    """The key of this computer's (or phone's) NewAl Code server: NEWAL_SERVER_KEY when the app that starts it gives
+    one (the Android app), else one made once and kept in NewAl Code's folder, so an address that worked keeps
+    working."""
+    if os.environ.get("NEWAL_SERVER_KEY"):
+        return os.environ["NEWAL_SERVER_KEY"]
+    path = os.path.join(settings.HOME, "server-key")
+    try:
+        with open(path, encoding="utf-8") as f:
+            key = f.read().strip()
+        if len(key) >= 16:
+            return key
+    except OSError:
+        pass
+    key = secrets.token_urlsafe(24)
+    try:
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(key)
+    except OSError:
+        pass
+    return key
+
+
 def serve(port=0, open_browser=False, host="127.0.0.1"):
+    """(the server, its address with the key: what the app window or the browser opens). The server's plain address
+    is httpd.base_url, its key httpd.key."""
     settings.ensure_dirs()
     Handler.service = Service()
+    Handler.key = server_key()
     port = port or int(settings.user().get("port") or 8790)
     for p in (port, 0):
         try:
@@ -443,7 +647,9 @@ def serve(port=0, open_browser=False, host="127.0.0.1"):
         except OSError:
             continue
     httpd.daemon_threads = True
-    url = "http://%s:%d/" % (host, httpd.server_address[1])
+    httpd.key = Handler.key
+    httpd.base_url = "http://%s:%d/" % (host, httpd.server_address[1])
+    url = httpd.base_url + "?key=" + urllib.parse.quote(httpd.key)
     if open_browser:
         threading.Timer(0.5, lambda: __import__("webbrowser").open(url)).start()
     return httpd, url

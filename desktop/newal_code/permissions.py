@@ -18,7 +18,7 @@ ALLOW, ASK, DENY = "allow", "ask", "deny"
 
 TOOL_NAMES = {"bash": "Bash", "edit": "Edit", "write": "Write", "apply_patch": "Edit", "read": "Read", "glob": "Glob",
               "grep": "Grep", "web_fetch": "WebFetch", "web_search": "WebSearch", "task": "Task", "todo": "TodoWrite", "skill": "Skill",
-              "job": "BashOutput", "notebook_edit": "NotebookEdit"}
+              "job": "BashOutput", "notebook_edit": "NotebookEdit", "phone": "Phone"}
 
 # Commands that only look: fine in every mode.
 READ_ONLY_CMD = re.compile(
@@ -90,6 +90,8 @@ def matches(rule, tool, args, root=""):
             d = spec[len("domain:"):]
             return host == d or host.endswith("." + d)
         return fnmatch.fnmatch(str(args.get("url") or ""), spec)
+    if canonical == "Phone":
+        return fnmatch.fnmatch(str(args.get("action") or ""), spec)
     path = _path_arg(args)
     if tool == "apply_patch":
         paths = re.findall(r"^\*\*\* (?:Update|Add|Delete) File: (.+)$", str(args.get("patch") or ""), re.M)
@@ -146,7 +148,7 @@ def decide(mode, tool, kind, args, root, rules, inside_root=True, sandboxed=Fals
         if matches(r, tool, args, root):
             return Decision(ALLOW, "allowed by rule %s" % r)
 
-    if kind in ("read", "meta"):
+    if kind in ("read", "meta") or (kind == "phone" and _phone_looks(args)):
         return Decision(ALLOW)
     if mode == "full-auto":
         return Decision(ALLOW)
@@ -170,12 +172,28 @@ def decide(mode, tool, kind, args, root, rules, inside_root=True, sandboxed=Fals
         if mode == "auto-edit":
             return Decision(ALLOW)
         return Decision(ASK, "fetch %s" % (args.get("url") or "a web page"))
+    if kind == "phone":
+        if mode == "read-only":
+            return Decision(DENY, "read-only mode: the phone is only looked at (screen, apps, battery)")
+        return Decision(ASK, "phone: %s%s" % (args.get("action") or "?", _phone_detail(args)))
     if kind == "mcp":
         if mode == "read-only" and not re.search(r"(^|_)(get|list|search|read|find|fetch|query|describe|view)",
                                                   tool.split("__")[-1], re.I):
             return Decision(DENY, "read-only mode")
         return Decision(ASK, "use %s" % tool)
     return Decision(ASK)
+
+
+def _phone_looks(args):
+    from . import phone
+    return phone.looks_only(args)
+
+
+def _phone_detail(args):
+    for k in ("name", "url", "text", "number", "page", "item", "direction"):
+        if args.get(k) not in (None, ""):
+            return " %s" % str(args[k])[:80]
+    return ""
 
 
 def always_rule(tool, args):
@@ -189,4 +207,6 @@ def always_rule(tool, args):
     if tool == "web_fetch":
         host = urllib.parse.urlsplit(str(args.get("url") or "")).hostname or ""
         return "WebFetch(domain:%s)" % host if host else "WebFetch"
+    if tool == "phone":
+        return "Phone(%s)" % (args.get("action") or "*")
     return canonical

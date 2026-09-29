@@ -982,6 +982,26 @@ def t_skill(ctx, name):
     return s["body"] + extra, {"skill": name}
 
 
+# ------------------------------------------------------------------ the phone (NewAl Code Lite)
+
+def _phone_tool():
+    from . import phone
+
+    @tool("phone", phone.DOC, phone.PARAMS, ["action"], "phone")
+    def t_phone(ctx, action, **args):
+        if ctx.cancel is not None and ctx.cancel.is_set():
+            raise ToolError("cancelled")
+        try:
+            r = phone.call(str(action), **{k: v for k, v in args.items() if v not in (None, "")})
+        except phone.PhoneError as e:
+            raise ToolError(str(e))
+        text = r.get("text") or ("done" if r.get("ok", True) else json.dumps(r, ensure_ascii=False))
+        return clip(text, 8000), {"action": action, "phone": {k: v for k, v in r.items() if k not in ("text",)}}
+
+
+_phone_tool()
+
+
 # ------------------------------------------------------------------ tool sets
 
 READ_ONLY = {"read", "glob", "grep", "todo", "job", "skill", "task"}
@@ -997,6 +1017,9 @@ def default_set(model_profile=None, root=None):
         names.append("notebook_edit")
     if settings.user().get("web", True):
         names += ["web_search", "web_fetch"]
+    from . import phone
+    if phone.available():
+        names.append("phone")
     return names
 
 

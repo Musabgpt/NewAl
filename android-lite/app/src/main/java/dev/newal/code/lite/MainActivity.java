@@ -19,6 +19,7 @@ import java.net.URL;
 public class MainActivity extends Activity {
     private static final String HOME = "http://127.0.0.1:" + Setup.PORT + "/";
     private WebView web;
+    private String key;
 
     @Override
     protected void onCreate(Bundle state) {
@@ -29,6 +30,8 @@ public class MainActivity extends Activity {
         s.setJavaScriptEnabled(true);
         s.setDomStorageEnabled(true);
         web.setWebChromeClient(new WebChromeClient());           // confirm() and alert() dialogs
+        key = new Setup(this).key();
+        web.addJavascriptInterface(new WebBridge(this, web, key), "NewAlPhone");
         web.setWebViewClient(new WebViewClient() {
             @Override
             public boolean shouldOverrideUrlLoading(WebView view, WebResourceRequest request) {
@@ -54,8 +57,8 @@ public class MainActivity extends Activity {
     private void waitForServer() {
         new Thread(() -> {
             for (int i = 0; i < 480; i++) {
-                if (up()) {
-                    runOnUiThread(() -> web.loadUrl(HOME));
+                if (up(key)) {
+                    runOnUiThread(() -> web.loadUrl(HOME + "?key=" + Uri.encode(key)));
                     return;
                 }
                 if (!AgentService.error.isEmpty()) {
@@ -72,9 +75,10 @@ public class MainActivity extends Activity {
         }, "newal-wait").start();
     }
 
-    private static boolean up() {
+    private static boolean up(String key) {
         try {
             HttpURLConnection c = (HttpURLConnection) new URL(HOME + "api/state").openConnection();
+            c.setRequestProperty("X-NewAl-Key", key);
             c.setConnectTimeout(800);
             c.setReadTimeout(3000);
             int code = c.getResponseCode();

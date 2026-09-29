@@ -9,6 +9,7 @@
     spark: '<path d="M12 3v4M12 17v4M3 12h4M17 12h4M6 6l2.5 2.5M15.5 15.5L18 18M18 6l-2.5 2.5M8.5 15.5L6 18"/>',
     gear: '<circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/>',
     "folder-plus": '<path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><path d="M12 11v5M9.5 13.5h5"/>',
+    download: '<path d="M12 4v11M7.5 10.5 12 15l4.5-4.5M5 19h14"/>',
     folder: '<path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/>',
     sidebar: '<rect x="3" y="4" width="18" height="16" rx="2"/><path d="M9 4v16"/>',
     commit: '<circle cx="12" cy="12" r="3.5"/><path d="M3 12h5.5M15.5 12H21"/>',
@@ -57,8 +58,19 @@
       { method: method || "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) };
     const r = await fetch(path, opt);
     const data = await r.json().catch(() => ({}));
+    if (data.key_needed) keyNeeded();
     if (!r.ok || data.error) throw new Error(data.error || ("HTTP " + r.status));
     return data;
+  }
+  function keyNeeded() {
+    // The address without NewAl Code's key (a bookmark in another browser, a web page): say where the key is.
+    if (document.getElementById("key-needed")) return;
+    const d = document.createElement("div");
+    d.id = "key-needed";
+    d.className = "key-needed";
+    d.textContent = "This page needs NewAl Code's key: open NewAl Code from its app, or the address it printed " +
+      "when it started (it ends in ?key=...).";
+    document.body.prepend(d);
   }
   function toast(text, ms) {
     const t = $("#toast");
@@ -943,8 +955,9 @@
       disc.forEach(m => entries.push({ value: m.id, title: m.name, sub: m.id.split("/")[0], checked: model === m.id }));
     }
     entries.push({ sep: true });
+    entries.push({ value: "__connect__", title: "Connect Gemini, DeepSeek…", sub: "An API in one tap" });
     entries.push({ value: "__manage__", title: "Manage models…", sub: "Download, add an API or a server" });
-    pickerMenu("model-picker", entries, v => v === "__manage__" ? openModels() : setOpt("model", v));
+    pickerMenu("model-picker", entries, v => v === "__manage__" || v === "__connect__" ? openModels() : setOpt("model", v));
   }
   function modelName(id) {
     if (!id || id === "auto") return "Auto" + (S.models ? " · " + S.models.recommended : "");
@@ -1073,6 +1086,72 @@
     render();
   }
 
+  // ------------------------------------------------------------------ an API in one tap
+  async function readClipboard() {
+    try { if (window.NewAlPhone && NewAlPhone.clipboard) return NewAlPhone.clipboard() || ""; } catch (_) { /* no bridge */ }
+    try { const d = await api("/api/clipboard"); if (d.text) return d.text; } catch (_) { /* no clipboard there */ }
+    try { return await navigator.clipboard.readText(); } catch (_) { return ""; }
+  }
+  function openExternal(url) {
+    try { if (window.NewAlPhone && NewAlPhone.openUrl) return NewAlPhone.openUrl(url); } catch (_) { /* no bridge */ }
+    try { if (window.pywebview && pywebview.api && pywebview.api.open_url) return pywebview.api.open_url(url); } catch (_) { /* no bridge */ }
+    window.open(url, "_blank", "noopener");
+  }
+  async function connectProvider(p, text) {
+    const d = await api("/api/providers/connect", { provider: p.id, key: text, use: true });
+    await loadModels();
+    await setOpt("model", d.default);
+    toast("Connected " + p.title + ": " + modelName(d.default), 4000);
+    return d;
+  }
+  async function oneTap(p, connectFn) {
+    // A key already copied connects at once; else the key page opens, and the key is taken from the clipboard when
+    // the user comes back with it copied.
+    connectFn = connectFn || connectProvider;
+    const clip = await readClipboard();
+    if (clip && new RegExp(p.pattern).test(clip)) {
+      try { await connectFn(p, clip); closeModal(); return; } catch (e) { toast(e.message, 6000); }
+    }
+    openExternal(p.page);
+    waitForKey(p, connectFn);
+  }
+  function waitForKey(p, connectFn) {
+    connectFn = connectFn || connectProvider;
+    const body = h("div", "connect-sheet",
+      '<p>Make a key on the ' + esc(p.title) + ' page that opened and copy it, then come back here: NewAl Code takes ' +
+      'it from the clipboard and connects.</p>' +
+      '<div class="form-row"><input id="ck-key" type="text" placeholder="…or paste the key here" autocomplete="off" spellcheck="false">' +
+      '<button class="btn primary" id="ck-go">Connect</button><button class="btn" id="ck-page">Open the key page again</button></div>' +
+      '<div class="muted" id="ck-state"></div>');
+    let done = false;
+    const state = t => { body.querySelector("#ck-state").textContent = t; };
+    const tryKey = async (text, auto) => {
+      if (done || !text || (auto && !new RegExp(p.pattern).test(text))) return;
+      state("Checking the key with " + p.title + "…");
+      try { await connectFn(p, text); done = true; stop(); closeModal(); } catch (e) { state(e.message); }
+    };
+    const back = async () => { if (!document.hidden) tryKey(await readClipboard(), true); };
+    const stop = () => { window.removeEventListener("focus", back); document.removeEventListener("visibilitychange", back); };
+    window.addEventListener("focus", back);
+    document.addEventListener("visibilitychange", back);
+    body.querySelector("#ck-go").onclick = () => tryKey(body.querySelector("#ck-key").value.trim(), false);
+    body.querySelector("#ck-page").onclick = () => openExternal(p.page);
+    modal("Connect " + p.title, body);
+    const closer = $("#modal-close");
+    if (closer) closer.addEventListener("click", stop, { once: true });
+  }
+  async function providerButtons(box) {
+    let list = [];
+    try { list = (await api("/api/providers")).providers; } catch (_) { return; }
+    list.forEach(p => {
+      const b = h("button", "btn provider" + (p.connected ? " connected" : ""),
+        esc(p.title) + (p.connected ? ' <span class="badge good">connected</span>' : ""));
+      b.title = p.about + (p.connected ? " · tap to connect again with a new key" : " · tap: your key from the clipboard, or its key page");
+      b.onclick = () => oneTap(p);
+      box.appendChild(b);
+    });
+  }
+
   async function openModels() {
     const d = await loadModels();
     if (!d) { toast("Cannot list models"); return; }
@@ -1080,7 +1159,9 @@
     const body = h("div");
     const local = d.models.filter(m => m.catalog);
     const other = d.models.filter(m => !m.catalog);
-    body.innerHTML = '<div class="section-title">This computer</div><div class="card"><div class="grow"><div class="name">' + esc(hw.cpu) +
+    body.innerHTML = '<div class="section-title">An API in one tap</div><div class="provider-row" id="providers"></div>' +
+      '<div class="muted small-note">Copy your key (Gemini, DeepSeek…) and tap its name; without a key copied, its key page opens and NewAl Code connects when you come back with it.</div>' +
+      '<div class="section-title">This computer</div><div class="card"><div class="grow"><div class="name">' + esc(hw.cpu) +
       '</div><div class="desc">' + hw.cores + " cores · " + hw.ram_gb + " GB RAM (" + hw.free_gb + " GB free) · " + esc(hw.tier) +
       " tier · models may use " + hw.budget_gb + " GB · " + esc((hw.features || []).join(", ")) + '</div></div></div>' +
       '<div class="section-title">Local models (llama.cpp, free, offline)</div><div class="card-list" id="cat"></div>' +
@@ -1092,6 +1173,7 @@
       '<input id="am-base" placeholder="base URL, e.g. http://192.168.1.20:8080/v1"><input id="am-model" placeholder="model name (or GGUF path)">' +
       '<input id="am-key" placeholder="API key environment variable, e.g. OPENROUTER_API_KEY"><input id="am-ctx" placeholder="context tokens (optional)"></div>' +
       '<div class="form-row"><button class="btn primary" id="am-add">Add model</button><span class="muted">Or type any provider/model in /model, e.g. ollama/qwen3-coder:30b, openrouter/qwen/qwen3-coder, anthropic/claude-sonnet-4-5.</span></div>';
+    providerButtons(body.querySelector("#providers"));
     const cat = body.querySelector("#cat");
     local.forEach(m => {
       const prog = d.downloads[m.id];
@@ -1173,6 +1255,96 @@
     modal("Skills, agents & MCP" + (root ? " · " + base(root) : ""), body);
   }
 
+  // ------------------------------------------------------------------ GitHub
+  const GITHUB = { id: "github", title: "GitHub", pattern: "(gh[pousr]_[A-Za-z0-9_]{20,}|github_pat_[A-Za-z0-9_]{40,})" };
+  async function connectGitHub(p, text) {
+    const d = await api("/api/github/connect", { token: text });
+    toast("GitHub: connected as @" + d.login, 4000);
+    return d;
+  }
+  async function githubSection(box) {
+    let a = {};
+    try { a = await api("/api/github"); } catch (_) { /* offline */ }
+    GITHUB.page = a.token_page;
+    box.innerHTML = "";
+    if (a.connected) {
+      box.appendChild(h("div", "form-row", '<span>Connected' + (a.login ? " as <b>@" + esc(a.login) + "</b>" : "") +
+        '</span><button class="btn" id="gh-clone">Clone a repository</button><button class="btn" id="gh-off">Disconnect</button>'));
+      box.querySelector("#gh-clone").onclick = () => openClone();
+      box.querySelector("#gh-off").onclick = async () => { await api("/api/github/disconnect", {}); githubSection(box); };
+    } else {
+      box.appendChild(h("div", "form-row", '<button class="btn primary" id="gh-on">Connect GitHub</button>' +
+        '<span class="muted">Copy a token and tap (without one, GitHub\'s page for a token opens with the scopes NewAl Code needs).</span>'));
+      box.querySelector("#gh-on").onclick = () => oneTap(GITHUB, async (p, t) => { const d = await connectGitHub(p, t); openSettings(); return d; });
+    }
+  }
+  async function openClone() {
+    const body = h("div", "", '<div class="form-row"><input id="gh-q" type="text" placeholder="Search your repositories" autocomplete="off"></div>' +
+      '<div class="card-list" id="gh-list"><div class="muted">Loading…</div></div>');
+    modal("Clone from GitHub", body);
+    const list = body.querySelector("#gh-list");
+    const load = async q => {
+      try {
+        const d = await api("/api/github/repos?q=" + encodeURIComponent(q || ""));
+        list.innerHTML = "";
+        if (!d.repos.length) list.appendChild(h("div", "muted", "No repository matches."));
+        d.repos.forEach(r => {
+          const c = h("div", "card", '<div class="grow"><div class="name">' + esc(r.full_name) + (r.private ? ' <span class="badge">private</span>' : "") +
+            '</div><div class="desc">' + esc(r.description || "") + '</div></div><button class="btn small">Clone</button>');
+          c.querySelector("button").onclick = async ev => {
+            ev.target.disabled = true; ev.target.textContent = "Cloning…";
+            try {
+              const res = await api("/api/github/clone", { repo: r.full_name });
+              closeModal(); setRoot(res.root); newThread(res.root); toast("Cloned " + r.full_name);
+            } catch (e) { ev.target.disabled = false; ev.target.textContent = "Clone"; toast(e.message, 6000); }
+          };
+          list.appendChild(c);
+        });
+      } catch (e) {
+        list.innerHTML = "";
+        list.appendChild(h("div", "muted", e.message + " — connect GitHub in Settings first."));
+      }
+    };
+    let timer = 0;
+    body.querySelector("#gh-q").oninput = ev => { clearTimeout(timer); timer = setTimeout(() => load(ev.target.value), 300); };
+    load("");
+  }
+
+  // ------------------------------------------------------------------ the phone (NewAl Code Lite)
+  function phoneStatus() {
+    try { return window.NewAlPhone ? JSON.parse(NewAlPhone.status()) : null; } catch (_) { return null; }
+  }
+  function phoneSection(box) {
+    const st = phoneStatus();
+    if (!st) { box.parentNode.hidden = true; return; }
+    const t = st.termux || {};
+    box.innerHTML =
+      '<div class="form-row"><label>Screen control</label><span class="' + (st.accessibility ? "good" : "muted") + '">' +
+      (st.accessibility ? "on: the agent can see the screen, tap and type (it asks first unless full-auto)" : "off") + "</span>" +
+      (st.accessibility ? "" : '<button class="btn" id="ph-a11y">Turn on</button>') + "</div>" +
+      '<div class="form-row"><label>Termux</label><span class="muted">' +
+      (!t.installed ? "not installed" : t.up ? "NewAl Code runs in Termux" : "installed") + "</span>" +
+      (!t.installed ? '<button class="btn" id="ph-tx-get">Get Termux</button>' :
+        (t.up ? '<button class="btn primary" id="ph-tx-open">Open the Termux workspace</button>' : '<button class="btn primary" id="ph-tx-link">Connect Termux</button>') +
+        (t.allowed ? (t.up ? "" : '<button class="btn" id="ph-tx-start">Start in Termux</button>') : '<button class="btn" id="ph-tx-allow">Let this app start it</button>')) +
+      "</div>" +
+      '<div class="muted small-note">Connected, NewAl Code also runs inside Termux: its whole Linux (git, compilers, packages), your projects there, this phone\'s model and screen control. The first time, paste one command in Termux.</div>';
+    const on = (id, f) => { const b = box.querySelector(id); if (b) b.onclick = f; };
+    on("#ph-a11y", () => NewAlPhone.openAccessibilitySettings());
+    on("#ph-tx-get", () => NewAlPhone.termuxSetup(""));
+    on("#ph-tx-open", () => NewAlPhone.go("termux"));
+    on("#ph-tx-allow", () => { NewAlPhone.termuxAllow(); setTimeout(() => phoneSection(box), 4000); });
+    on("#ph-tx-start", () => { toast(NewAlPhone.termuxStart() === "started" ? "Starting NewAl Code in Termux…" : "Not allowed yet"); setTimeout(() => phoneSection(box), 5000); });
+    on("#ph-tx-link", async () => {
+      try {
+        const d = await api("/api/termux/link", {});
+        NewAlPhone.termuxSetup(d.command);
+        const wait = setInterval(() => { const s2 = phoneStatus(); if (s2 && s2.termux && s2.termux.up) { clearInterval(wait); phoneSection(box); toast("NewAl Code runs in Termux"); } }, 3000);
+        setTimeout(() => clearInterval(wait), 600000);
+      } catch (e) { toast(e.message); }
+    });
+  }
+
   async function openSettings() {
     const st = await api("/api/state");
     const s = st.settings;
@@ -1183,7 +1355,11 @@
       '<div class="form-row"><label>Web fetch tool</label><input type="checkbox" id="st-web"' + (s.web ? " checked" : "") + "></div>" +
       '<div class="form-row"><label>Speculative decoding</label><select id="st-spec">' + ["auto", "off", "ngram"].map(v => '<option' + (s.speculative === v ? " selected" : "") + ">" + v + "</option>").join("") + "</select></div>" +
       '<div class="form-row"><label>Theme</label><select id="st-theme">' + ["system", "light", "dark"].map(v => '<option' + (s.theme === v ? " selected" : "") + ">" + v + "</option>").join("") + "</select></div>" +
-      '<div class="form-row"><button class="btn primary" id="st-save">Save</button></div>');
+      '<div class="form-row"><button class="btn primary" id="st-save">Save</button></div>' +
+      '<div class="section-title">GitHub</div><div id="st-github"></div>' +
+      '<div class="section-wrap"><div class="section-title">This phone</div><div id="st-phone"></div></div>');
+    githubSection(body.querySelector("#st-github"));
+    phoneSection(body.querySelector("#st-phone"));
     body.querySelector("#st-save").onclick = async () => {
       const v = {
         mode: body.querySelector("#st-mode").value, reasoning: body.querySelector("#st-reasoning").value,
@@ -1205,6 +1381,7 @@
   function wire() {
     $("#new-thread").onclick = () => newThread();
     $("#open-folder").onclick = () => pickFolder(r => { setRoot(r); newThread(r); });
+    if ($("#clone-repo")) $("#clone-repo").onclick = () => openClone();
     $("#open-models").onclick = openModels;
     $("#open-cloud").onclick = () => openCloud();
     $("#open-extensions").onclick = openExtensions;

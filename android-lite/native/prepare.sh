@@ -2,7 +2,8 @@
 # Makes what NewAl Code Lite's APK carries besides its Java code:
 #   app/src/main/jniLibs/<abi>/  libnewalpy.so (python), libpython3.14.so and its libraries, libllama-server.so
 #                                (+ libllama-server-dotprod.so on arm64, for CPUs with dot-product instructions)
-#   app/build/generated/newal-assets/  python-stdlib.zip, python-dynload-<abi>.zip, newal_code.zip, cacert.pem
+#   app/build/generated/newal-assets/  python-stdlib.zip, python-dynload-<abi>.zip, newal_code.zip,
+#                                      python-extra.zip (dulwich, urllib3), cacert.pem
 #
 #   ANDROID_NDK=/path/to/ndk native/prepare.sh [abi ...]      (default: arm64-v8a x86_64)
 # Python is python.org's official Android build; llama.cpp is built from its newest release (LLAMA_TAG to pin).
@@ -54,6 +55,15 @@ done
 # NewAl Code itself, and the certificates HTTPS needs (model downloads, APIs).
 rm -f "$ASSETS/newal_code.zip"
 (cd "$ROOT/../desktop" && zip -q -r "$ASSETS/newal_code.zip" newal_code -x '*/__pycache__/*')
+
+# dulwich (git in Python, for `git` on the phone) and urllib3 (its HTTPS): pure-Python wheels.
+rm -rf "$WORK/extra" && mkdir -p "$WORK/extra/wheels" "$WORK/extra/site"
+python3 -m pip download -q --no-deps --only-binary=:all: --platform any --python-version "$PYSHORT" \
+  --implementation py --abi none -d "$WORK/extra/wheels" "dulwich>=1.2" "urllib3>=2.2.2"
+for w in "$WORK"/extra/wheels/*.whl; do (cd "$WORK/extra/site" && unzip -q -o "$w"); done
+rm -f "$ASSETS/python-extra.zip"
+(cd "$WORK/extra/site" && zip -q -r "$ASSETS/python-extra.zip" dulwich urllib3 \
+   -x 'dulwich/tests/*' 'dulwich/contrib/test_*' '*/__pycache__/*')
 cp "${CA_BUNDLE:-/etc/ssl/certs/ca-certificates.crt}" "$ASSETS/cacert.pem"
 
 # ---------------------------------------------------------------------------------------------------- llama.cpp
