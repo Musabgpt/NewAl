@@ -186,6 +186,21 @@ class ToolsTest(unittest.TestCase):
         self.assertIn("running", text)
         tools.call(c, "job", {"id": "job1", "action": "stop"})
 
+    def test_mistyped_absolute_paths_land_in_the_project(self):
+        root = make_project({"src/app.py": "x = 1\n"})
+        c = self.ctx(root)
+        text, meta = tools.call(c, "write", {"path": "/nowhere/%s/hello.py" % os.path.basename(root),
+                                             "content": "print('hi')\n"})
+        self.assertTrue(os.path.exists(os.path.join(root, "hello.py")), text)
+        tools.call(c, "write", {"path": "/tmp/nowhere/src/b.py", "content": "y = 2\n"})
+        self.assertTrue(os.path.exists(os.path.join(root, "src", "b.py")))
+        text, _ = tools.call(c, "read", {"path": "/elsewhere/project/src/app.py"})
+        self.assertIn("x = 1", text)
+        out = os.path.join(tempfile.mkdtemp(), "out.txt")           # a real folder elsewhere: written there
+        tools.call(c, "write", {"path": out, "content": "z\n"})
+        self.assertTrue(os.path.exists(out))
+        self.assertFalse(os.path.exists(os.path.join(root, "out.txt")))
+
     def test_apply_patch(self):
         root = make_project({"m.py": "def area(w, h):\n    return w + h\n\n\ndef other():\n    return 1\n"})
         c = self.ctx(root)

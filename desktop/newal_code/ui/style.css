@@ -365,3 +365,15 @@ pre.out { margin: 0; background: var(--bg-code); border: 1px solid var(--border)
 .cloud-file { margin: 6px 0; }
 .cloud-file summary { cursor: pointer; font-family: var(--mono, monospace); font-size: 13px; }
 .cloud-actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 10px; }
+
+/* phones (NewAl Code Lite) */
+@media (max-width: 700px) {
+  #sidebar { width: min(86vw, 320px); }
+  .composer-bar { flex-wrap: wrap; }
+  .composer-bar .left { flex-wrap: wrap; }
+  .composer-foot { flex-wrap: wrap; }
+  .modal { padding: 10px; }
+  .modal-card { max-height: calc(100vh - 20px); }
+  #topbar .title-wrap { min-width: 0; }
+  #topbar #thread-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+}

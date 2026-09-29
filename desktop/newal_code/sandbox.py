@@ -6,7 +6,8 @@ mode). It needs no admin rights and no extra program:
 - macOS: Seatbelt (sandbox-exec with a profile made here), as Codex does; optionally no IP connections.
 - Windows: the command runs at low integrity, the level browsers use for their sandboxes: Windows lets such a process
   write only where the mandatory label is low. The first sandboxed command in a folder labels it low (once; what is
-  made in it later inherits the label), and the temp folder is under AppData\\LocalLow. The network stays open.
+  made in it later inherits the label), and the temp folder is under AppData\\LocalLow. Git Bash runs through a
+  junction of its own (see msys_view), so it works next to a Git Bash the user has open. The network stays open.
 
 The launcher (Linux, Windows) is this file run as a script, or the packaged app with --newal-sandbox:
     python sandbox.py --write /project --write /tmp [--no-network] -- bash -c "pytest -q"
@@ -345,6 +346,34 @@ def _say(text):
         k32.WriteFile(h, data, len(data), ctypes.byref(w.DWORD()), None)
 
 
+def msys_view(argv):
+    """argv with Git Bash started through NewAl Code's own path to the Git folder (a junction). MSYS2 programs share
+    their state in kernel objects named after a hash of the folder they run from, and the ones a Git Bash at normal
+    integrity made (a terminal left open) cannot be opened at low integrity: seen from another path, the sandboxed
+    bash and every program it starts from its /usr/bin share objects of their own."""
+    exe = os.path.abspath(argv[0])
+    root, d = None, os.path.dirname(exe)
+    for _ in range(3):
+        if os.path.isfile(os.path.join(d, "usr", "bin", "msys-2.0.dll")):
+            root = d
+            break
+        d = os.path.dirname(d)
+    if not root:
+        return argv
+    link = os.path.join(os.environ.get("LOCALAPPDATA") or tempfile.gettempdir(), "NewAlCode", "git")
+    try:
+        if os.path.lexists(link) and os.path.normcase(os.path.realpath(link)) != os.path.normcase(
+                os.path.realpath(root)):
+            os.rmdir(link)                              # Git moved: a junction is removed like an empty folder
+        if not os.path.lexists(link):
+            import _winapi
+            os.makedirs(os.path.dirname(link), exist_ok=True)
+            _winapi.CreateJunction(root, link)
+    except (OSError, ImportError, AttributeError):
+        return argv
+    return [os.path.join(link, os.path.relpath(exe, root))] + list(argv[1:])
+
+
 def run_low_integrity(argv, writable, cwd=None):
     """Runs argv at low integrity with this process's standard handles, in a job that ends with this process
     (a cancelled command stops with all it started); returns its exit code. Labels `writable` low first."""
@@ -409,10 +438,8 @@ def run_low_integrity(argv, writable, cwd=None):
             k32.SetHandleInformation(h, 1, 1)                                  # HANDLE_FLAG_INHERIT
     si.hStdInput, si.hStdOutput, si.hStdError = handles
 
-    # Git Bash (MSYS2) keeps its shared state in a kernel object directory named after its install folder; one made
-    # by a Git Bash at normal integrity (an open terminal) cannot be opened at low integrity. The runtime's testing
-    # switch gives these commands a namespace of their own (msys-2.0S5_testing-...).
-    env = dict(os.environ, TEMP=temp, TMP=temp, CYGWIN_TESTING="1", MSYS_TESTING="1")
+    argv = msys_view(argv)
+    env = dict(os.environ, TEMP=temp, TMP=temp)
     block = ctypes.create_unicode_buffer("".join("%s=%s\0" % kv for kv in sorted(env.items(),
                                                                                 key=lambda kv: kv[0].upper()))
                                          + "\0")

@@ -16,3 +16,6 @@ desktop/*.spec
 __pycache__/
 desktop/vscode-extension/*.vsix
 desktop/assets/*.vsix
+
+# made by android-lite/native/prepare.sh
+android-lite/app/src/main/jniLibs/

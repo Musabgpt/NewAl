@@ -67,11 +67,20 @@ def _b(desc):
 
 # ------------------------------------------------------------------ paths and files
 
-def resolve(ctx, path):
-    path = os.path.expanduser(str(path or ".").strip())
-    if not os.path.isabs(path):
-        path = os.path.join(ctx.root, path)
-    return os.path.normpath(path)
+def resolve(ctx, path, new=False):
+    """The absolute path a tool works on. new: a file being created. An absolute path outside the project that
+    cannot be what was meant (nothing there to read; for a new file, no such folder) is most often the project's own,
+    mistyped: small models copy long paths badly. Then the longest tail of it that fits the project is taken
+    (/tmp/x/src/app.py: src/app.py when the project has src/, else app.py), and the result shows the real path."""
+    path = os.path.normpath(os.path.join(ctx.root, os.path.expanduser(str(path or ".").strip())))
+    missing = not os.path.isdir(os.path.dirname(path)) if new else not os.path.exists(path)
+    if missing and not inside(ctx, path):
+        parts = [p for p in re.split(r"[\\/]+", path) if p and not p.endswith(":")]
+        for i in range(1, len(parts)):
+            cand = os.path.join(ctx.root, *parts[i:])
+            if os.path.isdir(os.path.dirname(cand)) if new else os.path.exists(cand):
+                return cand
+    return path
 
 
 def rel(ctx, path):
@@ -109,8 +118,14 @@ def read_text(path):
 
 
 def write_text(ctx, path, text):
+    folder = os.path.dirname(path) or "."
+    if not os.path.isdir(folder) and not inside(ctx, path):
+        # A new folder tree outside the project is almost always a mistyped absolute path (small models copy long
+        # paths badly): ask for the project-relative one instead of writing somewhere unexpected.
+        raise ToolError("%s: the folder %s does not exist and is outside the project. Use a path relative to the "
+                        "project folder (e.g. %s)." % (path, folder, os.path.basename(path)))
     ctx.before_change(path)
-    os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+    os.makedirs(folder, exist_ok=True)
     newline = None
     if os.path.exists(path):
         try:
@@ -175,7 +190,7 @@ def t_read(ctx, path, offset=1, limit=0):
 @tool("write", "Create a file, or replace a file's whole content.",
       {"path": _s("file path"), "content": _s("the complete file content")}, ["path", "content"], "edit")
 def t_write(ctx, path, content):
-    p = resolve(ctx, path)
+    p = resolve(ctx, path, new=True)
     old = read_text(p) if os.path.isfile(p) else None
     write_text(ctx, p, content)
     n = content.count("\n") + (0 if content.endswith("\n") or not content else 1)

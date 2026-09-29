@@ -277,6 +277,7 @@ class Agent:
         verify = cfg.get("verify", True) if verify is None else verify
         max_steps = int((self.agent_def or {}).get("steps") or cfg.get("max_steps") or 60)
         repeats = {}
+        self._stuck = None
         error = ""
         try:
             while True:
@@ -292,6 +293,9 @@ class Agent:
                 s.add(msg)
                 if comp.tool_calls:
                     self._run_tools(ctx, comp.tool_calls, repeats)
+                    if self._stuck:
+                        answer = ("Stopped: %s kept failing the same way (%s)." % self._stuck)
+                        break
                     continue
                 answer = shown(comp.content)
                 if not answer and comp.finish == "length":
@@ -379,7 +383,11 @@ class Agent:
             if self._first_context is None:
                 s = self.session
                 env = prompts.environment(s.root, self.shell)
-                parts = ["<context>\nProject folder: %s\nDate: %s" % (s.root, env["date"])]
+                where = s.root
+                if self._tiny():       # tiny models copy a long absolute path badly: they get none to copy
+                    where = "the current folder, %s (use paths relative to it)" % os.path.basename(s.root.rstrip("/\\"))
+                parts = ["<context>\nProject folder: %s (tools take paths relative to it)\nDate: %s"
+                         % (where, env["date"])]
                 instr = extensions.instructions(s.root)
                 if instr:
                     parts.append("Project instructions (follow them):\n" + instr)
@@ -596,6 +604,13 @@ class Agent:
             ok, text = False, "error: %s: %s" % (type(e).__name__, e)
         if repeats[key] >= 3 and ok:
             text += "\n(Note: you already made this exact call %d times; the result will not change.)" % (repeats[key] - 1)
+        failed = not ok or (name == "bash" and meta.get("exit") not in (0, None))
+        if failed and repeats[key] >= 2:
+            # A small model can repeat a failing call until its steps run out (seen with a 0.8B model on a phone
+            # plan: 58 times the same mistyped path): say so, and stop the turn at the fourth time.
+            text += "\n(You made this exact call before and it failed the same way: change it.)"
+            if repeats[key] >= 4:
+                self._stuck = (name, text.split("\n", 1)[0][:200])
         if name == "bash" and meta.get("exit") == 0 and re.search(r"\b(test|pytest|jest|vitest|unittest|cargo test|go test)\b",
                                                                    str(args.get("command", ""))):
             self.last_test_ok_step = self.step
@@ -661,6 +676,11 @@ class Agent:
         if d.action == permissions.DENY:
             return False, d.reason
         return self._ask(name, kind, args, d.reason, cid)
+
+    def _tiny(self):
+        """A local model under 1.5 GB (the phone models): gets the simplest context."""
+        c = self.client
+        return bool(c is not None and c.local and 0 < int(c.spec.get("size") or 0) < 1.5 * 1024 ** 3)
 
     def _sandbox_on(self, mode=None):
         """Whether a command run now would be in the sandbox (the one tools.command_argv starts it in)."""
@@ -849,6 +869,7 @@ def shown(text):
     """The model's text as the user sees it: thinking tags a template left in the answer removed (the conversation
     keeps the text as written, so the model's cache still matches)."""
     t = re.sub(r"(?s)<think>.*?</think>", "", text or "")
+    t = t.replace("(When done, reply in one sentence.)", "")     # a small model echoing its reminder
     return re.sub(r"</?think>", "", t).strip()
 
 

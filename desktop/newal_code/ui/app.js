@@ -1300,5 +1300,16 @@
     setInterval(() => { if (S.sessions.length) renderSidebar(); }, 60000);
   }
 
-  window.addEventListener("DOMContentLoaded", () => { wire(); boot().catch(e => toast("Cannot start: " + e.message, 8000)); });
+  // Phones (NewAl Code Lite) and narrow windows: the sidebar is a drawer, closed until asked for, and it closes
+  // again once something in it is chosen.
+  function narrow() { return window.innerWidth < 700; }
+  function phoneLayout() {
+    if (narrow()) document.getElementById("app").classList.add("no-sidebar");
+    $("#sidebar").addEventListener("click", e => {
+      if (narrow() && e.target.closest(".side-item, .session, .sess, [data-id], a") && !e.target.closest("#open-folder"))
+        setTimeout(() => document.getElementById("app").classList.add("no-sidebar"), 0);
+    });
+  }
+
+  window.addEventListener("DOMContentLoaded", () => { wire(); phoneLayout(); boot().catch(e => toast("Cannot start: " + e.message, 8000)); });
 })();

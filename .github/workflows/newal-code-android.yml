@@ -1,0 +1,126 @@
+name: NewAl Code Lite for Android
+
+# Builds NewAl Code Lite (android-lite/): python.org's Python for Android with a small launcher, llama-server built
+# for phones, NewAl Code itself; then runs it in Android emulators the size of a 3 GB and a 2 GB phone, where the
+# agent downloads the model the phone's RAM gets, writes a Python file and runs it (android-lite/tests/phone_test.py).
+on:
+  push:
+    branches: [ claude/newal-desktop, ccr-e40af0a0-eec37q ]
+    paths:
+      - "android-lite/**"
+      - "desktop/newal_code/**"
+      - ".github/workflows/newal-code-android.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: newal-code-android-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  apk:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Android SDK and NDK
+        run: |
+          SDKMANAGER="$(command -v sdkmanager || find "$ANDROID_HOME" -type f -name sdkmanager | sort | tail -n 1)"
+          yes | "$SDKMANAGER" --licenses > /dev/null || true
+          "$SDKMANAGER" "platforms;android-35" "build-tools;35.0.0" "ndk;27.3.13750724" > /dev/null
+          echo "ANDROID_NDK=$ANDROID_HOME/ndk/27.3.13750724" >> "$GITHUB_ENV"
+
+      - name: Python, llama.cpp and NewAl Code for Android
+        run: android-lite/native/prepare.sh arm64-v8a x86_64
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.7"
+
+      - name: Build the APK
+        env:
+          NEWAL_BUILD: ${{ github.run_number }}
+        run: |
+          gradle -p android-lite :app:assembleRelease --stacktrace
+          cp android-lite/app/build/outputs/apk/release/app-release.apk NewAlCodeLite.apk
+          ls -la NewAlCodeLite.apk
+          unzip -l NewAlCodeLite.apk | grep -E "lib/|assets/" | head -40
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: NewAlCodeLite-apk
+          path: NewAlCodeLite.apk
+          compression-level: 0
+          retention-days: 14
+
+  phone:
+    needs: apk
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { ram: 3072, label: "3 GB phone" }
+          - { ram: 2048, label: "2 GB phone" }
+    name: ${{ matrix.label }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: NewAlCodeLite-apk
+
+      - name: KVM for the emulator
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
+      - name: NewAl Code Lite on a ${{ matrix.label }}
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 30
+          arch: x86_64
+          target: google_apis
+          ram-size: ${{ matrix.ram }}M
+          disk-size: 6000M
+          cores: 4
+          emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none
+          disable-animations: true
+          script: python3 android-lite/tests/phone_test.py NewAlCodeLite.apk "${{ matrix.label }}"
+
+  release:
+    needs: [apk, phone]
+    if: ${{ !cancelled() && needs.apk.result == 'success' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch') }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: NewAlCodeLite-apk
+
+      - name: Publish (pre-release)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PHONES: ${{ needs.phone.result }}
+        run: |
+          set -e
+          tag="newal-code-lite-b${{ github.run_number }}"
+          printf '%s\n' \
+            "NewAl Code Lite for Android phones with 2-4 GB of RAM (Android 8 and up; arm64, and x86_64 for emulators)." \
+            "" \
+            "Install NewAlCodeLite.apk (allow installing from this source), open it, and download the model it" \
+            "recommends for the phone's RAM (Qwen3.5 0.8B for 2-3 GB, 2B for 4 GB). The agent, its Python and the" \
+            "model all run on the phone." \
+            "" \
+            "Emulator check of this build (2 GB and 3 GB phones): $PHONES." > notes.md
+          gh release create "$tag" NewAlCodeLite.apk --repo "${{ github.repository }}" --target "${{ github.sha }}" \
+            --title "NewAl Code Lite build ${{ github.run_number }}" --notes-file notes.md --prerelease --latest=false

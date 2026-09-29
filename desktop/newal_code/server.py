@@ -7,6 +7,7 @@ import os
 import queue
 import re
 import subprocess
+import sys
 import threading
 import time
 import urllib.parse
@@ -451,6 +452,13 @@ def serve(port=0, open_browser=False, host="127.0.0.1"):
 def main(port=0, open_browser=True):
     httpd, url = serve(port, open_browser)
     print("%s %s: %s" % (NAME, __version__, url), flush=True)
+    try:
+        import signal
+        # A service manager (the Android app, systemd) stops the server with SIGTERM: exit through atexit, which
+        # stops the local models too (they would keep their RAM otherwise).
+        signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
+    except (ValueError, OSError, AttributeError):
+        pass
     try:
         httpd.serve_forever()
     except KeyboardInterrupt:

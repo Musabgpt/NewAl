@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- NewAl Code's mark: a rounded square in its blue-green-violet, with a code chevron. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+    <path android:fillColor="#FFFFFFFF" android:pathData="M0,0h108v108h-108z" />
+    <path android:fillColor="#FF2F7BF6" android:pathData="M30,22h48a8,8 0 0 1 8,8v48a8,8 0 0 1 -8,8h-48a8,8 0 0 1 -8,-8v-48a8,8 0 0 1 8,-8z" />
+    <path android:fillColor="#FF16B39A" android:pathData="M22,58h64v20a8,8 0 0 1 -8,8h-48a8,8 0 0 1 -8,-8z" />
+    <path android:fillColor="#FF8B5CF6" android:pathData="M60,22h18a8,8 0 0 1 8,8v18h-26z" />
+    <path android:fillColor="#FFFFFFFF" android:pathData="M44,42l-12,12l12,12l4,-4l-8,-8l8,-8zM64,42l12,12l-12,12l-4,-4l8,-8l-8,-8z" />
+</vector>
