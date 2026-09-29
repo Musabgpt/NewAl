@@ -4,7 +4,9 @@ the agent loop end to end against a scripted model (tests/fake_llm.py)."""
 import json
 import os
 import shutil
+import socket
 import struct
+import subprocess
 import sys
 import tempfile
 import textwrap
@@ -227,17 +229,20 @@ class PermissionsTest(unittest.TestCase):
 
 
 class SandboxTest(unittest.TestCase):
-    """Linux only: commands write only inside the project (auto-edit) or nowhere (read-only), via Landlock."""
+    """Commands write only inside the project (auto-edit) or nowhere (read-only): Landlock on Linux, Seatbelt on
+    macOS, low integrity on Windows. Each test runs on whichever of them this computer has."""
 
     def setUp(self):
         from newal_code import sandbox
-        if not sandbox.abi():
-            self.skipTest("no Landlock here")
-        # Not under /tmp: temp folders are always writable in the sandbox.
+        if not sandbox.available():
+            self.skipTest("no sandbox on this system")
+        self.sb = sandbox
+        # Not under the temp folder: temp folders are always writable in the sandbox.
         self.root = tempfile.mkdtemp(prefix=".nc-sandbox-", dir=HERE)
         self.addCleanup(shutil.rmtree, self.root, True)
         self.outside = tempfile.mkdtemp(prefix=".nc-outside-", dir=HERE)
         self.addCleanup(shutil.rmtree, self.outside, True)
+        self.out = self.outside.replace("\\", "/")          # a path bash takes on Windows too
 
     def run_in(self, mode, command, dirs=()):
         s = session.Session(self.root, mode=mode)
@@ -245,8 +250,13 @@ class SandboxTest(unittest.TestCase):
         ctx = agentmod.ToolContext(agentmod.Agent(s))
         return tools.call(ctx, "bash", {"command": command})[1]
 
+    def run_python(self, code, mode="auto-edit", network=True, *args):
+        argv, on = self.sb.wrap([sys.executable, "-c", code] + list(args), self.root, mode, network=network)
+        self.assertTrue(on)
+        return subprocess.run(argv, cwd=self.root, capture_output=True, text=True, timeout=300)
+
     def test_added_folder_is_writable_and_inside(self):
-        m = self.run_in("auto-edit", "echo b > %s/out.txt" % self.outside, dirs=[self.outside])
+        m = self.run_in("auto-edit", "echo b > %s/out.txt" % self.out, dirs=[self.outside])
         self.assertTrue(m["sandboxed"])
         self.assertEqual(m["exit"], 0, m)
         self.assertTrue(os.path.exists(os.path.join(self.outside, "out.txt")))
@@ -257,21 +267,100 @@ class SandboxTest(unittest.TestCase):
         self.assertFalse(tools.inside(ctx, os.path.join(HERE, "x.py")))
 
     def test_auto_edit_writes_only_in_the_project(self):
-        m = self.run_in("auto-edit", "echo a > in.txt && echo b > %s/out.txt" % self.outside)
+        m = self.run_in("auto-edit", "echo a > in.txt && echo b > %s/out.txt" % self.out)
         self.assertTrue(m["sandboxed"])
-        self.assertNotEqual(m["exit"], 0)
+        self.assertNotEqual(m["exit"], 0, m)
+        self.assertTrue(tools.SANDBOX_DENIED.search(m["output"]), m["output"])     # so the user is asked to rerun
         self.assertTrue(os.path.exists(os.path.join(self.root, "in.txt")))
         self.assertFalse(os.path.exists(os.path.join(self.outside, "out.txt")))
 
     def test_read_only_writes_nothing_and_full_auto_is_free(self):
         m = self.run_in("read-only", "echo a > in.txt")
-        self.assertNotEqual(m["exit"], 0)
+        self.assertNotEqual(m["exit"], 0, m)
         self.assertFalse(os.path.exists(os.path.join(self.root, "in.txt")))
-        m = self.run_in("full-auto", "echo b > %s/out.txt" % self.outside)
+        m = self.run_in("full-auto", "echo b > %s/out.txt" % self.out)
         self.assertFalse(m["sandboxed"])
         self.assertTrue(os.path.exists(os.path.join(self.outside, "out.txt")))
         d = permissions.decide("read-only", "bash", "exec", {"command": "make"}, self.root, {}, sandboxed=True)
         self.assertEqual(d.action, "allow")
+
+    def test_programs_without_a_shell(self):
+        """Exit codes and output come back; the error is the one the escalation looks for."""
+        code = ("import sys\n"
+                "open('in.txt', 'w').write('a')\n"
+                "try:\n"
+                "    open(sys.argv[1] + '/out.txt', 'w').write('b')\n"
+                "except OSError as e:\n"
+                "    print('denied:', e)\n"
+                "    sys.exit(3)\n")
+        r = self.run_python(code, "auto-edit", True, self.outside)
+        self.assertEqual(r.returncode, 3, r.stdout + r.stderr)
+        self.assertTrue(tools.SANDBOX_DENIED.search(r.stdout), r.stdout)
+        self.assertTrue(os.path.exists(os.path.join(self.root, "in.txt")))
+        self.assertFalse(os.path.exists(os.path.join(self.outside, "out.txt")))
+
+    def test_temp_folder_and_files_already_there(self):
+        os.makedirs(os.path.join(self.root, "a", "b"))
+        with open(os.path.join(self.root, "a", "b", "old.txt"), "w") as f:
+            f.write("old")
+        code = ("import os, tempfile\n"
+                "with tempfile.NamedTemporaryFile('w', delete=False) as f:\n"
+                "    f.write('t')\n"
+                "os.remove(f.name)\n"
+                "open(os.path.join('a', 'b', 'old.txt'), 'w').write('new')\n"
+                "os.rename(os.path.join('a', 'b', 'old.txt'), os.path.join('a', 'moved.txt'))\n"
+                "os.makedirs(os.path.join('a', 'c', 'd'))\n"
+                "open(os.path.join('a', 'c', 'd', 'n.txt'), 'w').write('n')\n")
+        r = self.run_python(code)
+        self.assertEqual(r.returncode, 0, r.stdout + r.stderr)
+        with open(os.path.join(self.root, "a", "moved.txt")) as f:
+            self.assertEqual(f.read(), "new")
+        self.assertTrue(os.path.exists(os.path.join(self.root, "a", "c", "d", "n.txt")))
+
+    def test_no_network(self):
+        k = self.sb.kind()
+        if k == "low-integrity" or (k == "landlock" and self.sb.abi() < 4):
+            self.skipTest("this sandbox does not limit the network here")
+        srv = socket.socket()
+        srv.bind(("127.0.0.1", 0))
+        srv.listen(4)
+        self.addCleanup(srv.close)
+        code = ("import socket\nsocket.create_connection(('127.0.0.1', %d), timeout=10).close()\nprint('connected')"
+                % srv.getsockname()[1])
+        on = self.run_python(code, "auto-edit", True)
+        off = self.run_python(code, "auto-edit", False)
+        self.assertEqual(on.returncode, 0, on.stdout + on.stderr)
+        self.assertNotEqual(off.returncode, 0, off.stdout + off.stderr)
+        self.assertNotIn("connected", off.stdout)
+
+    def test_cancel_stops_everything_the_command_started(self):
+        s = session.Session(self.root, mode="auto-edit")
+        ctx = agentmod.ToolContext(agentmod.Agent(s))
+        py = sys.executable.replace("\\", "/")
+        late = "import time; time.sleep(4); open('late.txt', 'w').write('x')"
+        threading.Timer(1.5, ctx.cancel.set).start()
+        t0 = time.time()
+        code, out = tools.run_command(ctx, '"%s" -c "%s"' % (py, late), timeout=60)
+        self.assertEqual(code, 130, out)
+        self.assertLess(time.time() - t0, 15)
+        time.sleep(5)
+        self.assertFalse(os.path.exists(os.path.join(self.root, "late.txt")))
+
+    def test_windows_labels_the_project_once(self):
+        if self.sb.kind() != "low-integrity":
+            self.skipTest("Windows only")
+        self.assertFalse(self.sb.is_low(self.root))
+        self.assertTrue(self.sb.active(self.root, "read-only"))
+        r = self.run_python("print('hi')")
+        self.assertEqual(r.stdout.strip(), "hi", r.stderr)
+        self.assertTrue(self.sb.is_low(self.root))
+        self.assertEqual(self.sb.label_low(self.root), 0)          # done: nothing to do again
+        # Labelled low, the project is writable to any low command: read-only mode cannot rely on the sandbox,
+        # and the permissions know it (no command that may write runs without asking).
+        self.assertFalse(self.sb.wrap(["x"], self.root, "read-only")[1])
+        s = session.Session(self.root, mode="read-only")
+        ag = agentmod.Agent(s)
+        self.assertFalse(ag._sandbox_on())
 
 
 class ExtensionsTest(unittest.TestCase):

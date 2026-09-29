@@ -642,7 +642,7 @@ class Agent:
             order = settings.MODES
             mode = order[min(order.index(mode), order.index(self.agent_def["mode"]))]
         d = permissions.decide(mode, name, kind, args, s.root, rules, inside_root=inside,
-                               sandboxed=kind == "exec" and self._sandbox_on())
+                               sandboxed=kind == "exec" and self._sandbox_on(mode))
         hook_cfg = self.cfg.get("hooks") or {}
         if hooks.configured(hook_cfg, "PreToolUse"):
             h = hooks.run(hook_cfg, "PreToolUse", {"session_id": s.id, "transcript_path": s.path,
@@ -662,9 +662,12 @@ class Agent:
             return False, d.reason
         return self._ask(name, kind, args, d.reason, cid)
 
-    def _sandbox_on(self):
+    def _sandbox_on(self, mode=None):
+        """Whether a command run now would be in the sandbox (the one tools.command_argv starts it in)."""
         from . import sandbox
-        return self.cfg.get("sandbox", "auto") != "off" and bool(sandbox.abi())
+        s = self.session
+        return self.cfg.get("sandbox", "auto") != "off" and sandbox.active(s.root, mode or s.mode,
+                                                                           getattr(s, "dirs", None) or ())
 
     def _ask(self, name, kind, args, reason, cid):
         """Asks the user (the interface answers once / always / deny); no one to ask means no."""
@@ -785,8 +788,12 @@ class Agent:
                     self.emit({"type": "notice", "text": "%s's model %s is not available (%s); using %s" % (
                         adef["name"], mid, e, client.id)})
                     client = self.client
+        mode = self.session.mode             # an agent's own mode may only be stricter than the thread's
+        if adef.get("mode") in settings.MODES:
+            mode = settings.MODES[min(settings.MODES.index(mode), settings.MODES.index(adef["mode"]))]
         sub = Session(self.session.root, sid="%s-sub%d" % (self.session.id, self.sub_count), model=client.id,
-                      mode=adef.get("mode") or self.session.mode)
+                      mode=mode)
+        sub.dirs = list(getattr(self.session, "dirs", None) or [])
         sub.turn = self.session.turn
         sub.checkpoints = self.session.checkpoints       # its changes belong to the parent's turn (undo)
         sub.reasoning = self.session.reasoning

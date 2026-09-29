@@ -25,6 +25,9 @@ from newal_code import NAME, __version__, catalog, hardware, models, runtime, se
 
 def main(argv=None):
     argv = list(sys.argv[1:] if argv is None else argv)
+    if argv and argv[0] == "--newal-sandbox":          # a packaged newal-code as the sandbox's launcher
+        from newal_code import sandbox
+        return sandbox.main(argv[1:])
     if argv and argv[0] == "bench":
         from newal_code import benchmark
         return benchmark.main(argv[1:])

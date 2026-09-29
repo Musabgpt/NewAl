@@ -359,8 +359,9 @@ class Service:
             for k in ("allow", "ask", "deny"):
                 lines.append("%s: %s" % (k, ", ".join(rules.get(k) or []) or "-"))
             from . import sandbox
-            lines.append("Sandbox: %s" % ("on (commands write only in the project)" if sandbox.abi() and
-                                          settings.user().get("sandbox", "auto") != "off" else "off"))
+            on = sandbox.kind() if settings.user().get("sandbox", "auto") != "off" else ""
+            lines.append("Sandbox: %s" % ("%s (commands write only in the project%s)" % (
+                on, "" if sandbox.active(s.root, s.mode, s.dirs) else "; not in this mode") if on else "off"))
             return {"reply": "\n".join(lines)}
         if name == "security-review":
             return self.command(s, "/review " + ("security: " + args if args else

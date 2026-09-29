@@ -107,6 +107,8 @@
     applyTheme(S.state.settings.theme);
     const hw = S.state.hardware;
     $("#sandbox-chip").hidden = !S.state.sandbox;
+    if (S.state.sandbox) $("#sandbox-chip").title = "Commands can write only inside the project (" +
+      ({landlock: "Linux Landlock", seatbelt: "macOS Seatbelt", "low-integrity": "Windows low integrity"}[S.state.sandbox] || S.state.sandbox) + ")";
     $("#hw").textContent = hw.cores + " cores · " + hw.ram_gb + " GB RAM · " + hw.tier + " tier";
     S.busy = new Set(S.state.busy || []);
     await refreshSessions();

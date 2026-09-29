@@ -1,0 +1,142 @@
+name: NewAl Code for Windows, Linux and macOS
+
+# Tests NewAl Code on each system (its command sandbox included), builds the app with llama.cpp for it, checks the
+# built app the way a user runs it (tools/smoke_newal_code.py: sandbox + a real GGUF), and publishes the builds as a
+# pre-release (never "latest": NewAl desktop's in-app updater keeps using its own releases).
+on:
+  push:
+    branches: [ claude/newal-desktop, ccr-e40af0a0-eec37q ]
+    paths:
+      - "desktop/newal_code/**"
+      - "desktop/NewAlCode.py"
+      - "desktop/newal-code.py"
+      - "desktop/newal_code.spec"
+      - "desktop/tests/test_newal_code.py"
+      - "desktop/tests/fake_llm.py"
+      - "desktop/tools/fetch_llama.py"
+      - "desktop/tools/smoke_newal_code.py"
+      - ".github/workflows/newal-code.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: newal-code-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: windows-latest, name: windows-x64 }
+          - { os: ubuntu-22.04, name: linux-x64 }
+          - { os: macos-14, name: macos-arm64 }
+          - { os: macos-15-intel, name: macos-x64 }
+    defaults:
+      run:
+        shell: bash
+        working-directory: desktop
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Python packages
+        run: |
+          python -m pip install --upgrade pip pyinstaller
+          if [ "$RUNNER_OS" != Linux ]; then python -m pip install pywebview; fi
+
+      - name: Tests, with this system's command sandbox
+        shell: pwsh
+        run: python -m unittest discover -s tests -p "test_newal_code.py" -v
+
+      - name: The sandbox under Git Bash too (Windows)
+        if: runner.os == 'Windows'
+        run: python -m unittest discover -s tests -p "test_newal_code.py" -k SandboxTest -v
+
+      - name: llama.cpp for this system
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python tools/fetch_llama.py bin
+
+      - name: Build the app
+        run: python -m PyInstaller --noconfirm newal_code.spec
+
+      - name: Put llama.cpp in the app
+        run: |
+          set -e
+          if [ "$RUNNER_OS" = macOS ]; then
+            app="dist/NewAl Code.app"
+            # Code only in the bundle's Frameworks (anything else breaks its signature), then sign it all again.
+            mkdir -p "$app/Contents/Frameworks/bin"
+            find bin -type f \( -name llama-server -o -name "*.dylib" \) -exec cp {} "$app/Contents/Frameworks/bin/" \;
+            codesign --force --sign - "$app/Contents/Frameworks/bin/"*
+            codesign --force --deep --sign - "$app"
+            codesign --verify --deep --strict --verbose=2 "$app"
+            echo "DIST=$app" >> "$GITHUB_ENV"
+          else
+            cp -R bin dist/NewAlCode/bin
+            echo "DIST=dist/NewAlCode" >> "$GITHUB_ENV"
+          fi
+
+      - name: Check the built app (sandbox, bundled llama.cpp, a real GGUF)
+        run: |
+          curl -fsSL -o tiny.gguf https://huggingface.co/ggml-org/models/resolve/main/tinyllamas/stories260K.gguf
+          python tools/smoke_newal_code.py "$DIST" tiny.gguf
+
+      - name: Package
+        run: |
+          set -e
+          mkdir -p out
+          case "$RUNNER_OS" in
+            macOS)   ditto -c -k --keepParent "dist/NewAl Code.app" "out/NewAlCode-${{ matrix.name }}.zip" ;;
+            Linux)   tar -czf "out/NewAlCode-${{ matrix.name }}.tar.gz" -C dist NewAlCode ;;
+            Windows) (cd dist && python -m zipfile -c "../out/NewAlCode-${{ matrix.name }}.zip" NewAlCode) ;;
+          esac
+          ls -la out
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: NewAlCode-${{ matrix.name }}
+          path: desktop/out/*
+          compression-level: 0
+          retention-days: 14
+
+  release:
+    needs: build
+    if: github.event_name == 'push' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: out
+          pattern: NewAlCode-*
+          merge-multiple: true
+
+      - name: Publish (pre-release)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -e
+          ls -la out
+          tag="newal-code-b${{ github.run_number }}"
+          cat > notes.md <<'EOF'
+          NewAl Code, built and checked on each system by the workflow "NewAl Code for Windows, Linux and macOS".
+
+          - Windows x64: unzip, run NewAlCode.exe (the app) or newal-code.exe (the terminal).
+          - Linux x64: untar, run NewAlCode/NewAlCode (opens in the browser) or NewAlCode/newal-code.
+          - macOS (Apple silicon: arm64, Intel: x64): unzip, move "NewAl Code.app" to Applications; the first time,
+            right-click it and choose Open (the app is not notarized). Terminal: "NewAl Code.app/Contents/MacOS/newal-code".
+
+          llama.cpp is inside; models download from the app (or: newal-code models --download <id>).
+          EOF
+          gh release create "$tag" out/* --repo "${{ github.repository }}" --target "${{ github.sha }}" \
+            --title "NewAl Code build ${{ github.run_number }}" --notes-file notes.md --prerelease --latest=false

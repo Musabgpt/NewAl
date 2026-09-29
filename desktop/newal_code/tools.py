@@ -630,7 +630,11 @@ def shell_command():
     """(argv prefix, name): bash where there is one (Git Bash on Windows), else PowerShell."""
     pref = (settings.user().get("shell") or "").lower()
     if os.name != "nt":
-        return (["/bin/bash", "-c"] if os.path.exists("/bin/bash") else ["/bin/sh", "-c"]), "bash"
+        for p in ("/bin/bash", shutil.which("bash")):        # Termux has bash only in its own prefix
+            if p and os.path.exists(p):
+                return [p, "-c"], "bash"
+        return [next((p for p in ("/bin/sh", shutil.which("sh"), "/system/bin/sh") if p and os.path.exists(p)),
+                     "sh"), "-c"], "sh"                         # Android: /system/bin/sh
     if pref in ("", "bash"):
         for p in (shutil.which("bash"), r"C:\Program Files\Git\bin\bash.exe"):
             if p and os.path.exists(p) and "system32" not in p.lower():
@@ -678,7 +682,7 @@ def _kill(proc):
 
 def command_argv(ctx, command, sandbox=True):
     """(argv, sandboxed): the shell running `command`, inside the sandbox for the session's mode when this system has
-    one (Linux: writes only in the project and temp folders; read-only mode: only in temp)."""
+    one (writes only in the project, the added folders and temp; read-only mode: only in temp). See sandbox.py."""
     argv, _ = shell_command()
     full = argv + [command]
     session = getattr(ctx, "session", None)
@@ -775,7 +779,8 @@ def t_bash(ctx, command, timeout=120, background=False):
                                                      "sandboxed": sandboxed}
 
 
-SANDBOX_DENIED = re.compile(r"Permission denied|Operation not permitted|Read-only file system|EACCES|EPERM")
+SANDBOX_DENIED = re.compile(r"Permission denied|Operation not permitted|Read-only file system|EACCES|EPERM|"
+                            r"Access is denied|Access to the path .{1,300}? is denied|WinError 5\b")
 
 
 def _start_job(ctx, command):

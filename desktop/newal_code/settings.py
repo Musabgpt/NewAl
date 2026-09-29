@@ -55,8 +55,8 @@ DEFAULTS = {
     "theme": "system",
     "web": True,                  # web_fetch tool
     "shell": "",                  # "" auto: bash (PowerShell on Windows without Git Bash)
-    "sandbox": "auto",            # auto: commands may write only in the project (Linux, Landlock); off
-    "sandbox_network": True,      # False: sandboxed commands cannot open network connections
+    "sandbox": "auto",            # auto: commands may write only in the project (Landlock, Seatbelt, low integrity)
+    "sandbox_network": True,      # False: sandboxed commands cannot connect (Linux, macOS)
 }
 
 _lock = threading.RLock()

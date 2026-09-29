@@ -78,7 +78,7 @@ class Handler(BaseHTTPRequestHandler):
                 cfg = settings.user()
                 from . import sandbox
                 return self._json({"name": NAME, "version": __version__, "hardware": hardware.summary(),
-                                   "sandbox": bool(sandbox.abi()) and cfg.get("sandbox", "auto") != "off",
+                                   "sandbox": sandbox.kind() if cfg.get("sandbox", "auto") != "off" else "",
                                    "settings": {k: cfg.get(k) for k in ("model", "mode", "reasoning", "verify", "theme",
                                                                         "auto_context", "speculative", "web", "roles")},
                                    "projects": svc.projects(), "home": os.path.expanduser("~"),
