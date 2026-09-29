@@ -15,6 +15,9 @@ import time
 import unittest
 
 HERE = os.path.dirname(os.path.abspath(__file__))
+if os.environ.get("NEWAL_TEST_WATCHDOG"):            # CI: where a hung test is, then stop
+    import faulthandler
+    faulthandler.dump_traceback_later(int(os.environ["NEWAL_TEST_WATCHDOG"]), exit=True)
 sys.path.insert(0, os.path.dirname(HERE))
 sys.path.insert(0, HERE)
 os.environ["NEWAL_CODE_HOME"] = tempfile.mkdtemp(prefix="newal-code-test-")
@@ -346,6 +349,17 @@ class SandboxTest(unittest.TestCase):
         time.sleep(5)
         self.assertFalse(os.path.exists(os.path.join(self.root, "late.txt")))
 
+    def test_git_bash_open_at_the_same_time(self):
+        """Windows: a Git Bash at normal integrity (a terminal left open) while a sandboxed one runs."""
+        if self.sb.kind() != "low-integrity" or tools.shell_command()[1] != "bash":
+            self.skipTest("Windows with Git Bash only")
+        other = subprocess.Popen(tools.shell_command()[0] + ["sleep 25"])
+        self.addCleanup(other.kill)
+        time.sleep(3)
+        m = self.run_in("auto-edit", "echo a > in.txt && echo ok")
+        self.assertEqual(m["exit"], 0, m)
+        self.assertTrue(os.path.exists(os.path.join(self.root, "in.txt")))
+
     def test_windows_labels_the_project_once(self):
         if self.sb.kind() != "low-integrity":
             self.skipTest("Windows only")
@@ -361,6 +375,239 @@ class SandboxTest(unittest.TestCase):
         s = session.Session(self.root, mode="read-only")
         ag = agentmod.Agent(s)
         self.assertFalse(ag._sandbox_on())
+
+
+def git(cwd, *args):
+    r = subprocess.run(["git", *args], cwd=cwd, capture_output=True, text=True)
+    if r.returncode:
+        raise AssertionError("git %s: %s" % (" ".join(args), r.stderr))
+    return r.stdout
+
+
+class CloudTest(unittest.TestCase):
+    """Cloud tasks end to end without GitHub: a bare repository stands for GitHub's git, a fake API for its REST
+    API, and the runner's part runs here with a scripted model."""
+
+    def setUp(self):
+        from fake_github import FakeGitHub
+        from unittest import mock
+        self.base = tempfile.mkdtemp(prefix="nc-cloud-")
+        self.addCleanup(shutil.rmtree, self.base, True)
+        self.origin = os.path.join(self.base, "origin.git")
+        git(self.base, "init", "-q", "--bare", self.origin)
+        self.work = os.path.join(self.base, "work")
+        os.makedirs(self.work)
+        for rel, text in CALC.items():
+            with open(os.path.join(self.work, rel), "w", encoding="utf-8") as f:
+                f.write(text)
+        git(self.work, "init", "-q", "-b", "main")
+        git(self.work, "add", "-A")
+        git(self.work, "commit", "-qm", "init")
+        git(self.work, "remote", "add", "origin", self.origin)
+        git(self.work, "push", "-q", "origin", "main")
+        self.gh = FakeGitHub()
+        self.addCleanup(self.gh.close)
+        patcher = mock.patch.dict(os.environ, {"NEWAL_GITHUB_API": self.gh.url, "GH_TOKEN": "test-token"})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_task_round_trip(self):
+        from newal_code import cloud
+        with open(os.path.join(self.work, "notes.txt"), "w") as f:
+            f.write("not committed\n")                      # stays out of the task (no --with-changes)
+        rec = cloud.submit(self.work, "Fix add() so the tests pass", model="scripted", repo="me/proj")
+        self.assertTrue(rec["branch"].startswith("newal-cloud/"))
+        self.assertEqual(git(self.work, "status", "--porcelain"), "?? notes.txt\n")     # the checkout untouched
+        files = git(self.origin, "ls-tree", "-r", "--name-only", rec["branch"]).split()
+        self.assertEqual(sorted(files), sorted(["calc.py", "test_calc.py", cloud.TASK_FILE, cloud.WORKFLOW_FILE]))
+        task = json.loads(git(self.origin, "show", "%s:%s" % (rec["branch"], cloud.TASK_FILE)))
+        self.assertEqual((task["task"], task["model"], task["base_branch"]), ("Fix add() so the tests pass",
+                                                                             "scripted", "main"))
+        self.assertIn("newal-cloud/**", git(self.origin, "show", "%s:%s" % (rec["branch"], cloud.WORKFLOW_FILE)))
+
+        # The runner: a checkout of the task branch, the agent with a scripted model, the result pushed back.
+        runner = os.path.join(self.base, "runner")
+        git(self.base, "clone", "-q", "-b", rec["branch"], self.origin, runner)
+        llm = FakeLLM([{"tools": [("edit", {"path": "calc.py", "old": "return a - b", "new": "return a + b"})]},
+                       "Fixed add()."])
+        settings.save({"models": {"scripted": {"base_url": llm.url, "model": "fake"}}})
+        self.addCleanup(settings.save, {"models": {}})
+        out = os.path.join(self.base, "result")
+        result = cloud.run_here(runner, out)
+        llm.close()
+        self.assertEqual((result["answer"], result["files"], result["pushed"], result["error"]),
+                         ("Fixed add().", ["calc.py"], True, ""))
+        with open(os.path.join(out, "changes.patch"), encoding="utf-8") as f:
+            patch = f.read()
+        self.assertIn("+    return a + b", patch)
+        self.assertNotIn("task.json", patch)
+        self.assertNotIn("newal-code-cloud.yml", patch)
+        after = git(self.origin, "ls-tree", "-r", "--name-only", rec["branch"]).split()
+        self.assertNotIn(cloud.TASK_FILE, after)
+        self.assertIn("return a + b", git(self.origin, "show", rec["branch"] + ":calc.py"))
+
+        # GitHub's API: the run, its artifact (behind a link that refuses the token), a pull request, the cleanup.
+        import io
+        import zipfile
+        buf = io.BytesIO()
+        with zipfile.ZipFile(buf, "w") as z:
+            for name in os.listdir(out):
+                z.write(os.path.join(out, name), name)
+        run = {"id": 77, "head_sha": rec["commit"], "path": cloud.WORKFLOW_FILE, "status": "completed",
+               "conclusion": "success", "html_url": "https://github.com/me/proj/actions/runs/77"}
+        self.gh.reply("GET", r"/repos/me/proj/actions/runs\?.*", {"workflow_runs": [dict(run, head_sha="other"), run]})
+        self.gh.reply("GET", r"/repos/me/proj/actions/runs/77/artifacts", {"artifacts": [{"id": 5, "name": cloud.ARTIFACT}]})
+        self.gh.route("GET", r"/repos/me/proj/actions/artifacts/5/zip",
+                      lambda m, b, h: (302, None, {"Location": self.gh.url + "/storage/5"}))
+        self.gh.route("GET", r"/storage/5", lambda m, b, h: (400, {"message": "token not accepted"}, {})
+                      if h.get("Authorization") else (200, buf.getvalue(), {"Content-Type": "application/zip"}))
+        self.gh.reply("POST", r"/repos/me/proj/pulls", {"html_url": "https://github.com/me/proj/pull/9"}, 201)
+        self.gh.reply("DELETE", r"/repos/me/proj/git/refs/heads/newal-cloud/.+", None, 204)
+
+        rec = cloud.status(rec["id"])
+        self.assertEqual((rec["state"], rec["fetched"], rec["answer"]), ("done", True, "Fixed add()."))
+        ch = cloud.changes(rec["id"])
+        self.assertEqual([(c["path"], c["status"], c["plus"], c["minus"]) for c in ch], [("calc.py", "modified", 1, 1)])
+        cloud.apply(rec["id"], self.work)
+        with open(os.path.join(self.work, "calc.py")) as f:
+            self.assertIn("return a + b", f.read())
+        rec = cloud.pull_request(rec["id"])
+        self.assertEqual(rec["pr"], "https://github.com/me/proj/pull/9")
+        body = self.gh.calls("POST")[0]["body"]
+        self.assertEqual((body["head"], body["base"]), (rec["branch"], "main"))
+        cloud.delete(rec["id"])
+        self.assertEqual(len(self.gh.calls("DELETE", "/repos/me/proj/git/refs/heads/newal-cloud/")), 1)
+        self.assertNotIn(rec["id"], [r["id"] for r in cloud.listing()])
+        api_calls = [r for r in self.gh.requests if not r["path"].startswith("/storage/")]
+        self.assertTrue(all(r["auth"] == "Bearer test-token" for r in api_calls))
+
+    def test_with_changes_and_a_workflow_already_there(self):
+        from newal_code import cloud
+        path = cloud.setup(self.work)
+        self.assertTrue(path.endswith(os.path.join(".github", "workflows", "newal-code-cloud.yml")))
+        git(self.work, "add", "-A")
+        git(self.work, "commit", "-qm", "cloud workflow")
+        with open(os.path.join(self.work, "calc.py"), "a") as f:
+            f.write("# local edit\n")
+        rec = cloud.submit(self.work, "Tidy up", with_changes=True, push_result=False, repo="me/proj")
+        self.assertIn("# local edit", git(self.origin, "show", rec["branch"] + ":calc.py"))
+        changed = git(self.origin, "diff", "--name-only", rec["base"], rec["branch"]).split()
+        self.assertEqual(sorted(changed), sorted(["calc.py", cloud.TASK_FILE]))       # the workflow was there
+        self.assertFalse(json.loads(git(self.origin, "show", rec["branch"] + ":" + cloud.TASK_FILE))["push"])
+        self.gh.reply("GET", r"/repos/me/proj/actions/runs\?.*", {"workflow_runs": []})
+        self.assertEqual(cloud.status(rec["id"])["state"], "queued")                  # no run yet
+        self.assertNotIn("__", cloud.workflow(["dev"]))
+        self.assertIn('"newal-cloud/**", "dev"', cloud.workflow(["dev"]))
+
+
+class GitHubAppTest(unittest.TestCase):
+    """@newal in issues and pull requests, with simulated GitHub events: a bare repository for git, a fake API, a
+    scripted model; what the workflow runs on GitHub's runner runs here."""
+
+    def setUp(self):
+        from fake_github import FakeGitHub
+        from unittest import mock
+        self.base = tempfile.mkdtemp(prefix="nc-gh-")
+        self.addCleanup(shutil.rmtree, self.base, True)
+        self.origin = os.path.join(self.base, "origin.git")
+        git(self.base, "init", "-q", "--bare", self.origin)
+        seed = os.path.join(self.base, "seed")
+        os.makedirs(seed)
+        for rel, text in CALC.items():
+            with open(os.path.join(seed, rel), "w", encoding="utf-8") as f:
+                f.write(text)
+        git(seed, "init", "-q", "-b", "main")
+        git(seed, "add", "-A")
+        git(seed, "commit", "-qm", "init")
+        git(seed, "checkout", "-q", "-b", "feature")
+        with open(os.path.join(seed, "calc.py"), "a", encoding="utf-8") as f:
+            f.write("\n\ndef mul(a, b):\n    return a + b\n")
+        git(seed, "commit", "-qam", "mul")
+        git(seed, "push", "-q", self.origin, "main", "feature")
+        self.runner = os.path.join(self.base, "runner")                 # actions/checkout: the default branch
+        git(self.base, "clone", "-q", self.origin, self.runner)
+        self.gh = FakeGitHub()
+        self.addCleanup(self.gh.close)
+        patcher = mock.patch.dict(os.environ, {"NEWAL_GITHUB_API": self.gh.url, "GH_TOKEN": "test-token"})
+        patcher.start()
+        self.addCleanup(patcher.stop)
+        self.gh.reply("POST", r"/repos/me/proj/issues/\d+/comments", {"id": 11})
+        self.gh.route("PATCH", r"/repos/me/proj/issues/comments/11", lambda m, b, h: (200, {"id": 11}, {}))
+        self.gh.reply("GET", r"/repos/me/proj/pulls/2", {
+            "number": 2, "title": "Add mul()", "body": "Multiplication.", "head": {"ref": "feature", "repo": {
+                "full_name": "me/proj"}}, "base": {"ref": "main"}})
+
+    def model(self, script):
+        llm = FakeLLM(script)
+        self.addCleanup(llm.close)
+        settings.save({"models": {"scripted": {"base_url": llm.url, "model": "fake"}}})
+        self.addCleanup(settings.save, {"models": {}})
+        return llm
+
+    def event(self, body, assoc="OWNER", pr=False):
+        issue = {"number": 2 if pr else 1, "title": "add() subtracts", "body": "add(2, 3) gives -1.",
+                 "user": {"login": "someone"}}
+        if pr:
+            issue["pull_request"] = {"url": "..."}
+        return {"issue": issue, "comment": {"body": body, "author_association": assoc, "user": {"login": "musab"}},
+                "repository": {"full_name": "me/proj", "default_branch": "main"}}
+
+    def final_comment(self):
+        return self.gh.calls("PATCH", "/repos/me/proj/issues/comments/11")[-1]["body"]["body"]
+
+    def test_issue_mention_makes_a_pull_request(self):
+        from newal_code import github_app
+        self.gh.reply("POST", r"/repos/me/proj/pulls", {"html_url": "https://github.com/me/proj/pull/5"}, 201)
+        self.model([{"tools": [("edit", {"path": "calc.py", "old": "return a - b", "new": "return a + b"})]},
+                    "Fixed add()."])
+        out = github_app.handle("issue_comment", self.event("@newal please fix this"), "me/proj", self.runner,
+                                model="scripted")
+        self.assertEqual((out["changed"], out["pr"]), (True, "https://github.com/me/proj/pull/5"))
+        self.assertIn("return a + b", git(self.origin, "show", out["branch"] + ":calc.py"))
+        self.assertTrue(out["branch"].startswith("newal/issue-1-"))
+        pr = self.gh.calls("POST", "/repos/me/proj/pulls")[0]["body"]
+        self.assertEqual((pr["head"], pr["base"]), (out["branch"], "main"))
+        self.assertIn("Closes #1", pr["body"])
+        self.assertIn("working on it", self.gh.calls("POST", "/repos/me/proj/issues/1/comments")[0]["body"]["body"])
+        self.assertIn("Fixed add().", self.final_comment())
+        self.assertIn("pull/5", self.final_comment())
+
+    def test_review_comments_on_the_changed_lines(self):
+        from newal_code import github_app
+        self.gh.reply("POST", r"/repos/me/proj/pulls/2/reviews", {"id": 1})
+        self.model(["[P1] calc.py:6 - mul() adds instead of multiplying - return a * b\n"
+                    "[P3] calc.py:40 - there is no line 40 in the change - x"])
+        out = github_app.handle("issue_comment", self.event("@newal review", assoc="MEMBER", pr=True), "me/proj",
+                                self.runner, model="scripted")
+        self.assertEqual(len(out["findings"]), 2)
+        rv = self.gh.calls("POST", "/repos/me/proj/pulls/2/reviews")[0]["body"]
+        self.assertEqual(rv["event"], "COMMENT")
+        self.assertEqual([(c["path"], c["line"], c["side"]) for c in rv["comments"]], [("calc.py", 6, "RIGHT")])
+        self.assertIn("calc.py:40", rv["body"])             # not a line of the change: in the review's text
+        self.assertIn("2 findings", self.final_comment())
+
+    def test_pull_request_change_is_pushed_to_its_branch(self):
+        from newal_code import github_app
+        self.model([{"tools": [("edit", {"path": "calc.py", "old": "    return a + b\n", "new": "    return a * b\n"})]},
+                    "mul() multiplies now."])
+        out = github_app.handle("issue_comment", self.event("@newal fix mul()", pr=True), "me/proj", self.runner,
+                                model="scripted")
+        self.assertEqual((out["changed"], out["branch"]), (True, "feature"))
+        self.assertIn("return a * b", git(self.origin, "show", "feature:calc.py"))
+        self.assertIn("Pushed to `feature`", self.final_comment())
+
+    def test_only_trusted_people_and_only_mentions(self):
+        from newal_code import github_app
+        self.assertIn("only", github_app.handle("issue_comment", self.event("@newal do it", assoc="NONE"),
+                                                "me/proj", self.runner)["skipped"])
+        self.assertIn("no @newal", github_app.handle("issue_comment", self.event("looks good"), "me/proj",
+                                                     self.runner)["skipped"])
+        fork = {"pull_request": {"number": 3, "head": {"repo": {"full_name": "stranger/proj"}}},
+                "repository": {"full_name": "me/proj"}}
+        self.assertIn("only", github_app.handle("pull_request", fork, "me/proj", self.runner)["skipped"])
+        self.assertEqual(self.gh.requests, [])
+        self.assertIn("contains(github.event.comment.body, '@newal')", github_app.workflow())
+        self.assertNotIn("__", github_app.workflow())
 
 
 class ExtensionsTest(unittest.TestCase):

@@ -111,6 +111,17 @@ class Handler(BaseHTTPRequestHandler):
                                    "hooks": settings.project(root).get("hooks") or {},
                                    "mcp": [dict(name=k, **{x: y for x, y in v.items() if x != "env"})
                                            for k, v in __import__("newal_code.mcp", fromlist=["x"]).configs(root).items()]})
+            if path == "/api/cloud":
+                from . import cloud
+                return self._json({"tasks": cloud.listing(q.get("root") or None)})
+            m = re.match(r"^/api/cloud/([\w\-]+)$", path)
+            if m:
+                from . import cloud
+                try:
+                    rec = cloud.status(m.group(1))
+                except cloud.CloudError as e:
+                    rec = dict(cloud.load(m.group(1)), status_error=str(e))
+                return self._json({"task": rec, "changes": cloud.changes(m.group(1)) if rec.get("fetched") else []})
             if path == "/api/browse":
                 return self._json(_browse(q.get("path") or os.path.expanduser("~")))
             if path == "/api/files":
@@ -202,6 +213,8 @@ class Handler(BaseHTTPRequestHandler):
                 cur[mid] = {k: v for k, v in b.items() if v not in ("", None)}
                 settings.save({"models": cur})
                 return self._json({"ok": True, "id": mid})
+            if path == "/api/cloud" or path.startswith("/api/cloud/"):
+                return self._json(*_cloud_post(path, b))
             if path == "/api/models/remove":
                 cur = settings.user().get("models") or {}
                 cur.pop(b.get("id"), None)
@@ -260,6 +273,26 @@ def _revert_file(s, rel):
         with open(target, "wb") as f:
             f.write(data)
     return {"ok": True, "path": rel}
+
+
+def _cloud_post(path, b):
+    """Cloud tasks from the app: start one (POST /api/cloud), then apply, pr or delete (POST /api/cloud/<id>/...)."""
+    from . import cloud
+    try:
+        if path == "/api/cloud":
+            return (cloud.submit(b.get("root") or os.getcwd(), b.get("task") or "", model=b.get("model") or "auto",
+                                 with_changes=bool(b.get("with_changes")), push_result=b.get("push", True) is not False),)
+        m = re.match(r"^/api/cloud/([\w\-]+)/(apply|pr|delete)$", path)
+        if not m:
+            return {"error": "not found"}, 404
+        tid, action = m.groups()
+        if action == "apply":
+            return (cloud.apply(tid, b.get("root") or None),)
+        if action == "pr":
+            return (cloud.pull_request(tid),)
+        return (cloud.delete(tid),)
+    except cloud.CloudError as e:
+        return {"error": str(e)}, 400
 
 
 def _commit(s, message, then=""):

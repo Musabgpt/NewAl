@@ -409,7 +409,10 @@ def run_low_integrity(argv, writable, cwd=None):
             k32.SetHandleInformation(h, 1, 1)                                  # HANDLE_FLAG_INHERIT
     si.hStdInput, si.hStdOutput, si.hStdError = handles
 
-    env = dict(os.environ, TEMP=temp, TMP=temp)
+    # Git Bash (MSYS2) keeps its shared state in a kernel object directory named after its install folder; one made
+    # by a Git Bash at normal integrity (an open terminal) cannot be opened at low integrity. The runtime's testing
+    # switch gives these commands a namespace of their own (msys-2.0S5_testing-...).
+    env = dict(os.environ, TEMP=temp, TMP=temp, CYGWIN_TESTING="1", MSYS_TESTING="1")
     block = ctypes.create_unicode_buffer("".join("%s=%s\0" % kv for kv in sorted(env.items(),
                                                                                 key=lambda kv: kv[0].upper()))
                                          + "\0")

@@ -7,6 +7,8 @@
   newal-code doctor              check this computer, llama.cpp and the models
   newal-code bench               the coding speed test on this computer
   newal-code resume [id]         reopen a thread
+  newal-code cloud "task"        run a task on GitHub Actions (list, status, show, apply, pr, delete ID)
+  newal-code github install      the GitHub app: @newal in issues and pull requests (--pr: as a pull request)
 
 Options: --model ID, --mode read-only|ask|auto-edit|full-auto, --cd DIR, --full-auto."""
 
@@ -28,6 +30,12 @@ def main(argv=None):
     if argv and argv[0] == "--newal-sandbox":          # a packaged newal-code as the sandbox's launcher
         from newal_code import sandbox
         return sandbox.main(argv[1:])
+    if argv and argv[0] == "cloud":                    # its own options (see cloud.main)
+        from newal_code import cloud
+        return cloud.main(argv[1:], os.getcwd())
+    if argv and argv[0] == "github":                   # the GitHub app (see github_app.main)
+        from newal_code import github_app
+        return github_app.main(argv[1:], os.getcwd())
     if argv and argv[0] == "bench":
         from newal_code import benchmark
         return benchmark.main(argv[1:])
@@ -91,7 +99,7 @@ def main(argv=None):
     return tui.run(root, model=a.model, mode=mode, prompt=rest or None, dirs=a.add_dir)
 
 
-COMMANDS = ("app", "serve", "web", "ui", "exec", "models", "doctor", "resume", "bench")
+COMMANDS = ("app", "serve", "web", "ui", "exec", "models", "doctor", "resume", "bench", "cloud", "github")
 
 
 def cmd_models(download=""):

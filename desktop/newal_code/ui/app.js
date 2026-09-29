@@ -31,6 +31,7 @@
     list: '<path d="M9 6h11M9 12h11M9 18h11M4.5 6h.01M4.5 12h.01M4.5 18h.01"/>',
     trash: '<path d="M4 7h16M10 11v6M14 11v6M6 7l1 13h10l1-13M9 7V4h6v3"/>',
     undo: '<path d="M9 14L4 9l5-5"/><path d="M4 9h10a6 6 0 0 1 0 12h-3"/>',
+    cloud: '<path d="M7 18a4.5 4.5 0 0 1-.6-8.96A6 6 0 0 1 18 9.5a4.25 4.25 0 0 1-.5 8.5z"/>',
   };
   function icon(name) {
     return '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">' + (ICONS[name] || "") + "</svg>";
@@ -743,6 +744,7 @@
     text = (text != null ? text : $("#input").value).trim();
     if (!text && !S.attachments.length) return;
     if (S.current && S.busy.has(S.current)) return;
+    if (!S.current && pref("env") === "cloud" && !text.startsWith("/")) return sendToCloud(text);
     let sid;
     try { sid = await ensureSession(); } catch (e) { toast(e.message); return; }
     $("#input").value = "";
@@ -762,6 +764,69 @@
     if (/^\/goal\b/.test(text)) api("/api/sessions/" + sid).then(d => showGoal(d.meta.goal));
     if (/^\/undo\b/.test(text)) refreshChanges();
     scrollDown(true);
+  }
+
+  // ------------------------------------------------------------------ cloud tasks
+  async function sendToCloud(text) {
+    if (!S.root) { await new Promise(res => pickFolder(r => { setRoot(r); res(); })); }
+    toast("Starting a cloud task…");
+    try {
+      const rec = await api("/api/cloud", { root: S.root, task: text, model: pref("model") || "auto" });
+      $("#input").value = "";
+      autoGrow();
+      toast("Cloud task started on " + rec.repo);
+      openCloud(rec.id);
+    } catch (e) { toast(e.message, 9000); }
+  }
+  const CLOUD_STATE = { queued: "Queued", running: "Running", done: "Done", failed: "Failed" };
+  async function openCloud(open) {
+    const body = modal("Cloud tasks", '<div class="muted">Tasks run on GitHub Actions with the repository (newal-code cloud "task" does the same).</div><div class="cloud-list"></div><div class="cloud-detail"></div>');
+    const list = body.querySelector(".cloud-list"), detail = body.querySelector(".cloud-detail");
+    let d;
+    try { d = await api("/api/cloud"); } catch (e) { list.textContent = e.message; return; }
+    if (!d.tasks.length) list.innerHTML = '<div class="review-empty">No cloud tasks yet: choose Cloud under the message box, then send a task.</div>';
+    const show = async id => {
+      list.querySelectorAll(".cloud-row").forEach(r => r.classList.toggle("sel", r.dataset.id === id));
+      detail.innerHTML = '<div class="muted">Asking GitHub…</div>';
+      let t;
+      try { t = await api("/api/cloud/" + id); } catch (e) { detail.textContent = e.message; return; }
+      const rec = t.task;
+      const row = list.querySelector('[data-id="' + id + '"] .st');
+      if (row) row.textContent = CLOUD_STATE[rec.state] || rec.state;
+      detail.innerHTML = "";
+      detail.appendChild(h("div", "cloud-head", "<b>" + esc(rec.task) + "</b><div class=\"muted\">" + esc(rec.repo) + " · " + esc(rec.branch) +
+        " · " + esc(CLOUD_STATE[rec.state] || rec.state) + (rec.url ? ' · <a href="' + esc(rec.url) + '" target="_blank" rel="noopener">the run</a>' : "") +
+        (rec.pr ? ' · <a href="' + esc(rec.pr) + '" target="_blank" rel="noopener">pull request</a>' : "") + "</div>"));
+      if (rec.hint || rec.status_error || rec.fetch_error) detail.appendChild(h("div", "notice", esc(rec.hint || rec.status_error || rec.fetch_error)));
+      if (rec.answer || rec.error) detail.appendChild(h("div", "cloud-answer", esc(rec.answer || rec.error)));
+      t.changes.forEach(c => {
+        const f = h("details", "cloud-file", "<summary>" + esc(c.path) + ' <span class="plus">+' + c.plus + '</span> <span class="minus">−' + c.minus + "</span></summary>");
+        f.appendChild(diffView(c.diff));
+        detail.appendChild(f);
+      });
+      const bar = h("div", "cloud-actions");
+      const btn = (label, cls, fn) => { const b = h("button", "btn small " + cls, label); b.onclick = fn; bar.appendChild(b); };
+      if (t.changes.length && !rec.applied) btn("Apply to project", "primary", async () => {
+        try { const r = await api("/api/cloud/" + id + "/apply", { root: rec.root }); toast("Applied: " + r.files.join(", ")); refreshChanges(); show(id); } catch (e) { toast(e.message, 9000); }
+      });
+      if (rec.pushed && !rec.pr) btn("Open pull request", "", async () => {
+        try { const r = await api("/api/cloud/" + id + "/pr", {}); toast("Pull request opened"); window.open(r.pr, "_blank"); show(id); } catch (e) { toast(e.message, 9000); }
+      });
+      if (rec.state !== "done" && rec.state !== "failed") btn("Refresh", "", () => show(id));
+      btn("Delete", "danger", async () => {
+        if (!confirm("Forget this task and delete its branch on GitHub?")) return;
+        try { await api("/api/cloud/" + id + "/delete", {}); openCloud(); } catch (e) { toast(e.message, 9000); }
+      });
+      detail.appendChild(bar);
+    };
+    d.tasks.forEach(t => {
+      const r = h("div", "cloud-row", '<i data-icon="cloud"></i><span class="p">' + esc(t.task.split("\n")[0]) + '</span><span class="st">' + esc(CLOUD_STATE[t.state] || t.state || "") + "</span>");
+      r.dataset.id = t.id;
+      r.onclick = () => show(t.id);
+      list.appendChild(r);
+    });
+    paintIcons(list);
+    if (open || d.tasks.length) show(open || d.tasks[0].id);
   }
 
   async function interrupt() {
@@ -858,10 +923,11 @@
     document.querySelector("#model-picker .label").textContent = modelName(model);
     pickerMenu("mode-picker", MODES.map(([v, t, s]) => ({ value: v, title: t, sub: s, checked: v === mode })), v => setOpt("mode", v));
     const env = S.meta ? (S.meta.worktree ? "worktree" : "local") : (localStorage.getItem("nc.pref.env") || "local");
-    document.querySelector("#env-picker .label").textContent = env === "worktree" ? "Worktree" : "Local";
+    document.querySelector("#env-picker .label").textContent = { worktree: "Worktree", cloud: "Cloud" }[env] || "Local";
     pickerMenu("env-picker", [{ label: "New threads work" },
       { value: "local", title: "Local", sub: "In the project folder itself", checked: env === "local" },
-      { value: "worktree", title: "Worktree", sub: "In a git worktree of the project; apply the changes when they are good", checked: env === "worktree" }],
+      { value: "worktree", title: "Worktree", sub: "In a git worktree of the project; apply the changes when they are good", checked: env === "worktree" },
+      { value: "cloud", title: "Cloud", sub: "On GitHub Actions, with the repository: review the diff here, apply it or open a pull request", checked: env === "cloud" }],
       v => { localStorage.setItem("nc.pref.env", v); if (S.meta) toast("Applies to the next new thread"); updatePickers(); });
     pickerMenu("reasoning-picker", [{ label: "Reasoning" }].concat(REASONING.map(([v, t, s]) => ({ value: v, title: t, sub: s, checked: v === reasoning }))),
       v => setOpt("reasoning", v));
@@ -1140,6 +1206,7 @@
     $("#new-thread").onclick = () => newThread();
     $("#open-folder").onclick = () => pickFolder(r => { setRoot(r); newThread(r); });
     $("#open-models").onclick = openModels;
+    $("#open-cloud").onclick = () => openCloud();
     $("#open-extensions").onclick = openExtensions;
     $("#open-settings").onclick = openSettings;
     $("#modal-close").onclick = closeModal;

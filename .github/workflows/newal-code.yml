@@ -56,10 +56,14 @@ jobs:
 
       - name: Tests, with this system's command sandbox
         shell: pwsh
+        timeout-minutes: 15
+        env:
+          NEWAL_TEST_WATCHDOG: "720"
         run: python -m unittest discover -s tests -p "test_newal_code.py" -v
 
       - name: The sandbox under Git Bash too (Windows)
         if: runner.os == 'Windows'
+        timeout-minutes: 10
         run: python -m unittest discover -s tests -p "test_newal_code.py" -k SandboxTest -v
 
       - name: llama.cpp for this system

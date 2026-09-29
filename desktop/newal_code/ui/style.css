@@ -353,3 +353,15 @@ pre.out { margin: 0; background: var(--bg-code); border: 1px solid var(--border)
   #review { position: fixed; right: 0; top: 0; bottom: 0; z-index: 60; width: 100%; }
   .suggestions { grid-template-columns: 1fr; }
 }
+
+/* cloud tasks */
+.cloud-list { display: flex; flex-direction: column; gap: 2px; margin: 10px 0; max-height: 30vh; overflow: auto; }
+.cloud-row { display: flex; align-items: center; gap: 8px; padding: 6px 8px; border-radius: 6px; cursor: pointer; }
+.cloud-row:hover, .cloud-row.sel { background: var(--hover, rgba(127,127,127,.12)); }
+.cloud-row .p { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.cloud-row .st { font-size: 12px; opacity: .7; }
+.cloud-head { margin: 8px 0; }
+.cloud-answer { white-space: pre-wrap; margin: 8px 0; padding: 8px 10px; border-radius: 6px; background: var(--hover, rgba(127,127,127,.08)); }
+.cloud-file { margin: 6px 0; }
+.cloud-file summary { cursor: pointer; font-family: var(--mono, monospace); font-size: 13px; }
+.cloud-actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 10px; }
