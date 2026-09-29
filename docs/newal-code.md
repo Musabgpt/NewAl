@@ -107,7 +107,8 @@ It uses NewAl desktop's `llama-server` and the models NewAl already downloaded (
 | Compaction | ✓ auto + `/compact` | ✓ | ✓ auto at 85% of the context + `/compact [focus]` |
 | Checkpoints / undo | ✓ /rewind | ✓ /undo | ✓ every changed file saved first; `/undo`, "Undo last turn", revert one file |
 | Diff / review | /review | ✓ /diff, /review, review pane | ✓ `/diff`, `/review` (reviewer sub-agent), review pane with per-file diffs |
-| Git commit, push, pull request from the app | – | ✓ | ✓ Commit / Commit and push / Commit and create PR (a branch of its own when on main; `gh` when installed, else GitHub's PR page) |
+| Git commit, push, pull request from the app | – | ✓ | ✓ Commit / Commit and push / Commit and create PR (a branch of its own when on main; `gh` when installed, else GitHub's API with the connected token, else GitHub's PR page) |
+| GitHub account in the app | – | ✓ (cloud) | ✓ Settings > GitHub: connect with a token, then clone any of your repositories (the ⬇ button beside Threads); cloud tasks and pull requests use it |
 | `/init` AGENTS.md | ✓ | ✓ | ✓ |
 | `/goal` (keep working until a condition holds) | ✓ | – | ✓ checked after every answer |
 | Plan first | plan mode | – | ✓ `/plan <task>` (read-only turn) → "Implement this plan" |
@@ -120,7 +121,8 @@ It uses NewAl desktop's `llama-server` and the models NewAl already downloaded (
 | Cloud tasks | ✓ Claude Code on the web | ✓ Codex cloud | ✓ on GitHub Actions: `newal-code cloud "task"` or Cloud under the composer; the diff comes back to review, apply here or open as a pull request (see "Cloud tasks") |
 | GitHub app | ✓ `@claude` | ✓ `@codex` | ✓ `@newal` in issues, pull requests and review comments: answers, reviews with inline comments, or makes the change (see "GitHub app") |
 | Windows, Linux, macOS; phones | macOS, Linux, Windows | macOS, Linux, Windows | ✓ all three (built and checked by CI) and NewAl Code Lite for Android phones with 2-4 GB |
-| Any model | Anthropic | OpenAI + providers | local GGUF (llama.cpp), any OpenAI-compatible API, Anthropic, Ollama/LM Studio found by themselves |
+| Any model | Anthropic | OpenAI + providers | local GGUF (llama.cpp), any OpenAI-compatible API, Anthropic, Ollama/LM Studio found by themselves; Gemini, DeepSeek, OpenAI, OpenRouter, Anthropic and Groq in one tap (see "An API in one tap") |
+| The phone itself | – | – | ✓ NewAl Code Lite: the agent opens apps and settings, sets alarms, reads the screen and taps, types and swipes (see "Phone features") |
 | Several models on one task | sub-agent `model:` | profiles | roles (main, fast, review, plan), sub-agents with their own model, local models kept within the RAM budget |
 | Runs offline on 8–16 GB RAM | – | – | ✓ (below) |
 
@@ -224,6 +226,52 @@ and `python3`; there is no git on the phone, and Android's app sandbox confines 
 (NewAl Code Lite build 2; the first build ran the 3 GB phone the same way, 20 s. On the 2 GB phone it first got the
 3-bit 0.8B, which fit with 703 MB to spare but printed "Hello, World!" instead of the text asked for, hence the 4-bit
 one; the 3-bit file stays for phones where even that does not fit.)
+
+### Phone features
+
+**An API in one tap.** Models → "An API in one tap" (also at the bottom of the model menu): Gemini, DeepSeek, OpenAI,
+OpenRouter, Anthropic, Groq. With the provider's key copied, a tap connects; without one, the provider's key page
+opens (Google AI Studio for Gemini, DeepSeek's platform...), and NewAl Code takes the key from the clipboard when
+the user comes back with it copied. The key is checked by listing the models it may use, and the provider's newest
+fast model becomes the thread's model (for Gemini, the newest Flash; for DeepSeek, deepseek-chat), with the next
+best beside it in the menu. Keys stay in NewAl Code's settings file, readable by this user only. On a phone an API
+model is the way to a large model: the phone's own model is a 0.8B-2B one.
+
+**Controlling the phone.** In the app the agent has a `phone` tool: open an app, a link or a settings page (Wi-Fi,
+Bluetooth, display, battery...), set an alarm or a timer, the torch, the media volume, post a notification, read or
+set the clipboard, share text, prepare a message or a call (the messages app or the dialer opens with it; the user
+sends it), and any Android intent. With NewAl Code's accessibility service on (Settings > This phone > Screen
+control opens Android's page for it), it also sees the screen, as numbered items with what they are ("[3] Network &
+internet · tap"), and taps, types, swipes, scrolls and presses back, home or the notifications. It reads the screen
+only when the agent asks, and acts only in a thread: looking (the screen, the apps, the battery) never asks; every
+action asks first unless the thread runs in full-auto; a read-only thread only looks. What it reads goes to the
+thread's model: the phone's own, or the API the user connected. The app does all this in a small server on
+127.0.0.1:8793 that answers only requests with the app's key.
+
+**GitHub and git on the phone.** Settings > GitHub connects an account with a token (GitHub's page for one opens
+with the scopes NewAl Code needs; copied, it connects like an API key), and the ⬇ button beside Threads lists your
+repositories to clone one as a project. The phone has no git, so NewAl Code Lite brings its own: `git` in the
+agent's commands and in the review panel's Commit, Push and Create PR is NewAl Code's `minigit`, git's commands and
+output over dulwich (git written in Python; the app's launcher answers to the name `git`). On the steps it is tested
+with (init, status, add, commit, log, diff, branch, checkout, remote, push, show, rev-parse...) it prints what git
+prints and makes the same commits, hash for hash; pushes to and clones from github.com use the connected token.
+Pull requests go through GitHub's API.
+
+**Termux.** Termux has a whole Linux: git, compilers, Node, any package, and your projects in its home. Settings > This
+phone > Connect Termux copies one command and opens Termux: pasted there, it installs Python and git from Termux's
+packages when they are missing, puts NewAl Code in Termux, keeps the app's key in Termux's own files, adds "The
+phone's model" (the GGUF the app runs, through the app's OpenAI-compatible `/v1`), allows the app to start it later
+(Termux's `allow-external-apps`), and starts NewAl Code in Termux on 127.0.0.1:8791. The app then shows it ("Open the
+Termux workspace"): the same interface, working in Termux's home with Termux's commands, with the phone's model or
+an API, and the phone tool. The command's token works once, for 15 minutes; `newal-termux start | stop | update`
+and `newal` work in Termux afterwards. With Termux's RUN_COMMAND permission allowed to the app ("Let this app start
+it"), the app starts NewAl Code in Termux without opening Termux.
+
+**The key.** NewAl Code's server answers only requests that carry its key, on a computer as on a phone: other programs
+and web pages can reach 127.0.0.1 too (on a phone, any other app). The address the app opens carries the key (kept as
+a cookie); scripts send it as a header (`Authorization: Bearer`, or `X-NewAl-Key`); requests that name another host
+(a web page that rebinds its name to 127.0.0.1) are refused. The key is `~/.newal-code/server-key` (the app keeps
+its own), and `newal-code app` prints the address with it.
 
 ## Speed
 
@@ -413,5 +461,7 @@ people who may not start it or comments that do not mention it.
 | `newal_code/benchmark.py`, `desktop/bench/` | the speed test; drivers for the current NewAl and NewAl Code |
 | `newal_code/sandbox.py` | the command sandbox: Landlock, Seatbelt, low integrity |
 | `newal_code/cloud.py`, `github_app.py` | cloud tasks; the GitHub app |
+| `newal_code/connect.py`, `github.py` | an API in one tap; the GitHub account (token, repositories, clone, pull requests) |
+| `newal_code/phone.py`, `minigit.py`, `termux.py` | the phone tool; git on the phone (dulwich); NewAl Code in Termux |
 | `newal_code.spec`, `tools/fetch_llama.py`, `tools/smoke_newal_code.py` | the builds for Windows, Linux and macOS, and their check |
-| `android-lite/` | NewAl Code Lite for Android: the app, `native/prepare.sh` (Python, llama-server), `tests/phone_test.py` |
+| `android-lite/` | NewAl Code Lite for Android: the app (`Setup` unpacks and starts NewAl Code; `PhoneServer`, `Phone`, `PhoneControlService`: the phone tool; `Termux`; `WebBridge`: what the interface may ask of the phone), `native/prepare.sh` (Python, llama-server, dulwich), `tests/phone_test.py` |

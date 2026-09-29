@@ -1318,7 +1318,9 @@
     const st = phoneStatus();
     if (!st) { box.parentNode.hidden = true; return; }
     const t = st.termux || {};
-    box.innerHTML =
+    const inTermux = location.port === "8791";
+    box.innerHTML = (inTermux ? '<div class="form-row"><label>Workspace</label><span>Termux (this NewAl Code runs inside Termux)</span>' +
+      '<button class="btn" id="ph-back">Back to the app\'s workspace</button></div>' : "") +
       '<div class="form-row"><label>Screen control</label><span class="' + (st.accessibility ? "good" : "muted") + '">' +
       (st.accessibility ? "on: the agent can see the screen, tap and type (it asks first unless full-auto)" : "off") + "</span>" +
       (st.accessibility ? "" : '<button class="btn" id="ph-a11y">Turn on</button>') + "</div>" +
@@ -1331,6 +1333,7 @@
       '<div class="muted small-note">Connected, NewAl Code also runs inside Termux: its whole Linux (git, compilers, packages), your projects there, this phone\'s model and screen control. The first time, paste one command in Termux.</div>';
     const on = (id, f) => { const b = box.querySelector(id); if (b) b.onclick = f; };
     on("#ph-a11y", () => NewAlPhone.openAccessibilitySettings());
+    on("#ph-back", () => NewAlPhone.go("app"));
     on("#ph-tx-get", () => NewAlPhone.termuxSetup(""));
     on("#ph-tx-open", () => NewAlPhone.go("termux"));
     on("#ph-tx-allow", () => { NewAlPhone.termuxAllow(); setTimeout(() => phoneSection(box), 4000); });
