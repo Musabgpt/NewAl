@@ -336,6 +336,31 @@ class PluginsTest(unittest.TestCase):
         self.assertNotIn("lint", extensions.custom_commands(root))
 
 
+    def test_marketplace_add_and_install(self):
+        from newal_code import plugins
+        market = make_project({
+            ".claude-plugin/marketplace.json": json.dumps({
+                "name": "team-tools", "owner": {"name": "Team"}, "metadata": {"pluginRoot": "./plugins"},
+                "plugins": [{"name": "fmt", "source": "fmt", "description": "Formatting"},
+                            {"name": "docs", "source": "./extra/docs"}]}),
+            "plugins/fmt/.claude-plugin/plugin.json": json.dumps({"name": "fmt"}),
+            "plugins/fmt/commands/fmt.md": "Format $ARGUMENTS\n",
+            "extra/docs/skills/write/SKILL.md": "---\nname: doc-writing\ndescription: Docs style\n---\nShort.\n",
+        })
+        m = plugins.marketplace_add(market)
+        self.assertEqual((m["name"], m["plugins"]), ("team-tools", ["fmt", "docs"]))
+        self.assertIn("team-tools", [x["name"] for x in plugins.marketplaces()])
+        root = make_project(CALC)
+        self.assertEqual(plugins.install("fmt@team-tools", root=root)["name"], "fmt")
+        plugins.install("docs@team-tools", root=root)
+        self.assertIn("fmt", extensions.custom_commands(root))
+        self.assertIn("doc-writing", extensions.skills(root))
+        with self.assertRaises(ValueError):
+            plugins.install("nope@team-tools", root=root)
+        plugins.marketplace_remove("team-tools")
+        self.assertEqual(plugins.marketplaces(), [])
+
+
 class HooksTest(unittest.TestCase):
     def test_pre_tool_use_blocks_and_prompt_context(self):
         py = sys.executable
@@ -510,10 +535,31 @@ class AgentLoopTest(unittest.TestCase):
                   "Done.",
                   {"tools": [("edit", {"path": "calc.py", "old": "return a * b", "new": "return a + b"})]},
                   "Fixed for real."]
-        answer, events, s, llm, root = run_agent(script)
+        root = make_project(dict(CALC, **{".newal/settings.json": '{"test_after_edit": false}'}))
+        answer, events, s, llm, root = run_agent(script, root=root)
         self.assertEqual(answer, "Fixed for real.")
         self.assertEqual([e["ok"] for e in events if e["type"] == "verify"], [False, True])
         self.assertIn("tests fail", llm.requests[2]["messages"][-1]["content"])
+
+    def test_tests_run_with_the_step_that_changed_files(self):
+        # The result of the tests comes with the edit: the model fixes it in its next step, and answers right after
+        # the passing run (no test call of its own, no second run at the end).
+        script = [{"tools": [("edit", {"path": "calc.py", "old": "return a - b", "new": "return a * b"})]},
+                  {"tools": [("edit", {"path": "calc.py", "old": "return a * b", "new": "return a + b"})]},
+                  "Fixed add(); the tests pass."]
+        answer, events, s, llm, root = run_agent(script)
+        self.assertEqual(answer, "Fixed add(); the tests pass.")
+        self.assertEqual([e["ok"] for e in events if e["type"] == "verify"], [False, True])
+        self.assertTrue(all(e.get("auto") for e in events if e["type"] == "verify"))
+        tool_results = [m["content"] for m in s.messages if m["role"] == "tool"]
+        self.assertIn("The tests ran after this change", tool_results[0])
+        self.assertIn("FAILED", tool_results[0])
+        self.assertIn("passed", tool_results[1])
+        self.assertEqual(len(llm.requests), 3)
+        # read-only work runs nothing; neither does a project without tests
+        answer, events, *_ = run_agent([{"tools": [("edit", {"path": "notes.txt", "old": "a", "new": "b"})]}, "ok"],
+                                       files={"notes.txt": "a\n"})
+        self.assertEqual([e for e in events if e["type"] == "verify"], [])
 
     def test_ask_mode_denied_edit_is_not_applied(self):
         script = [{"tools": [("edit", {"path": "calc.py", "old": "return a - b", "new": "return a + b"})]}, "ok"]
@@ -623,7 +669,7 @@ class AgentLoopTest(unittest.TestCase):
                        {"tools": [("edit", {"path": "calc.py", "old": "return a * b", "new": "return a + b"})]},
                        {"tools": [("bash", {"command": "echo ok"})]},
                        "fixed"])
-        root = make_project(CALC)
+        root = make_project(dict(CALC, **{".newal/settings.json": '{"test_after_edit": false}'}))
         spec = {"id": "fake-local", "name": "fake", "provider": "local"}
         client = models.Client(spec, providers.LlamaCpp(llm.url), "fake")
         ag = agentmod.Agent(session.Session(root), client=client)

@@ -573,10 +573,12 @@
         break;
       case "verify": {
         const X = turnBox();
-        const it = item(X, "verify", ev.ok ? "Tests passed" : "Tests failed", "<code>" + esc(ev.command) + "</code>",
-          ev.ok ? '<span class="ok">✓</span>' : '<span class="bad">✗ exit ' + esc(ev.exit) + "</span>");
+        const skipped = ev.ok === null || ev.ok === undefined;
+        const it = item(X, "verify", skipped ? "Tests not run" : ev.ok ? "Tests passed" : "Tests failed",
+          "<code>" + esc(ev.command) + "</code>",
+          skipped ? '<span class="muted">–</span>' : ev.ok ? '<span class="ok">✓</span>' : '<span class="bad">✗ exit ' + esc(ev.exit) + "</span>");
         it.querySelector(".item-body").appendChild(h("pre", "out", esc(ev.output || "")));
-        if (!ev.ok) it.classList.add("open");
+        if (ev.ok === false) it.classList.add("open");
         break;
       }
       case "goal_check": {
@@ -1091,6 +1093,7 @@
     try { d = await api("/api/extensions?root=" + encodeURIComponent(root)); } catch (e) { toast(e.message); return; }
     const list = (items, f) => items.length ? items.map(f).join("") : '<div class="muted">None.</div>';
     const body = h("div", "", '<div class="section-title">Plugins</div><div class="card-list">' + list(d.plugins || [], p => '<div class="card"><div class="grow"><div class="name">' + esc(p.name) + (p.version ? ' <span class="badge">' + esc(p.version) + "</span>" : "") + '</div><div class="desc">' + esc(p.description) + (p.has.length ? " · " + esc(p.has.join(", ")) : "") + "</div></div></div>") + "</div>" +
+      ((d.marketplaces || []).length ? '<div class="muted">Marketplaces: ' + d.marketplaces.map(m => esc(m.name) + " (" + m.plugins.map(p => esc(p.name)).join(", ") + ")").join(" · ") + " — /plugin install name@marketplace</div>" : "") +
       '<div class="section-title">Instructions (AGENTS.md / CLAUDE.md)</div>' +
       list(d.instructions, p => '<div class="card"><div class="grow"><div class="name">' + esc(p) + "</div></div></div>") +
       '<div class="section-title">Skills</div><div class="card-list">' + list(d.skills, s => '<div class="card"><div class="grow"><div class="name">' + esc(s.name) + '</div><div class="desc">' + esc(s.description) + " · " + esc(s.dir) + "</div></div></div>") + "</div>" +

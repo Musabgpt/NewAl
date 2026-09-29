@@ -27,7 +27,18 @@ GB = 1024 * MB
 # ~2k tokens, the first request with its files ~1-3k, and every step adds its tool results.
 CONTEXTS = (65536, 49152, 32768, 24576, 16384)
 MTP_DRAFT = 3              # tokens drafted ahead; on a hybrid model each slot keeps that many more copies of its state
-MTP_ARGS = ["--spec-draft-n-max", str(MTP_DRAFT), "--spec-draft-p-min", "0.6"]
+
+
+def mtp_draft():
+    """Tokens MTP drafts ahead: the "mtp_draft" setting, 3 by default."""
+    try:
+        return max(1, min(8, int(settings.user().get("mtp_draft") or MTP_DRAFT)))
+    except (TypeError, ValueError):
+        return MTP_DRAFT
+
+
+def mtp_args():
+    return ["--spec-draft-n-max", str(mtp_draft()), "--spec-draft-p-min", "0.6"]
 # Drafts from text already in the context (opt-in, speculative = "ngram"): an edit's old text is a copy of the file.
 # Measured on Qwen3.5-4B (4 cores): rewriting a whole file 6.3 -> 9.1 tokens/s; but in agent steps (short tool calls)
 # only 10-50% of the drafts were accepted and a two-task run was slower, so it is off unless chosen. MTP (the model's
@@ -107,7 +118,7 @@ def need_bytes(weights, kv_per_token, ctx, state=0, slots=2, factor=1.0, mtp=Fal
     - per slot, the recurrent layers' state, one more copy of it per drafted token (MTP rolls back rejected drafts)
       and CHECKPOINTS more (50 MB each on Qwen3.5 4B/9B, 63 MB on 35B-A3B);
     - compute buffers and the server itself: ~330 MB, and ~180 MB more for the MTP head."""
-    copies = 1 + (MTP_DRAFT if mtp else 0) + CHECKPOINTS
+    copies = 1 + (mtp_draft() if mtp else 0) + CHECKPOINTS
     return (weights + int(ctx * kv_per_token * factor) + slots * state * copies
             + 330 * MB + (180 * MB if mtp else 0))
 
@@ -156,7 +167,7 @@ class Server:
         if self.speculative == "ngram":
             kinds.append("ngram-mod")
         if kinds:
-            a += ["--spec-type", ",".join(kinds)] + (MTP_ARGS if self.mtp else []) + (
+            a += ["--spec-type", ",".join(kinds)] + (mtp_args() if self.mtp else []) + (
                 NGRAM_ARGS if "ngram-mod" in kinds else [])
         return a + self.extra_args
 

@@ -231,9 +231,9 @@ def connect(spec, ctx=0):
             raise ValueError("%s is not downloaded yet (newal-code models --download %s)" % (spec.get("name"), spec["id"]))
         cfg = settings.user()
         spec_mode = cfg.get("speculative", "auto")
-        mtp = bool(spec.get("mtp")) and spec_mode in ("auto", "mtp", "draft")
+        mtp = bool(spec.get("mtp")) and spec_mode in ("auto", "mtp", "draft", "both")
         server = runtime.pool.get(path, ctx=ctx or int(cfg.get("context") or 0) or int(spec.get("context") or 0),
-                                  mtp=mtp, speculative="ngram" if spec_mode == "ngram" else "",
+                                  mtp=mtp, speculative="ngram" if spec_mode in ("ngram", "both") else "",
                                   threads=int(cfg.get("threads") or 0))
         return Client(spec, providers.LlamaCpp(server.url + "/v1"), os.path.basename(path), server)
     if prov == "anthropic":

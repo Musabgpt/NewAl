@@ -78,6 +78,8 @@ class Agent:
         self.last_change_step = -1
         self.last_test_ok_step = -1
         self.fail_streak = 0           # failed checks since the last success (a local model thinks when stuck)
+        self.tested_change = -1        # the step whose changes the automatic test run found passing
+        self.auto_tests = None         # None: not tried yet; False: off for this session (none, too slow, missing)
         self.think_next = False
         self.last_error = ""
         self.lock = threading.Lock()
@@ -242,6 +244,7 @@ class Agent:
         self.step = 0
         self.last_change_step = -1
         self.last_test_ok_step = -1
+        self.tested_change = -1
         self.fail_streak = 0
         # A question gets a short think before its answer: nothing will run to check it (a task is checked by running
         # it instead, so it starts straight away).
@@ -365,7 +368,7 @@ class Agent:
         parts.append(text)
         if self.depth == 0 and self.client is not None and self.client.local:
             # Small models follow the last thing they read best: the reply rule again, where it is read last.
-            parts.append("(When done, reply in one or two sentences.)")
+            parts.append("(When done, reply in one sentence.)")
         return "\n\n".join(p for p in parts if p), prefetch
 
     def _context_block(self):
@@ -497,8 +500,60 @@ class Agent:
                     results[i] = "interrupted by the user"
                     continue
                 results[i] = self._one_tool(ctx, c, a, repeats)
+        results = self._tests_after_step(ctx, parsed, results)
         for (c, _), text in zip(parsed, results):
             s.add({"role": "tool", "tool_call_id": c["id"], "content": text})
+
+    def _tests_after_step(self, ctx, parsed, results):
+        """After a step that changed files, the project's tests run once and their result comes with the step's
+        last change, the way an edit reports the problems it left: the model sees at once whether the change works,
+        instead of spending a step (a model call on a CPU) on running them."""
+        s = self.session
+        if self.depth or self.last_change_step != self.step or self.auto_tests is False:
+            return results
+        if s.mode not in ("auto-edit", "full-auto") or not (self.cfg.get("verify", True)
+                                                             and self.cfg.get("test_after_edit", True)):
+            return results
+        test_rx = re.compile(r"\b(test|tests|pytest|jest|vitest|unittest|cargo test|go test)\b")
+        if any(c["name"] == "bash" and a and test_rx.search(str(a.get("command", ""))) for c, a in parsed):
+            return results                     # it ran them itself in this step
+        cmd = ctxmod.test_command(s.root)
+        changes = [i for i, (c, a) in enumerate(parsed) if tools.REGISTRY.get(c["name"]) is not None
+                   and tools.REGISTRY[c["name"]].kind == "edit" and not str(results[i]).startswith(("error", "not "))]
+        if not cmd or not changes:
+            self.auto_tests = False if not cmd else self.auto_tests
+            return results
+        self.emit({"type": "verify_start", "command": cmd, "auto": True})
+        code, out = tools.run_command(ctx, cmd, timeout=60)
+        if code == 124 or (code != 0 and re.search(r"No module named (pytest|'pytest')|command not found|is not "
+                                                   r"recognized", out)):
+            self.auto_tests = False            # too slow or not runnable here: the model runs what it needs
+            self.emit({"type": "verify", "command": cmd, "ok": None, "exit": code, "output": tools.clip(out, 400),
+                       "auto": True})
+            return results
+        self.auto_tests = True
+        ok = code == 0 or (code == 5 and "no tests ran" in out)
+        self.emit({"type": "verify", "command": cmd, "ok": ok, "exit": code, "output": tools.clip(out, 3000),
+                   "auto": True})
+        i = changes[-1]
+        if ok:
+            last = [l for l in out.strip().splitlines() if l.strip()]
+            results[i] += "\n\nThe tests ran after this change (%s): passed%s" % (cmd, (" - " + last[-1][:200]) if last
+                                                                               else "")
+            self.tested_change = self.last_change_step
+            self.fail_streak = 0
+            self.last_error = ""
+            return results
+        results[i] += ("\n\nThe tests ran after this change (%s) and FAILED:\n%s\nFix the cause in the code; change a "
+                       "test only if the test itself is wrong." % (cmd, tools.clip(out, 1500)))
+        self.fail_streak += 1
+        self.think_next = True
+        sig = error_signature(out)
+        if sig and sig == self.last_error:
+            results[i] += ("\n\nThis is the same error as before: your last change did not fix its cause. Read the "
+                           "error and the code again, name the cause in one sentence, then fix that.")
+        self.last_error = sig
+        return results
 
     def _one_tool(self, ctx, call, args, repeats):
         s = self.session
@@ -649,8 +704,8 @@ class Agent:
 
     def _verify(self, ctx):
         """(ok | None when there is nothing to run, output, command)."""
-        if self.last_test_ok_step > self.last_change_step:
-            return True, "", ""          # the agent already ran the tests after its last change
+        if self.last_test_ok_step > self.last_change_step or self.tested_change == self.last_change_step >= 0:
+            return True, "", ""          # the tests already ran (and passed) after the last change
         cmd = ctxmod.test_command(self.session.root)
         if not cmd:
             return None, "", ""

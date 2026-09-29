@@ -36,7 +36,8 @@ BUILTIN_COMMANDS = [
     ("export", "", "Save this thread as Markdown in the project"),
     ("memory", "", "Show the instruction files (# <note> adds a note to AGENTS.md)"),
     ("add-dir", "<folder>", "Let this thread read and edit another folder too"),
-    ("plugin", "[install <git URL|folder> | remove <name>]", "List, install or remove plugins (Claude Code's layout)"),
+    ("plugin", "[install <name@marketplace|git URL|folder> | remove <name> | marketplace add|remove <repo>]",
+     "Plugins and plugin marketplaces (Claude Code's formats)"),
 ]
 ALIASES = {"approvals": "mode", "models": "model", "context": "status", "sessions": "resume",
            "exit": "exit", "quit": "exit", "new-thread": "new"}
@@ -435,6 +436,18 @@ class Service:
             from . import plugins
             verb, _, arg = args.partition(" ")
             try:
+                if verb == "marketplace":
+                    sub, _, src = arg.strip().partition(" ")
+                    if sub == "add" and src.strip():
+                        m = plugins.marketplace_add(src.strip())
+                        return {"reply": "Added the marketplace %s: %s. Install one with /plugin install <name>@%s." % (
+                            m["name"], ", ".join(m["plugins"]) or "no plugins", m["name"])}
+                    if sub in ("remove", "rm") and src.strip():
+                        return {"reply": "Removed %s." % plugins.marketplace_remove(src.strip())}
+                    ms = plugins.marketplaces()
+                    return {"reply": "\n".join("%s: %s" % (m["name"], ", ".join(p["name"] for p in m["plugins"]))
+                                               for m in ms) or "No marketplaces. /plugin marketplace add <owner/repo, "
+                                                               "git URL or folder> adds one."}
                 if verb == "install" and arg.strip():
                     p = plugins.install(arg.strip())
                     return {"reply": "Installed %s (%s) in %s. New threads use it." % (

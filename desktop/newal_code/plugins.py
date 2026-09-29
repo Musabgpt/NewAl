@@ -1,6 +1,7 @@
 """Plugins, in Claude Code's layout: a folder that bundles commands/, agents/, skills/<name>/SKILL.md,
 hooks/hooks.json and .mcp.json, with its name and description in .claude-plugin/plugin.json. NewAl Code loads the
-plugins in <project>/.newal/plugins and ~/.newal-code/plugins; `/plugin install <git URL or folder>` puts one there.
+plugins in <project>/.newal/plugins and ~/.newal-code/plugins; `/plugin install <git URL or folder>` puts one there,
+and `/plugin marketplace add <repo>` then `/plugin install name@marketplace` works as in Claude Code.
 In hooks and MCP servers, ${CLAUDE_PLUGIN_ROOT} is the plugin's folder, as in Claude Code."""
 
 import json
@@ -81,21 +82,118 @@ def mcp_servers(root):
     return out
 
 
+def _fetch(source, dest):
+    """A folder copied, or a git repository cloned ("owner/repo" is GitHub's), to dest."""
+    src = os.path.expanduser(source)
+    if os.path.isdir(src):
+        shutil.copytree(src, dest, ignore=shutil.ignore_patterns(".git"))
+        return
+    url = source
+    if re.fullmatch(r"[\w.-]+/[\w.-]+", source):
+        url = "https://github.com/%s.git" % source
+    os.makedirs(os.path.dirname(dest), exist_ok=True)
+    code, out = util.git(os.path.dirname(dest), "clone", "--depth", "1", url, dest, timeout=300)
+    if code:
+        raise ValueError(out.strip()[-500:] or "git clone failed")
+
+
 def install(source, root=None):
-    """Copies a plugin folder, or clones a git repository, into the user's plugins (the project's with root)."""
+    """A plugin into the user's plugins (the project's with root): name@marketplace (see marketplace_add), a
+    folder, a git URL or GitHub's owner/repo."""
     base = bases(root)[0]
     os.makedirs(base, exist_ok=True)
+    m = re.fullmatch(r"([\w.-]+)@([\w.-]+)", source.strip())
+    if m and os.path.isdir(os.path.join(markets_dir(), m.group(2))):
+        return _install_from_market(m.group(1), m.group(2), base)
     name = re.sub(r"\.git$", "", os.path.basename(source.rstrip("/\\"))) or "plugin"
     dest = os.path.join(base, name)
     if os.path.exists(dest):
         raise ValueError("already installed: %s" % dest)
-    src = os.path.expanduser(source)
-    if os.path.isdir(src):
-        shutil.copytree(src, dest, ignore=shutil.ignore_patterns(".git"))
+    _fetch(source, dest)
+    return info(dest)
+
+
+# ------------------------------------------------------------------ marketplaces (Claude Code's format)
+
+def markets_dir():
+    return os.path.join(settings.HOME, "marketplaces")
+
+
+def _catalog(folder):
+    data = _json(os.path.join(folder, ".claude-plugin", "marketplace.json")) or _json(
+        os.path.join(folder, "marketplace.json"))
+    if not isinstance(data.get("plugins"), list):
+        raise ValueError("%s has no .claude-plugin/marketplace.json with a plugin list" % folder)
+    return data
+
+
+def marketplace_add(source):
+    """A marketplace (a repository with .claude-plugin/marketplace.json): a folder, a git URL or owner/repo."""
+    os.makedirs(markets_dir(), exist_ok=True)
+    tmp = os.path.join(markets_dir(), ".adding-%s" % os.getpid())
+    shutil.rmtree(tmp, ignore_errors=True)
+    _fetch(source, tmp)
+    try:
+        data = _catalog(tmp)
+    except ValueError:
+        shutil.rmtree(tmp, ignore_errors=True)
+        raise
+    name = re.sub(r"[^\w.-]", "-", str(data.get("name") or os.path.basename(source.rstrip("/\\"))))
+    dest = os.path.join(markets_dir(), name)
+    if os.path.exists(dest):
+        shutil.rmtree(dest)                    # adding it again updates it
+    os.replace(tmp, dest)
+    return {"name": name, "dir": dest, "plugins": [str(p.get("name")) for p in data["plugins"] if p.get("name")]}
+
+
+def marketplaces():
+    out = []
+    if os.path.isdir(markets_dir()):
+        for n in sorted(os.listdir(markets_dir())):
+            d = os.path.join(markets_dir(), n)
+            if n.startswith(".") or not os.path.isdir(d):
+                continue
+            try:
+                plugs = _catalog(d)["plugins"]
+            except ValueError:
+                continue
+            out.append({"name": n, "dir": d, "plugins": [{"name": str(p.get("name")),
+                                                          "description": str(p.get("description") or "")}
+                                                         for p in plugs if p.get("name")]})
+    return out
+
+
+def marketplace_remove(name):
+    d = os.path.join(markets_dir(), name)
+    if not os.path.isdir(d):
+        raise ValueError("no marketplace %s" % name)
+    shutil.rmtree(d)
+    return d
+
+
+def _install_from_market(plugin, market, base):
+    folder = os.path.join(markets_dir(), market)
+    entry = next((p for p in _catalog(folder)["plugins"] if str(p.get("name")) == plugin), None)
+    if entry is None:
+        raise ValueError("%s has no plugin %s" % (market, plugin))
+    dest = os.path.join(base, plugin)
+    if os.path.exists(dest):
+        raise ValueError("already installed: %s" % dest)
+    src = entry.get("source") or "./" + plugin
+    if isinstance(src, dict):          # {"source": "github", "repo": ...} or {"source": "url"/"git", "url": ...}
+        src = src.get("repo") or src.get("url") or ""
+        if not src:
+            raise ValueError("plugin %s has a source this version cannot fetch" % plugin)
+        _fetch(src, dest)
     else:
-        code, out = util.git(base, "clone", "--depth", "1", source, dest, timeout=300)
-        if code:
-            raise ValueError(out.strip()[-500:] or "git clone failed")
+        # A bare name is under metadata.pluginRoot ("./plugins" lets "formatter" mean "./plugins/formatter").
+        root = (_catalog(folder).get("metadata") or {}).get("pluginRoot") or ""
+        rel_src = str(src) if str(src).startswith(("./", "../", "/")) or not root else os.path.join(root, str(src))
+        path = os.path.normpath(os.path.join(folder, rel_src))
+        top = os.path.normpath(folder)
+        if not (path == top or path.startswith(top + os.sep)) or not os.path.isdir(path):
+            raise ValueError("plugin %s: no folder %s in the marketplace" % (plugin, src))
+        shutil.copytree(path, dest, ignore=shutil.ignore_patterns(".git"))
     return info(dest)
 
 

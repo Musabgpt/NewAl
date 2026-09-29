@@ -107,6 +107,7 @@ class Handler(BaseHTTPRequestHandler):
                                    "commands": svc.commands(root),
                                    "instructions": extensions.instruction_files(root),
                                    "plugins": __import__("newal_code.plugins", fromlist=["x"]).listing(root),
+                                   "marketplaces": __import__("newal_code.plugins", fromlist=["x"]).marketplaces(),
                                    "hooks": settings.project(root).get("hooks") or {},
                                    "mcp": [dict(name=k, **{x: y for x, y in v.items() if x != "env"})
                                            for k, v in __import__("newal_code.mcp", fromlist=["x"]).configs(root).items()]})

@@ -58,15 +58,18 @@ It uses NewAl desktop's `llama-server` and the models NewAl already downloaded (
   its first step instead of spending rounds exploring, and does not read those files again.
 - **Few tokens written.** On a CPU, writing is the slowest part (~6 tokens/s for a 4B model). The model edits with
   short exact replacements (files are shown as they are, so what it copies matches), calls independent tools
-  together, and ends with one or two sentences. Files with multi-token-prediction heads draft several tokens per step
+  together, and ends with one sentence. Files with multi-token-prediction heads draft several tokens per step
   (measured: +50% when writing a whole file, +33% on agent steps).
 - **Thinking only where it pays.** A local model does not think before acting on a task: running the change checks it.
   It thinks briefly before answering a question (nothing will check the answer), and right after a change fails its
   check (longer the second time). When the same error comes back, the result says so.
 - **Problems come back with the edit.** A syntax error or a name that is never imported is reported in the edit's
   result, so it is fixed in the next step instead of being found by a failing run later.
-- **The computer checks the work.** After a turn changes files, the project's tests run; failures go back to the
-  model, up to 2 rounds. If the model already ran the tests after its last change, nothing runs again.
+- **The computer checks the work, with each change.** After every step that changes files, the project's tests
+  run by themselves (up to a minute; a slower suite is left to the model) and their result comes with that step,
+  like an edit's problems. The model sees at once whether its change works, without spending a step (on a CPU, a
+  model call) on running them. When the turn ends, the tests run once more unless they already passed after the
+  last change; failures go back to the model, up to 2 rounds.
 
 ## Features, next to Claude Code and Codex
 
@@ -90,7 +93,7 @@ It uses NewAl desktop's `llama-server` and the models NewAl already downloaded (
 | Skills (SKILL.md, loaded on demand) | ✓ | ✓ | ✓ `.newal/skills`, `.claude/skills`, `~/.codex/skills` |
 | Hooks | ✓ PreToolUse, PostToolUse, UserPromptSubmit, Stop, SubagentStop, SessionStart, SessionEnd, PreCompact, Notification | – | ✓ same events, JSON protocol and exit code 2 |
 | MCP servers | ✓ `.mcp.json` | ✓ config.toml | ✓ stdio and HTTP; `.mcp.json`, `~/.codex/config.toml`, NewAl desktop's add-ons |
-| Plugins | ✓ commands, agents, skills, hooks, MCP in one folder | – | ✓ Claude Code's plugin layout (`${CLAUDE_PLUGIN_ROOT}` included) in `.newal/plugins` or `~/.newal-code/plugins`; `/plugin install <git URL or folder>`, `/plugin remove` |
+| Plugins and marketplaces | ✓ commands, agents, skills, hooks, MCP in one folder; `/plugin marketplace add` | – | ✓ Claude Code's plugin layout (`${CLAUDE_PLUGIN_ROOT}` included) in `.newal/plugins` or `~/.newal-code/plugins`; its marketplaces too: `/plugin marketplace add <owner/repo, git URL or folder>`, `/plugin install name@marketplace` (or a git URL or folder), `/plugin remove` |
 | Sessions, resume | ✓ | ✓ | ✓ threads kept as JSONL; `/resume`; the web app lists them per project |
 | Compaction | ✓ auto + `/compact` | ✓ | ✓ auto at 85% of the context + `/compact [focus]` |
 | Checkpoints / undo | ✓ /rewind | ✓ /undo | ✓ every changed file saved first; `/undo`, "Undo last turn", revert one file |
@@ -109,8 +112,7 @@ It uses NewAl desktop's `llama-server` and the models NewAl already downloaded (
 | Several models on one task | sub-agent `model:` | profiles | roles (main, fast, review, plan), sub-agents with their own model, local models kept within the RAM budget |
 | Runs offline on 8–16 GB RAM | – | – | ✓ (below) |
 
-Not implemented: cloud tasks, a GitHub app, a sandbox on Windows and macOS, plugin marketplaces (a plugin installs
-from its git URL or folder).
+Not implemented: cloud tasks, a GitHub app, a sandbox on Windows and macOS.
 
 ## Any model, or a set of models
 

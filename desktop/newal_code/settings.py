@@ -38,11 +38,13 @@ DEFAULTS = {
     "mode": "auto-edit",          # read-only | ask | auto-edit | full-auto
     "reasoning": "auto",          # off | low | medium | high | auto (off for local models, medium for APIs)
     "verify": True,               # after a change, run the project's tests; failures go back to the agent
+    "test_after_edit": True,      # ...after each step that changes files, with that step's result (with verify)
     "max_steps": 60,              # tool rounds per request
     "ram_budget_gb": 0,           # 0: from the computer's RAM
     "threads": 0,                 # 0: physical cores
     "context": 0,                 # 0: from the model and the RAM budget
-    "speculative": "auto",        # auto | off | ngram | draft: faster writing on a CPU when it helps
+    "speculative": "auto",        # auto (MTP) | off | ngram | both (MTP + n-gram): faster writing on a CPU
+    "mtp_draft": 3,               # tokens the MTP heads draft ahead
     "llama_server": "",           # path to llama-server (else bundled, NEWAL_LLAMA_SERVER, or PATH)
     "permissions": {"allow": [], "deny": [], "ask": []},
     "hooks": {},

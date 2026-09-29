@@ -116,9 +116,10 @@ class Printer:
                 self.w(sub + c(RED, "  └ " + ev.get("text", "")[:300]))
         elif t == "verify":
             self.end_text()
-            mark = c(GREEN, "✓ Tests passed") if ev.get("ok") else c(RED, "✗ Tests failed")
+            mark = (c(DIM, "– Tests not run") if ev.get("ok") is None else c(GREEN, "✓ Tests passed") if ev.get("ok")
+                    else c(RED, "✗ Tests failed"))
             self.w("%s %s" % (mark, c(DIM, "(%s)" % ev.get("command"))))
-            if not ev.get("ok"):
+            if ev.get("ok") is False:
                 for l in (ev.get("output") or "").strip().splitlines()[-6:]:
                     self.w(c(DIM, "    " + l[:width() - 6]))
         elif t == "usage" and not ev.get("sub"):
