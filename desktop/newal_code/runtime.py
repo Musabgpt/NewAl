@@ -138,12 +138,13 @@ def need_bytes(weights, kv_per_token, ctx, state=0, slots=2, factor=1.0, mtp=Fal
     - per slot, the recurrent layers' state, one more copy of it per drafted token (MTP rolls back rejected drafts)
       and CHECKPOINTS more (50 MB each on Qwen3.5 4B/9B, 63 MB on 35B-A3B);
     - compute buffers and the server itself: ~330 MB, and ~180 MB more for the MTP head.
-    Lite (see LITE_BUDGET): 256-token batches need ~130 MB of buffers; the repacked copy is counted as well (0.36 of
-    the weights, measured on 0.8B), since a phone has no RAM for the OS to take those file pages back from, and
-    without repack there is none."""
+    Lite (see LITE_BUDGET): 256-token batches need ~130-160 MB of buffers (160 counted: an Android emulator's
+    llama-server held 733 MB where 130 predicted 657); the repacked copy is counted as well (0.36 of the weights,
+    measured on 0.8B), since a phone has no RAM for the OS to take those file pages back from, and without repack
+    there is none."""
     copies = 1 + (mtp_draft() if mtp else 0) + checkpoints
     if lite:
-        return (weights + int(ctx * kv_per_token * factor) + slots * state * copies + 130 * MB
+        return (weights + int(ctx * kv_per_token * factor) + slots * state * copies + 160 * MB
                 + (int(weights * 0.36) if repack else 0) + (180 * MB if mtp else 0))
     return (weights + int(ctx * kv_per_token * factor) + slots * state * copies
             + 330 * MB + (180 * MB if mtp else 0))

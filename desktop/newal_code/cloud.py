@@ -43,7 +43,7 @@ run-name: "NewAl Code cloud: ${{ github.ref_name }}"
 on:
   push:
     branches: [ "newal-cloud/**"__EXTRA_BRANCHES__ ]
-    paths: [ ".newal/cloud/task.json" ]
+    paths: [ ".newal/cloud/task.json" ]          # (a push that removes it runs nothing)
 
 permissions:
   contents: write
@@ -58,6 +58,7 @@ jobs:
           fetch-depth: 0
 
       - name: NewAl Code
+        if: hashFiles('.newal/cloud/task.json') != ''
         env:
           GH_TOKEN: ${{ github.token }}
           PIN: ${{ vars.NEWAL_CODE_RELEASE }}
@@ -74,14 +75,17 @@ jobs:
 
       - name: Model
         id: model
+        if: hashFiles('.newal/cloud/task.json') != ''
         run: echo "id=$(python3 -c "import json; print(json.load(open('.newal/cloud/task.json')).get('model') or 'auto')")" >> "$GITHUB_OUTPUT"
 
       - uses: actions/cache@v4
+        if: hashFiles('.newal/cloud/task.json') != ''
         with:
           path: ~/.newal-code/models
           key: newal-code-model-${{ steps.model.outputs.id }}
 
       - name: The task
+        if: hashFiles('.newal/cloud/task.json') != ''
         env:
           ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
@@ -94,7 +98,7 @@ jobs:
         run: newal-code cloud run --out "$RUNNER_TEMP/__ARTIFACT__"
 
       - uses: actions/upload-artifact@v4
-        if: always()
+        if: always() && steps.model.outcome == 'success'
         with:
           name: __ARTIFACT__
           path: ${{ runner.temp }}/__ARTIFACT__

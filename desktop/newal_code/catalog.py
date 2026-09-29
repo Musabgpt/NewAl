@@ -19,12 +19,13 @@ MODELS = [
     {"id": "qwen3.5-0.8b-iq3", "title": "Qwen3.5 0.8B (3-bit)", "repo": "unsloth/Qwen3.5-0.8B-GGUF",
      "file": "Qwen3.5-0.8B-UD-IQ3_XXS.gguf", "size": 398237952, "kv": 12288, "state": 20201472, "active_b": 0.8,
      "mtp": False, "min_ram_gb": 2, "context": 32768, "good_for": ["main", "fast"],
-     "about": "For 2 GB phones (NewAl Code Lite): short edits, explanations and small scripts in about 0.65 GB."},
+     "about": "For 2 GB phones that cannot fit the 4-bit 0.8B: short edits and small scripts in about 0.7 GB "
+              "(it follows instructions less closely)."},
     {"id": "qwen3.5-0.8b", "title": "Qwen3.5 0.8B", "repo": "unsloth/Qwen3.5-0.8B-GGUF",
      "file": "Qwen3.5-0.8B-Q4_K_M.gguf", "size": 532517120, "kv": 12288, "state": 20201472, "active_b": 0.8,
      "mtp": False, "min_ram_gb": 3, "context": 32768, "good_for": ["main", "fast"],
-     "about": "For 3 GB phones (NewAl Code Lite): simple edits, explanations and small scripts in about 0.75-1 GB "
-              "of RAM."},
+     "about": "For 2-3 GB phones (NewAl Code Lite): simple edits, explanations and small scripts in about "
+              "0.8-1 GB of RAM."},
     {"id": "qwen3.5-2b", "title": "Qwen3.5 2B", "repo": "unsloth/Qwen3.5-2B-MTP-GGUF",
      "file": "Qwen3.5-2B-Q4_K_M.gguf", "size": 1330000000, "kv": 12288, "state": 20201472, "active_b": 2.0,
      "mtp": True,
@@ -62,7 +63,7 @@ MODELS = [
 
 # The default local model(s) per RAM tier: main does the work; fast (optional) helps with small jobs.
 TIER_DEFAULTS = {
-    "2gb": {"main": "qwen3.5-0.8b-iq3"},
+    "2gb": {"main": "qwen3.5-0.8b"},
     "3gb": {"main": "qwen3.5-0.8b"},
     "4gb": {"main": "qwen3.5-2b"},
     "6gb": {"main": "qwen3.5-2b"},

@@ -191,7 +191,7 @@ def cpu_features():
 # RAM tiers: what a computer of this size can give a local model while the OS, a browser and an editor keep running.
 TIERS = [
     # (name, up to total GB, GB kept for everything else). A phone reports less than its size (2 GB: ~1.8-1.9).
-    ("2gb", 2.6, 1.2),
+    ("2gb", 2.6, 1.1),
     ("3gb", 3.6, 1.6),
     ("4gb", 5.0, 2.0),
     ("6gb", 7.0, 2.4),

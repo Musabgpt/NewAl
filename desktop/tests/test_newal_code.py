@@ -388,6 +388,18 @@ class SandboxTest(unittest.TestCase):
         self.assertEqual(m["exit"], 0, m["output"])
         self.assertTrue(os.path.exists(os.path.join(self.root, "listing.txt")))
 
+    def test_windows_git_bash_runs_from_its_own_path(self):
+        """Windows: the sandboxed Git Bash starts through NewAl Code's junction, and MSYS2 sees that as its root
+        (which is what gives it objects apart from a Git Bash the user has open)."""
+        if self.sb.kind() != "low-integrity" or tools.shell_command()[1] != "bash":
+            self.skipTest("Windows with Git Bash only")
+        argv, env = self.sb.msys_view(tools.shell_command()[0] + ["cygpath -w /"])
+        print("\n[msys view] %s %s error=%r" % (argv[0], env.get("MSYSTEM"), self.sb.msys_view.error))
+        self.assertIn(os.path.join("NewAlCode", "git"), argv[0], self.sb.msys_view.error)
+        m = self.run_in("auto-edit", "cygpath -w / && echo $MSYSTEM")
+        print("[msys root in the sandbox] %s" % m["output"].strip())
+        self.assertIn(os.path.join("NewAlCode", "git").lower(), m["output"].lower())
+
     def test_windows_labels_the_project_once(self):
         if self.sb.kind() != "low-integrity":
             self.skipTest("Windows only")

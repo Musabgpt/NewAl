@@ -347,10 +347,11 @@ def _say(text):
 
 
 def msys_view(argv):
-    """argv with Git Bash started through NewAl Code's own path to the Git folder (a junction). MSYS2 programs share
-    their state in kernel objects named after a hash of the folder they run from, and the ones a Git Bash at normal
-    integrity made (a terminal left open) cannot be opened at low integrity: seen from another path, the sandboxed
-    bash and every program it starts from its /usr/bin share objects of their own."""
+    """(argv, environment changes) that start Git Bash through NewAl Code's own path to the Git folder (a junction).
+    MSYS2 programs share their state in kernel objects named after a hash of the folder they run from, and the ones
+    a Git Bash at normal integrity made (a terminal left open) cannot be opened at low integrity: seen from another
+    path, the sandboxed bash and every program it starts share objects of their own. MSYS2's bash is started
+    directly, with the PATH and MSYSTEM Git's bin\\bash.exe would give it (that wrapper finds its folder itself)."""
     exe = os.path.abspath(argv[0])
     root, d = None, os.path.dirname(exe)
     for _ in range(3):
@@ -358,8 +359,8 @@ def msys_view(argv):
             root = d
             break
         d = os.path.dirname(d)
-    if not root:
-        return argv
+    if not root or os.path.basename(exe).lower() not in ("bash.exe", "sh.exe"):
+        return argv, {}
     link = os.path.join(os.environ.get("LOCALAPPDATA") or tempfile.gettempdir(), "NewAlCode", "git")
     try:
         if os.path.lexists(link) and os.path.normcase(os.path.realpath(link)) != os.path.normcase(
@@ -369,9 +370,16 @@ def msys_view(argv):
             import _winapi
             os.makedirs(os.path.dirname(link), exist_ok=True)
             _winapi.CreateJunction(root, link)
-    except (OSError, ImportError, AttributeError):
-        return argv
-    return [os.path.join(link, os.path.relpath(exe, root))] + list(argv[1:])
+    except (OSError, ImportError, AttributeError) as e:
+        msys_view.error = "%s: %s" % (type(e).__name__, e)
+        return argv, {}
+    paths = [os.path.join(link, "mingw64", "bin"), os.path.join(link, "usr", "bin")]
+    env = {"PATH": os.pathsep.join(paths + [os.environ.get("PATH", "")]),
+           "MSYSTEM": os.environ.get("MSYSTEM") or "MINGW64"}
+    return [os.path.join(link, "usr", "bin", os.path.basename(exe))] + list(argv[1:]), env
+
+
+msys_view.error = ""
 
 
 def run_low_integrity(argv, writable, cwd=None):
@@ -438,8 +446,8 @@ def run_low_integrity(argv, writable, cwd=None):
             k32.SetHandleInformation(h, 1, 1)                                  # HANDLE_FLAG_INHERIT
     si.hStdInput, si.hStdOutput, si.hStdError = handles
 
-    argv = msys_view(argv)
-    env = dict(os.environ, TEMP=temp, TMP=temp)
+    argv, extra_env = msys_view(argv)
+    env = dict(os.environ, TEMP=temp, TMP=temp, **extra_env)
     block = ctypes.create_unicode_buffer("".join("%s=%s\0" % kv for kv in sorted(env.items(),
                                                                                 key=lambda kv: kv[0].upper()))
                                          + "\0")
