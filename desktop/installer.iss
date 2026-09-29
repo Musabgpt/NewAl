@@ -30,6 +30,8 @@ Source: "dist\NewAl\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs cr
 
 [Icons]
 Name: "{group}\NewAl"; Filename: "{app}\NewAl.exe"
+Name: "{group}\NewAl Code"; Filename: "{app}\code\NewAlCode.exe"; Check: FileExists(ExpandConstant('{app}\code\NewAlCode.exe'))
+Name: "{autodesktop}\NewAl Code"; Filename: "{app}\code\NewAlCode.exe"; Tasks: desktopicon; Check: FileExists(ExpandConstant('{app}\code\NewAlCode.exe'))
 Name: "{autodesktop}\NewAl"; Filename: "{app}\NewAl.exe"; Tasks: desktopicon
 
 [Run]

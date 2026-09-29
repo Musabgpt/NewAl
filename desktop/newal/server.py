@@ -21,6 +21,26 @@ UI_DIR = os.path.join(config.BUNDLE, "ui")
 JOBS = {}
 
 
+
+def open_newal_code(project=""):
+    """Starts NewAl Code (the coding agent with the Codex-style window): NewAlCode.exe next to NewAl, or from the
+    source folder. It finds NewAl's llama-server and downloaded models by itself."""
+    import subprocess
+    import sys
+    exe = os.path.join(config.APP_DIR, "code", "NewAlCode.exe")
+    flags = 0x08000000 if config.IS_WINDOWS else 0
+    try:
+        if os.path.exists(exe):
+            subprocess.Popen([exe], cwd=os.path.dirname(exe), creationflags=flags)
+        else:
+            src = os.path.dirname(config.BUNDLE)
+            if not os.path.isdir(os.path.join(src, "newal_code")):
+                return {"error": "NewAl Code غير موجود بهالنسخة"}
+            subprocess.Popen([sys.executable, "-m", "newal_code", "app"], cwd=src, creationflags=flags)
+        return {"ok": True}
+    except OSError as e:
+        return {"error": str(e)}
+
 class Job:
     def __init__(self):
         self.id = uuid.uuid4().hex[:10]
@@ -659,6 +679,8 @@ class Handler(BaseHTTPRequestHandler):
             return self._json({"path": agent.zip_folder(folder)})
         if p == "/api/vscode":
             return self._json({"text": connectors.vscode("open", body.get("path", ""))})
+        if p == "/api/newal_code":
+            return self._json(open_newal_code(body.get("path") or config.get("project_path") or ""))
         self._json({"error": "not found"}, 404)
 
     def do_OPTIONS(self):

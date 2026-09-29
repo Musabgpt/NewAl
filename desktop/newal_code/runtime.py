@@ -1,0 +1,322 @@
+"""Local models on llama.cpp: finding llama-server, fitting a model into this computer's RAM (context length and KV
+cache type are chosen so weights + cache + buffers stay inside the budget), starting it with the flags that make a
+CPU fast, and keeping several models within the budget (the least recently used one stops first).
+
+Speed on a CPU comes from never reading anything twice: every conversation keeps its own slot (the main agent and a
+sub-agent do not evict each other), the fixed start of every request (instructions + tool list) is read once and
+saved to disk, and a model with multi-token-prediction heads drafts several tokens per step."""
+
+import atexit
+import hashlib
+import json
+import os
+import shutil
+import socket
+import subprocess
+import sys
+import threading
+import time
+import urllib.error
+import urllib.request
+
+from . import gguf, hardware, providers, settings
+
+MB = 1024 * 1024
+GB = 1024 * MB
+CONTEXTS = (65536, 49152, 32768, 24576, 16384, 12288, 8192, 6144, 4096)
+MTP_ARGS = ["--spec-draft-n-max", "3", "--spec-draft-p-min", "0.6"]
+# Drafts from text already in the context (opt-in, speculative = "ngram"): an edit's old text is a copy of the file.
+# Measured on Qwen3.5-4B (4 cores): rewriting a whole file 6.3 -> 9.1 tokens/s; but in agent steps (short tool calls)
+# only 10-50% of the drafts were accepted and a two-task run was slower, so it is off unless chosen. MTP (the model's
+# own draft heads, ~99% accepted) is what "auto" uses: 6.3 -> 9.4 tokens/s.
+NGRAM_ARGS = ["--spec-ngram-mod-n-match", "8", "--spec-ngram-mod-n-min", "4", "--spec-ngram-mod-n-max", "32"]
+
+
+def find_server():
+    """llama-server: the configured path, the environment, NewAl desktop's bundled copy, or PATH."""
+    exe = ".exe" if os.name == "nt" else ""
+    candidates = [settings.user().get("llama_server"), os.environ.get("NEWAL_LLAMA_SERVER")]
+    here = os.path.dirname(os.path.abspath(__file__))
+    for base in (os.path.join(os.path.dirname(sys.executable), "bin"),
+                 os.path.join(os.path.dirname(os.path.dirname(sys.executable)), "bin"),   # NewAl\code\ -> NewAl\bin
+                 os.path.join(os.path.dirname(here), "bin"),
+                 os.path.join(getattr(sys, "_MEIPASS", here), "bin"), os.environ.get("NEWAL_BIN", "")):
+        if base:
+            candidates.append(os.path.join(base, "llama-server" + exe))
+    for c in candidates:
+        if c and os.path.isfile(c):
+            return c
+    return shutil.which("llama-server")
+
+
+def _free_port():
+    s = socket.socket()
+    s.bind(("127.0.0.1", 0))
+    port = s.getsockname()[1]
+    s.close()
+    return port
+
+
+def plan(path, budget=None, want_ctx=0, slots=2, draft_bytes=0):
+    """How to run `path` inside `budget` bytes: {ctx, cache_type, need, weights, kv, fits, info}. The context is the
+    longest that fits (up to the model's own and to want_ctx), with an f16 KV cache when it fits and q8_0 when that
+    buys a longer context."""
+    info = gguf.info(path)
+    budget = budget if budget is not None else hardware.budget(setting_gb=settings.user().get("ram_budget_gb"))
+    weights = info["size"] + draft_bytes
+    per_tok = info["kv_bytes_per_token"] or 64 * 1024
+    trained = info["context"] or 32768
+    top = min(want_ctx or 32768, trained)
+    # Compute buffers grow with the model's width and the batch; a small fixed part for the server itself.
+    overhead = 300 * MB + int(min(info["size"], 8 * GB) * 0.04) + 16 * MB * slots
+    best = None
+    for ctx in CONTEXTS:
+        if ctx > top and ctx != CONTEXTS[-1]:
+            continue
+        for cache, factor in (("f16", 1.0), ("q8_0", 0.53)):
+            kv = int(ctx * per_tok * factor)
+            need = weights + kv + overhead
+            if need <= budget:
+                best = {"ctx": ctx, "cache_type": cache, "need": need, "weights": weights, "kv": kv, "fits": True}
+                break
+        if best:
+            break
+    if not best:
+        ctx = CONTEXTS[-1]
+        kv = int(ctx * per_tok * 0.53)
+        best = {"ctx": ctx, "cache_type": "q8_0", "need": weights + kv + overhead, "weights": weights, "kv": kv,
+                "fits": False}
+    best["info"] = info
+    best["budget"] = budget
+    return best
+
+
+class Server:
+    """One llama-server process serving one model file."""
+
+    def __init__(self, path, ctx=0, threads=0, mtp=False, speculative="", slots=2, extra_args=None, budget=None):
+        self.path = path
+        self.port = 0
+        self.proc = None
+        self.used = time.time()
+        self.plan = plan(path, budget=budget, want_ctx=ctx, slots=slots)
+        self.ctx = self.plan["ctx"]
+        self.threads = threads or hardware.physical_cores()
+        self.mtp = mtp
+        self.speculative = speculative
+        self.slots = slots
+        self.extra_args = list(extra_args or [])
+        name = os.path.splitext(os.path.basename(path))[0]
+        self.log_path = os.path.join(settings.LOGS, "llama-%s.log" % name)
+        self.lock = threading.Lock()
+        self.free_slots = list(range(slots))
+        self.slot_owner = {}
+        self._slot_used = {}
+
+    @property
+    def url(self):
+        return "http://127.0.0.1:%d" % self.port
+
+    def args(self, exe):
+        cores = self.threads
+        logical = os.cpu_count() or cores
+        # One KV pool of ctx cells shared by the slots (--kv-unified): the main conversation can use all of it, and
+        # an idle slot's reading moves to the RAM cache (--cache-ram) when the pool needs its cells.
+        a = [exe, "-m", self.path, "--host", "127.0.0.1", "--port", str(self.port), "--no-webui",
+             "-c", str(self.ctx), "-np", str(self.slots), "--kv-unified", "--jinja",
+             "-t", str(cores), "-tb", str(max(cores, logical)),
+             "--slot-save-path", settings.SLOTS, "--cache-ram", str(self.cache_ram_mb())]
+        if self.plan["cache_type"] != "f16":
+            a += ["-fa", "on", "-ctk", self.plan["cache_type"], "-ctv", self.plan["cache_type"]]
+        kinds = []
+        if self.mtp:
+            kinds.append("draft-mtp")
+        if self.speculative == "ngram":
+            kinds.append("ngram-mod")
+        if kinds:
+            a += ["--spec-type", ",".join(kinds)] + (MTP_ARGS if self.mtp else []) + (
+                NGRAM_ARGS if "ngram-mod" in kinds else [])
+        return a + self.extra_args
+
+    def cache_ram_mb(self):
+        """RAM for other conversations' readings (switching threads re-reads nothing): what the budget leaves."""
+        spare = self.plan["budget"] - self.plan["need"]
+        return int(max(0, min(2048 * MB, spare // 2)) // MB)
+
+    def start(self, timeout=600):
+        exe = find_server()
+        if not exe:
+            raise RuntimeError("llama-server was not found. Install llama.cpp or set llama_server in "
+                               "~/.newal-code/config.json (NewAl desktop ships one).")
+        settings.ensure_dirs()
+        self.port = _free_port()
+        log = open(self.log_path, "w", encoding="utf-8", errors="replace")
+        flags = 0x08000000 if os.name == "nt" else 0
+        self.proc = subprocess.Popen(self.args(exe), stdout=log, stderr=subprocess.STDOUT,
+                                     stdin=subprocess.DEVNULL, creationflags=flags, cwd=os.path.dirname(exe))
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            if self.proc.poll() is not None:
+                if self.mtp:          # this llama.cpp cannot draft with MTP: run the same file without it
+                    self.mtp = False
+                    return self.start(timeout)
+                raise RuntimeError("llama-server stopped (exit %s). Log: %s\n%s" % (self.proc.returncode,
+                                                                                    self.log_path, self.tail()))
+            try:
+                with urllib.request.urlopen(self.url + "/health", timeout=2) as r:
+                    if r.status == 200:
+                        return self
+            except (OSError, urllib.error.URLError):
+                pass
+            time.sleep(0.3)
+        self.stop()
+        raise RuntimeError("the model did not load within %d s" % timeout)
+
+    def tail(self, n=12):
+        try:
+            with open(self.log_path, encoding="utf-8", errors="replace") as f:
+                return "".join(f.readlines()[-n:])
+        except OSError:
+            return ""
+
+    def alive(self):
+        return self.proc is not None and self.proc.poll() is None
+
+    def stop(self):
+        if self.proc is not None and self.proc.poll() is None:
+            self.proc.terminate()
+            try:
+                self.proc.wait(10)
+            except subprocess.TimeoutExpired:
+                self.proc.kill()
+        self.proc = None
+
+    def rss(self, peak=False):
+        """Resident memory of the server process in bytes (its peak with peak=True); Linux and Windows."""
+        if self.proc is None:
+            return 0
+        if os.name == "nt":
+            return _windows_rss(self.proc.pid, peak)
+        key = "VmHWM:" if peak else "VmRSS:"
+        try:
+            with open("/proc/%d/status" % self.proc.pid, encoding="ascii") as f:
+                for line in f:
+                    if line.startswith(key):
+                        return int(line.split()[1]) * 1024
+        except (OSError, AttributeError, ValueError):
+            pass
+        return 0
+
+    # ---------------------------------------------------------------- slots
+
+    def take_slot(self, owner):
+        """A slot of its own for a conversation (the same one each time, so what it read stays read)."""
+        with self.lock:
+            if owner in self.slot_owner:
+                return self.slot_owner[owner]
+            if self.free_slots:
+                slot = self.free_slots.pop(0)
+            else:          # all taken: the least recently used conversation gives its slot up
+                victim = min(self.slot_owner, key=lambda o: self._slot_used.get(o, 0))
+                slot = self.slot_owner.pop(victim)
+            self.slot_owner[owner] = slot
+            self._slot_used[owner] = time.time()
+            return slot
+
+    def release_slot(self, owner):
+        with self.lock:
+            slot = self.slot_owner.pop(owner, None)
+            if slot is not None and slot not in self.free_slots:
+                self.free_slots.append(slot)
+
+    def save_slot(self, slot, name):
+        try:
+            providers.post_json(self.url + "/slots/%d?action=save" % slot, {"filename": name}, timeout=120)
+            return True
+        except Exception:  # noqa: BLE001 - only a speed-up
+            return False
+
+    def restore_slot(self, slot, name):
+        if not os.path.exists(os.path.join(settings.SLOTS, name)):
+            return False
+        try:
+            providers.post_json(self.url + "/slots/%d?action=restore" % slot, {"filename": name}, timeout=120)
+            return True
+        except Exception:  # noqa: BLE001
+            return False
+
+
+def _windows_rss(pid, peak):
+    import ctypes
+    from ctypes import wintypes
+
+    class PMC(ctypes.Structure):
+        _fields_ = [("cb", wintypes.DWORD), ("PageFaultCount", wintypes.DWORD),
+                    ("PeakWorkingSetSize", ctypes.c_size_t), ("WorkingSetSize", ctypes.c_size_t),
+                    ("QuotaPeakPagedPoolUsage", ctypes.c_size_t), ("QuotaPagedPoolUsage", ctypes.c_size_t),
+                    ("QuotaPeakNonPagedPoolUsage", ctypes.c_size_t), ("QuotaNonPagedPoolUsage", ctypes.c_size_t),
+                    ("PagefileUsage", ctypes.c_size_t), ("PeakPagefileUsage", ctypes.c_size_t)]
+    try:
+        h = ctypes.windll.kernel32.OpenProcess(0x0410, False, pid)
+        pmc = PMC()
+        pmc.cb = ctypes.sizeof(PMC)
+        ok = ctypes.windll.psapi.GetProcessMemoryInfo(h, ctypes.byref(pmc), pmc.cb)
+        ctypes.windll.kernel32.CloseHandle(h)
+        if ok:
+            return pmc.PeakWorkingSetSize if peak else pmc.WorkingSetSize
+    except (OSError, AttributeError):
+        pass
+    return 0
+
+
+class Pool:
+    """The running local models, kept inside the RAM budget."""
+
+    def __init__(self):
+        self.servers = {}
+        self.lock = threading.RLock()
+        atexit.register(self.stop_all)
+
+    def get(self, path, ctx=0, mtp=False, speculative="", threads=0):
+        key = os.path.abspath(path)
+        with self.lock:
+            s = self.servers.get(key)
+            if s and s.alive():
+                s.used = time.time()
+                return s
+            budget = hardware.budget(setting_gb=settings.user().get("ram_budget_gb"))
+            s = Server(path, ctx=ctx, threads=threads, mtp=mtp, speculative=speculative, budget=budget)
+            self._make_room(s.plan["need"], budget)
+            s.start()
+            self.servers[key] = s
+            return s
+
+    def _make_room(self, need, budget):
+        while True:
+            live = [s for s in self.servers.values() if s.alive()]
+            if not live or sum(s.plan["need"] for s in live) + need <= budget:
+                return
+            old = min(live, key=lambda s: s.used)
+            old.stop()
+            self.servers.pop(os.path.abspath(old.path), None)
+
+    def running(self):
+        return [s for s in self.servers.values() if s.alive()]
+
+    def stop_all(self):
+        with self.lock:
+            for s in list(self.servers.values()):
+                s.stop()
+            self.servers.clear()
+
+
+pool = Pool()
+
+
+def prefix_name(path, system, tools):
+    """The file a model's reading of a fixed prompt start is saved under (same model + same start = same file)."""
+    h = hashlib.sha256()
+    h.update(os.path.basename(path).encode())
+    h.update(str(os.path.getsize(path)).encode())
+    h.update(json.dumps([system, tools], sort_keys=True).encode())
+    return "prefix-%s.bin" % h.hexdigest()[:20]

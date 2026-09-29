@@ -1881,7 +1881,12 @@ document.addEventListener("DOMContentLoaded", () => {
   $("#side").addEventListener("click", e => {
     if (narrow() && e.target.closest("button, a, #convs > *")) setTimeout(() => document.body.classList.add("side-hidden"), 0);
   });
-  document.querySelectorAll("nav button").forEach(b => b.onclick = () => showPanel(b.dataset.panel));
+  document.querySelectorAll("nav button[data-panel]").forEach(b => b.onclick = () => showPanel(b.dataset.panel));
+  const openCode = document.getElementById("openCode");
+  if (openCode) openCode.onclick = async () => {
+    const r = await api("/api/newal_code", {});
+    if (r && r.error) alert(r.error);
+  };
   $("#closePanel").onclick = () => { $("#panel").hidden = true; refreshState(); };
   $("#panel").onclick = e => { if (e.target.id === "panel") $("#closePanel").click(); };
   $("#send").onclick = () => {

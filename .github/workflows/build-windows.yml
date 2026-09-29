@@ -25,7 +25,7 @@ jobs:
           python-version: "3.12"
 
       - name: Install Python packages
-        run: python -m pip install --upgrade pip pyinstaller pywebview pypdf numpy truststore certifi qrcode
+        run: python -m pip install --upgrade pip pyinstaller pywebview pypdf numpy truststore certifi qrcode pytest
 
       - name: Python checks
         run: |
@@ -157,6 +157,13 @@ jobs:
             --add-data "newal/ui;ui" --add-data "newal/skills;skills" --add-data "newal/agents;agents" --add-data "newal/kaggle;kaggle" --add-data "assets;assets" `
             --collect-submodules newal --collect-data certifi --hidden-import truststore --collect-submodules qrcode NewAl.py
           Copy-Item -Recurse bin dist/NewAl/bin
+
+      - name: Build NewAlCode.exe (the Codex-style coding agent, in NewAl\code)
+        run: |
+          pyinstaller --noconfirm --windowed --name NewAlCode --icon assets/newal.ico --distpath dist/code-build `
+            --add-data "newal_code/ui;newal_code/ui" --collect-submodules newal_code NewAlCode.py
+          Copy-Item -Recurse dist/code-build/NewAlCode dist/NewAl/code
+          if (-not (Test-Path dist/NewAl/code/NewAlCode.exe)) { throw "NewAlCode.exe was not built" }
 
       - name: Check the built app
         run: |
