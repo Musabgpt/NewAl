@@ -176,7 +176,37 @@ build, the same model file and 4 threads on the same computer (4-core Xeon at 2.
 the task to the final answer, including the automatic test run. Not timed: loading the model and reading the fixed
 start of every request, which both programs do before the user types. A task gets at most 20 minutes.
 
-Same model file, Qwen3.5-4B Q4_K_M (what the current NewAl runs on an 8 GB computer):
+**Now**, with the tests running with each change (see "How it works"):
+
+| Model file (both programs use the same) | Current NewAl (project mode) | NewAl Code |
+|---|---|---|
+| Qwen3.5-4B Q4_K_M | 2865 s, 4 of 6 right | 488 s, 6 of 6: **5.9 times as fast** (83% less time) |
+| Qwen3.5-4B Q4_K_M with MTP heads (both draft with them) | 2227 s, 6 of 6 | 341 s and 390 s, 6 of 6: **6.1 times as fast** (84% less time) |
+
+| Task (MTP file) | Current NewAl | NewAl Code, run 1 | NewAl Code, run 2 |
+|---|---|---|---|
+| Fix a bug | 188 s | 29 s | 26 s |
+| Add a command-line option | 839 s | 137 s | 182 s |
+| Implement a function | 225 s | 62 s | 63 s |
+| Rename across files | 524 s | 65 s | 64 s |
+| Answer a question about the code | 67 s | 15 s | 16 s |
+| Fix a crash from its traceback | 384 s | 32 s | 39 s |
+
+The model calls for the six tasks went from 25-27 to 21-23 (the current NewAl: 76-80), and the tokens written
+from 3.2k to 2.6-3.1k (11.6k). Drafting 5 tokens ahead instead of 3 was slower (632 s: more drafts rejected), so
+it stays at 3; MTP makes writing 56% faster on these steps (6.2 to 9.6 tokens/s).
+
+Drafting with n-grams from the conversation as well as MTP (the "both" setting) was slower too: 398 s and 413 s,
+8.0-8.3 tokens/s, because on short agent steps most n-gram drafts are rejected. It stays off by default.
+
+The goal was "at least 90% faster": 1.9 times the speed. NewAl Code is 5.9 to 6.1 times as fast on the same model
+file (4.0 to 4.6 times before the tests ran with each change), and on 8-16 GB computers the current NewAl cannot run
+its own default model at all. In time saved that is 83-84%. Read as "90% less time" (10 times as fast), it is not
+there yet: that would be about 223 s with MTP, and most of what is left is the model writing (about 80% of the
+time, at 9-10 tokens a second on this CPU).
+
+**Before that change** (the first measurement), same model file, Qwen3.5-4B Q4_K_M (what the current NewAl runs on
+an 8 GB computer):
 
 | Task | Current NewAl (project mode) | NewAl Code, run 1 | NewAl Code, run 2 |
 |---|---|---|---|
@@ -210,10 +240,7 @@ when its file has them, so both draft here):
 NewAl Code 1.13 times: NewAl Code writes fewer tokens (3.2k against 11.6k), so there is less for drafting to speed
 up.
 
-The goal was "at least 90% faster": 1.9 times the speed. NewAl Code is 4.0 to 4.6 times as fast on the same model,
-and on 8-16 GB computers the current NewAl cannot run its own default model at all. In time saved that is 75-78%.
-
-Where the time went (the six tasks, same model file):
+Where the time went (first measurement, the six tasks, same model file):
 
 | | Current NewAl | NewAl Code |
 |---|---|---|

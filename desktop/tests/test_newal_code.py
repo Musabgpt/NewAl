@@ -328,8 +328,8 @@ class PluginsTest(unittest.TestCase):
         self.assertIn("linter", extensions.agents(root))
         self.assertIn("house-style", extensions.skills(root))
         hook = settings.project(root)["hooks"]["PostToolUse"][-1]["hooks"][0]["command"]
-        self.assertEqual(hook, os.path.join(p["dir"], "fmt.sh"))
-        self.assertEqual(mcp.configs(root)["lintd"]["command"], os.path.join(p["dir"], "server"))
+        self.assertEqual(hook, p["dir"] + "/fmt.sh")            # ${CLAUDE_PLUGIN_ROOT} is the plugin's folder
+        self.assertEqual(mcp.configs(root)["lintd"]["command"], p["dir"] + "/server")
         with self.assertRaises(ValueError):
             plugins.install(src, root=root)                 # already there
         plugins.remove("lint-kit", root)
@@ -363,18 +363,19 @@ class PluginsTest(unittest.TestCase):
 
 class HooksTest(unittest.TestCase):
     def test_pre_tool_use_blocks_and_prompt_context(self):
-        py = sys.executable
+        py = sys.executable.replace("\\", "/")          # quoted, with / : bash (Git Bash on Windows) runs it as is
         cfg = {"PreToolUse": [{"matcher": "Bash", "hooks": [{"type": "command", "command":
-               "%s -c \"import sys,json; d=json.load(sys.stdin); sys.stderr.write('no rm'); "
+               "\"%s\" -c \"import sys,json; d=json.load(sys.stdin); sys.stderr.write('no rm'); "
                "sys.exit(2 if 'rm' in d['tool_input']['command'] else 0)\"" % py}]}],
                "UserPromptSubmit": [{"hooks": [{"type": "command", "command": "echo remember-this"}]}]}
-        r = hooks.run(cfg, "PreToolUse", {"tool_name": "Bash", "tool_input": {"command": "rm x"}}, "/tmp", tool="bash")
+        cwd = tempfile.gettempdir()
+        r = hooks.run(cfg, "PreToolUse", {"tool_name": "Bash", "tool_input": {"command": "rm x"}}, cwd, tool="bash")
         self.assertTrue(r.block)
         self.assertEqual(r.permission, "deny")
         self.assertIn("no rm", r.reason)
-        r = hooks.run(cfg, "PreToolUse", {"tool_name": "Bash", "tool_input": {"command": "ls"}}, "/tmp", tool="bash")
+        r = hooks.run(cfg, "PreToolUse", {"tool_name": "Bash", "tool_input": {"command": "ls"}}, cwd, tool="bash")
         self.assertFalse(r.block)
-        r = hooks.run(cfg, "UserPromptSubmit", {"prompt": "x"}, "/tmp")
+        r = hooks.run(cfg, "UserPromptSubmit", {"prompt": "x"}, cwd)
         self.assertEqual(r.context, ["remember-this"])
 
 
