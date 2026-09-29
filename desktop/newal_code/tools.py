@@ -93,10 +93,13 @@ def inside(ctx, path):
 
 
 def read_text(path):
+    """A text file with "\n" line ends, however it is stored (CRLF on Windows): what the model reads and copies into
+    edits has no stray "\r", and write_text puts a CRLF file's line ends back."""
     with open(path, "rb") as f:
         data = f.read()
     if b"\0" in data[:8000]:
         raise ToolError("%s is a binary file" % os.path.basename(path))
+    data = data.replace(b"\r\n", b"\n")
     for enc in ("utf-8", "utf-8-sig", "cp1252", "latin-1"):
         try:
             return data.decode(enc)
@@ -112,7 +115,7 @@ def write_text(ctx, path, text):
     if os.path.exists(path):
         try:
             with open(path, "rb") as f:
-                head = f.read(65536)
+                head = f.read(4 << 20)
             if b"\r\n" in head:
                 newline = "\r\n"
         except OSError:

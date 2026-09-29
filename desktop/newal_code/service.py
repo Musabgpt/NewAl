@@ -585,23 +585,64 @@ def make_worktree(root, sid):
     return (folder if rel == "." else os.path.join(folder, rel)), head.strip()
 
 
-def apply_worktree(s):
-    """Applies a worktree thread's changes (committed on its branch or not) to the project's checkout."""
+def _git_bytes(root, *args):
     import subprocess
+    try:
+        p = subprocess.run(["git", *args], cwd=root, capture_output=True, timeout=60,
+                           creationflags=0x08000000 if os.name == "nt" else 0)
+        return p.returncode, p.stdout
+    except (OSError, subprocess.SubprocessError):
+        return 1, b""
+
+
+def _same_text(a, b):
+    """The same file content, whatever the line endings (Git for Windows checks files out with CRLF)."""
+    return (a or b"").replace(b"\r\n", b"\n") == (b or b"").replace(b"\r\n", b"\n")
+
+
+def apply_worktree(s):
+    """Applies a worktree thread's changes (committed on its branch or not) to the project's checkout: every file the
+    thread changed is copied over (or deleted), once the project's copies are checked to still be the ones the thread
+    started from, so nothing changed there meanwhile is overwritten. Files, not a patch: a patch fails on the line
+    endings Git uses on Windows."""
     if not s.worktree:
         return {"error": "this thread works in the project itself"}
     wt_top = util.git_root(s.root)
     origin_top = util.git_root(s.origin)
+    base = s.base or "HEAD"
     util.git(wt_top, "add", "-A")
-    code, patch = util.git(wt_top, "diff", "--cached", "--binary", s.base or "HEAD")
+    code, out = _git_bytes(wt_top, "diff", "--cached", "--name-status", "--no-renames", "-z", base)
     util.git(wt_top, "reset", "-q")
-    if code or not patch.strip():
-        return {"error": "no changes to apply" if not code else patch[:400]}
-    p = subprocess.run(["git", "apply", "--3way", "--whitespace=nowarn", "-"], cwd=origin_top, input=patch,
-                       capture_output=True, text=True)
-    if p.returncode:
-        return {"error": (p.stderr or p.stdout).strip()[:800]}
-    return {"ok": True, "applied": [l[6:] for l in patch.splitlines() if l.startswith("+++ b/")]}
+    if code:
+        return {"error": out.decode("utf-8", "replace")[:400]}
+    parts = out.decode("utf-8", "replace").split("\0")
+    changes = [(parts[i][:1], parts[i + 1]) for i in range(0, len(parts) - 1, 2) if parts[i]]
+    if not changes:
+        return {"error": "no changes to apply"}
+    conflicts = []
+    for status, rel in changes:
+        dest = os.path.join(origin_top, *rel.split("/"))
+        mine = open(dest, "rb").read() if os.path.isfile(dest) else None
+        if status == "A":
+            ok = mine is None or _same_text(mine, open(os.path.join(wt_top, *rel.split("/")), "rb").read())
+        else:
+            _, was = _git_bytes(wt_top, "show", "%s:%s" % (base, rel))
+            ok = _same_text(mine, was) if mine is not None else status == "D"
+        if not ok:
+            conflicts.append(rel)
+    if conflicts:
+        return {"error": "changed in the project since this thread started: %s. Nothing was applied."
+                         % ", ".join(conflicts)}
+    import shutil
+    for status, rel in changes:
+        dest = os.path.join(origin_top, *rel.split("/"))
+        if status == "D":
+            if os.path.isfile(dest):
+                os.remove(dest)
+            continue
+        os.makedirs(os.path.dirname(dest) or origin_top, exist_ok=True)
+        shutil.copyfile(os.path.join(wt_top, *rel.split("/")), dest)
+    return {"ok": True, "applied": [rel for _, rel in changes]}
 
 
 def discard_worktree(s):

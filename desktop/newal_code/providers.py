@@ -137,11 +137,18 @@ class Stream:
 
     def close(self):
         self.closed = True
-        try:
-            if self.conn.sock:
-                self.conn.sock.shutdown(socket.SHUT_RDWR)
-        except OSError:
-            pass
+        sock = getattr(self.conn, "sock", None)
+        if sock is not None:
+            try:
+                sock.shutdown(socket.SHUT_RDWR)          # Linux, macOS: ends a read blocked in another thread
+            except OSError:
+                pass
+            # Windows: a shutdown does not end that read (the response's file object keeps the socket open), but
+            # closing the handle does. The socket object lets go of it first, so nothing closes it twice.
+            try:
+                socket.close(sock.detach())
+            except (OSError, ValueError):
+                pass
         try:
             self.conn.close()
         except OSError:

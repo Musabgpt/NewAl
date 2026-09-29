@@ -39,15 +39,25 @@ def _candidates(name):
     return [os.path.join(d, name + EXE) for d in dirs if d]
 
 
+_usable = {}
+
+
 def find(name):
     """A language tool (gcc, dotnet, java, go, rustc, node...) on PATH or where its installer puts it."""
     exe = shutil.which(name)
-    if exe:
-        return exe
-    for p in _candidates(name):
-        if os.path.exists(p):
-            return p
-    return None
+    if not exe:
+        exe = next((p for p in _candidates(name) if os.path.exists(p)), None)
+    if exe and name in ("rustc", "cargo") and not _runs(exe):
+        return None          # rustup's stand-in without a toolchain: Rust is not really installed
+    return exe
+
+
+def _runs(exe):
+    """Whether `exe --version` works (rustup puts rustc on PATH before any toolchain is installed)."""
+    if exe not in _usable:
+        code, _ = connectors.run([exe, "--version"], cwd=os.path.dirname(exe) or None, timeout=60)
+        _usable[exe] = code == 0
+    return _usable[exe]
 
 
 def node_major():

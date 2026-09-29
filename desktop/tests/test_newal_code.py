@@ -892,6 +892,15 @@ class ServerTest(unittest.TestCase):
         self.wait_for(lambda e: e.get("type") == "turn_end" and e.get("session") == sid)
         with open(os.path.join(root, "calc.py")) as f:
             self.assertIn("a - b", f.read())              # the project itself is untouched
+        with open(os.path.join(root, "calc.py"), "rb") as f:
+            original = f.read()
+        with open(os.path.join(root, "calc.py"), "wb") as f:
+            f.write(b"# changed meanwhile\n" + original)
+        r = self.call("/api/sessions/%s/apply" % sid, {})
+        self.assertFalse(r.get("ok"), r)                  # nothing the user changed meanwhile is overwritten
+        self.assertIn("calc.py", r["error"])
+        with open(os.path.join(root, "calc.py"), "wb") as f:    # a Windows checkout: CRLF, the same content
+            f.write(original.replace(b"\r\n", b"\n").replace(b"\n", b"\r\n"))
         r = self.call("/api/sessions/%s/apply" % sid, {})
         self.assertTrue(r.get("ok"), r)
         with open(os.path.join(root, "calc.py")) as f:
