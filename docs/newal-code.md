@@ -350,6 +350,10 @@ connection gets out with the network off.
 `tools/smoke_newal_code.py`, which checks the built app the way a user runs it: it starts, finds its llama-server, runs
 a command in the sandbox from inside the packaged app (driven by a scripted model), and answers with a real GGUF
 through the bundled llama-server. Each build that passes is published in a pre-release `newal-code-b<N>`.
+Build 8 was the first with all four: Windows x64 (37 MB zip), Linux x64 (52 MB), macOS Apple silicon and Intel
+(38 MB each). Windows' check found that the packaged `newal-code.exe` wrote a pipe in the ANSI code page (the
+packaged Python ignores `PYTHONIOENCODING`), so its JSON reached readers as broken UTF-8 and a box character could
+stop it; standard output and error are UTF-8 now.
 
 ## Cloud tasks
 
