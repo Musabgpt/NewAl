@@ -103,6 +103,10 @@ jobs:
     if: ${{ !cancelled() && needs.apk.result == 'success' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch') }}
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
       - uses: actions/download-artifact@v4
         with:
           name: NewAlCodeLite-apk
@@ -111,8 +115,11 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           PHONES: ${{ needs.phone.result }}
+          REPO: ${{ github.repository }}
+          SHA: ${{ github.sha }}
+          N: ${{ github.run_number }}
         run: |
-          tag="newal-code-lite-b${{ github.run_number }}"
+          tag="newal-code-lite-b$N"
           printf '%s\n' \
             "NewAl Code Lite for Android phones with 2-4 GB of RAM (Android 8 and up; arm64, and x86_64 for emulators)." \
             "" \
@@ -121,16 +128,24 @@ jobs:
             "model all run on the phone." \
             "" \
             "Emulator check of this build (2 GB and 3 GB phones): $PHONES." > notes.md
-          # Tried again: GitHub once answered a release like the ones before it with 403 (build 2).
-          for attempt in 1 2 3 4; do
-            if gh release view "$tag" --repo "${{ github.repository }}" > /dev/null 2>&1; then
-              gh release upload "$tag" NewAlCodeLite.apk --clobber --repo "${{ github.repository }}" && exit 0
-            elif gh release create "$tag" NewAlCodeLite.apk --repo "${{ github.repository }}" \
-                --target "${{ github.sha }}" --title "NewAl Code Lite build ${{ github.run_number }}" \
-                --notes-file notes.md --prerelease --latest=false; then
-              exit 0
+          # Since build 2 GitHub has answered this workflow's release (a new tag on the commit) with 403, where the
+          # desktop workflow's release of the same commit went through. So: the tag first, by git (whose refusal
+          # says why), then the release through the API, printing GitHub's answer (with the permission it wants)
+          # when it is refused.
+          if ! git ls-remote --exit-code --tags origin "refs/tags/$tag" > /dev/null; then
+            git push origin "HEAD:refs/tags/$tag" || echo "::warning::git could not push the tag"
+          fi
+          for attempt in 1 2 3; do
+            if gh release view "$tag" --repo "$REPO" > /dev/null 2>&1; then
+              gh release upload "$tag" NewAlCodeLite.apk --clobber --repo "$REPO" && exit 0
+            elif gh api -i -X POST "repos/$REPO/releases" -f tag_name="$tag" -f target_commitish="$SHA" \
+                -f name="NewAl Code Lite build $N" -F body=@notes.md -F prerelease=true -f make_latest=false \
+                > answer.txt 2>&1; then
+              gh release upload "$tag" NewAlCodeLite.apk --clobber --repo "$REPO" && exit 0
+            else
+              echo "attempt $attempt: GitHub answered"
+              grep -iE "^HTTP|x-accepted-github-permissions|x-github-request-id|\"message\"|documentation" answer.txt || cat answer.txt
             fi
-            echo "attempt $attempt did not publish; again in $((attempt * 30)) s"
             sleep $((attempt * 30))
           done
           exit 1
