@@ -59,6 +59,13 @@ The app opens a folder it is given (`NewAlCode.exe C:\project`, `newal-code app 
 (`gh auth token`) or git's credential helper for github.com (Git Credential Manager, which Git for Windows brings
 and which signs in through the browser when it has nothing yet); a token only when neither has one.
 
+**Arabic.** The interface is in Arabic, right to left, when the system's language is Arabic (a phone set to Arabic)
+or with Settings > Language > العربية (English, or the system's, likewise). The page's own words are translated as
+it draws them (`ui/i18n.js`: a dictionary of its strings and patterns for those with a number or a name in them);
+never what the model or the user wrote, code, commands or their output. Each message takes the direction of its
+own text, in either language, and code, diffs and the terminal stay left to right. The agent answers in the user's
+language already.
+
 **Speaking and sharing (the phone).** The microphone beside Send types what you say (Android's speech recognition,
 in the phone's language; on a computer, the browser's where it has one). "Share" in another app → NewAl Code
 starts a new thread with the text and the files (copied into NewAl Code's `Shared` folder), waiting for what to do

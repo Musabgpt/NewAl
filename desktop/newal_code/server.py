@@ -27,7 +27,7 @@ class Handler(BaseHTTPRequestHandler):
     service = None
     key = ""
     protocol_version = "HTTP/1.1"
-    OPEN = ("/", "/index.html", "/app.js", "/markdown.js", "/style.css", "/icon.svg", "/favicon.ico")
+    OPEN = ("/", "/index.html", "/app.js", "/i18n.js", "/markdown.js", "/style.css", "/icon.svg", "/favicon.ico")
 
     def _host_ok(self):
         port = self.server.server_address[1]

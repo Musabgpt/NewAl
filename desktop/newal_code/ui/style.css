@@ -402,3 +402,22 @@ pre.out { margin: 0; background: var(--bg-code); border: 1px solid var(--border)
 .welcome .lead { color: var(--fg-soft); margin: 0 0 6px; }
 #mic.listening { color: #fff; background: #b3261e; animation: pulse 1.2s infinite; }
 @keyframes pulse { 50% { opacity: .55; } }
+
+/* right to left (the Arabic interface): what the page draws with left and right, mirrored; code stays left to right */
+[dir="rtl"] #sidebar { border-right: 0; border-left: 1px solid var(--border); }
+[dir="rtl"] .side-item, [dir="rtl"] .menu-item, [dir="rtl"] .suggestions { text-align: right; }
+[dir="rtl"] .side-item kbd, [dir="rtl"] .item-head .meta { margin-left: 0; margin-right: auto; }
+[dir="rtl"] .msg-assistant ul, [dir="rtl"] .msg-assistant ol { padding-left: 0; padding-right: 22px; }
+[dir="rtl"] .reasoning, [dir="rtl"] .sub { border-left: 0; border-right: 2px solid var(--border); padding-left: 0;
+  padding-right: 10px; }
+[dir="rtl"] .menu { left: auto; right: 0; }
+[dir="rtl"] .picker.up-right .menu { right: auto; left: 0; }
+[dir="rtl"] #review { border-left: 0; border-right: 1px solid var(--border); }
+[dir="rtl"] #attachments button { right: auto; left: -6px; }
+[dir="rtl"] pre, [dir="rtl"] code, [dir="rtl"] .diff, [dir="rtl"] #term-out, [dir="rtl"] #term-form,
+[dir="rtl"] .browse-list .file, [dir="rtl"] #fp-path { direction: ltr; text-align: left; }
+[dir="rtl"] #empty-sub, [dir="rtl"] .desc, [dir="rtl"] .browse-list div, [dir="rtl"] .toast-path { unicode-bidi: plaintext; }
+[dir="rtl"] body { font-family: system-ui, "Segoe UI", Tahoma, "Noto Sans Arabic", "Noto Naskh Arabic", sans-serif; }
+@media (max-width: 900px) {
+  [dir="rtl"] #review { right: auto; left: 0; }
+}

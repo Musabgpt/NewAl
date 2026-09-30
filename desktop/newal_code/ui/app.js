@@ -120,6 +120,7 @@
   async function boot() {
     paintIcons();
     S.state = await api("/api/state");
+    if (window.NCi18n) NCi18n.apply(S.state.settings.lang || "");
     applyTheme(S.state.settings.theme);
     const hw = S.state.hardware;
     $("#sandbox-chip").hidden = !S.state.sandbox;
@@ -446,7 +447,7 @@
         S.live = null;
         const L = turnBox();
         L.started = (ev.t || Date.now() / 1000) * 1000;
-        const u = h("div", "msg-user", '<div class="bubble">' + esc(ev.text) + "</div>");
+        const u = h("div", "msg-user", '<div class="bubble" dir="auto">' + esc(ev.text) + "</div>");
         L.turn.appendChild(u);
         if (!replay) { ensureWorking(); setBusyUI(true); }
         renderEmpty();
@@ -466,7 +467,7 @@
       }
       case "text_delta": {
         const X = C || turnBox();
-        if (!X.text) { X.text = h("div", "msg-assistant caret"); X.text.raw = ""; (X.box || X.turn).appendChild(X.text); }
+        if (!X.text) { X.text = h("div", "msg-assistant caret"); X.text.dir = "auto"; X.text.raw = ""; (X.box || X.turn).appendChild(X.text); }
         X.text.raw += ev.text;
         if (!X.text.pending) {
           X.text.pending = true;
@@ -479,7 +480,7 @@
       case "assistant": {
         const X = C || turnBox();
         let el = X.text;
-        if (!el) { el = h("div", "msg-assistant"); (X.box || X.turn).appendChild(el); }
+        if (!el) { el = h("div", "msg-assistant"); el.dir = "auto"; (X.box || X.turn).appendChild(el); }
         el.classList.remove("caret");
         el.classList.toggle("note", !ev.final);
         el.innerHTML = md(ev.text);
@@ -513,11 +514,12 @@
           X.items[ev.id] = { el: line, kind: "read", group: X.explore };
         } else {
           X.explore = null;
-          const verbs = { bash: "Ran", edit: "Edited", write: "Wrote", apply_patch: "Patched", web_fetch: "Fetched",
-            task: "Delegated to", todo: "Updated plan" };
+          const verbs = { bash: "Ran", powershell: "Ran in PowerShell", edit: "Edited", write: "Wrote", apply_patch: "Patched",
+            web_fetch: "Fetched", web_search: "Searched the web", task: "Delegated to", todo: "Updated plan", phone: "Used the phone",
+            notebook_edit: "Edited notebook" };
           const verb = verbs[name] || (name.startsWith("mcp__") ? "Called" : name);
           it = item(X, "tool-" + name, esc(verb), describe(name, a), replay ? "" : '<span class="spinner"></span>');
-          if (name === "bash") { X.bash = it; it.out = h("pre", "out"); it.querySelector(".item-body").appendChild(it.out); }
+          if (name === "bash" || name === "powershell") { X.bash = it; it.out = h("pre", "out"); it.querySelector(".item-body").appendChild(it.out); }
           if (name === "task") {
             it.classList.add("open");
             const sb = h("div", "sub-body");
@@ -1110,7 +1112,7 @@
       (S.state && S.state.home) || "/";
     const body = h("div");
     const places = [["Home", S.state && S.state.home]];
-    if (S.state && S.state.storage) places.push(["Phone storage", S.state.storage], ["Download", S.state.storage + "/Download"]);
+    if (S.state && S.state.storage) places.push(["Phone storage", S.state.storage], ["Downloads", S.state.storage + "/Download"]);
     const join = (a, b) => a.replace(/[\\/]$/, "") + "/" + b;
     const render = async () => {
       let d;
@@ -1124,7 +1126,7 @@
         (gguf ? (files ? "" : '<div class="muted">No GGUF file in this folder' + (S.state && S.state.storage && d.path.startsWith(S.state.storage) ? " (or NewAl Code may not read the phone's files yet)" : "") + ".</div>") :
           '<div class="section-title">Recent</div><div class="browse-list recent">' + ((S.state && S.state.projects) || []).map(p => '<div data-p="' + esc(p) + '">' + esc(p) + "</div>").join("") + "</div>" +
           '<div class="form-row"><input type="text" id="fp-new" placeholder="New folder in ' + esc(base(d.path)) + '"><button class="btn" id="fp-mk">Make it</button></div>' +
-          '<div class="form-row" style="justify-content:flex-end"><button class="btn primary" id="fp-open">Open ' + esc(base(d.path)) + (d.is_git ? " (git)" : "") + "</button></div>");
+          '<div class="form-row" style="justify-content:flex-end"><button class="btn primary" id="fp-open">' + (window.NCi18n ? NCi18n.t("Open") : "Open") + " " + esc(base(d.path)) + (d.is_git ? " (git)" : "") + "</button></div>");
       body.querySelectorAll(".browse-list div[data-p], .places [data-p]").forEach(x => x.onclick = () => {
         if (x.parentElement.classList.contains("recent")) { closeModal(); done(x.dataset.p); return; }
         cur = x.dataset.p; render();
@@ -1673,6 +1675,7 @@
       '<div class="form-row"><label>Web fetch tool</label><input type="checkbox" id="st-web"' + (s.web ? " checked" : "") + "></div>" +
       '<div class="form-row"><label>Speculative decoding</label><select id="st-spec">' + ["auto", "off", "ngram"].map(v => '<option' + (s.speculative === v ? " selected" : "") + ">" + v + "</option>").join("") + "</select></div>" +
       '<div class="form-row"><label>Theme</label><select id="st-theme">' + ["system", "light", "dark"].map(v => '<option' + (s.theme === v ? " selected" : "") + ">" + v + "</option>").join("") + "</select></div>" +
+      '<div class="form-row"><label>Language</label><select id="st-lang">' + [["", "system"], ["en", "English"], ["ar", "العربية"]].map(v => '<option value="' + v[0] + '"' + ((s.lang || "") === v[0] ? " selected" : "") + ">" + v[1] + "</option>").join("") + "</select></div>" +
       '<div class="form-row"><button class="btn primary" id="st-save">Save</button></div>' +
       '<div class="section-title">GitHub</div><div id="st-github"></div>' +
       '<div class="section-wrap"><div class="section-title">This phone</div><div id="st-phone"></div></div>' +
@@ -1688,11 +1691,14 @@
         mode: body.querySelector("#st-mode").value, reasoning: body.querySelector("#st-reasoning").value,
         verify: body.querySelector("#st-verify").checked, auto_context: body.querySelector("#st-auto").checked,
         web: body.querySelector("#st-web").checked, speculative: body.querySelector("#st-spec").value, theme: body.querySelector("#st-theme").value,
+        lang: body.querySelector("#st-lang").value,
       };
+      const relang = (v.lang || "") !== (S.state.settings.lang || "");
       await api("/api/settings", v).catch(e => toast(e.message));
       Object.assign(S.state.settings, v);
       ["mode", "reasoning"].forEach(k => localStorage.setItem("nc.pref." + k, v[k]));
       applyTheme(v.theme);
+      if (relang) { location.reload(); return; }         // the interface is drawn again in the new language
       updatePickers();
       closeModal();
       toast("Saved");
