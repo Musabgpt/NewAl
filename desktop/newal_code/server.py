@@ -332,6 +332,23 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/api/models/download":
                 svc.download(b.get("id"))
                 return self._json({"ok": True})
+            if path == "/api/plugins":
+                # The Extensions page's buttons: what /plugin install | remove | marketplace add | remove do.
+                from . import plugins
+                act, src = b.get("action") or "", (b.get("source") or "").strip()
+                try:
+                    if act == "install" and src:
+                        return self._json(dict(plugins.install(src), ok=True))
+                    if act == "remove" and src:
+                        return self._json({"ok": True, "removed": plugins.remove(src, b.get("root") or None)})
+                    if act == "marketplace_add" and src:
+                        return self._json(dict(plugins.marketplace_add(src), ok=True))
+                    if act == "marketplace_remove" and src:
+                        return self._json({"ok": True, "removed": plugins.marketplace_remove(src)})
+                except (ValueError, OSError) as e:
+                    return self._json({"error": str(e)}, 400)
+                return self._json({"error": "action (install, remove, marketplace_add, marketplace_remove) and "
+                                            "source"}, 400)
             if path == "/api/mkdir":
                 try:
                     return self._json({"path": _mkdir(b.get("parent") or "", b.get("name") or "")})

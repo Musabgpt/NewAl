@@ -270,6 +270,10 @@ while its first message is typed, so the model loads and reads that start meanwh
 threads are listed from their first message on. With the phone tool there, the prompt tells the model it runs on an
 Android phone and uses the phone tool to act on it (an API model had "opened WhatsApp" by fetching whatsapp.com).
 
+**Plugins without typing.** Skills, agents & MCP lists the plugins with Remove, installs one from a git URL, GitHub's
+owner/repo or name@marketplace, adds a plugin marketplace (Claude Code's format) and lists its plugins with Install:
+what `/plugin` does from a thread, with buttons (on a phone, git is the app's own).
+
 **GitHub and git on the phone.** Settings > GitHub (or GitHub in the side menu) connects an account with a token (GitHub's page for one opens
 with the scopes NewAl Code needs; copied, it connects like an API key), and the ⬇ button beside Threads lists your
 repositories to clone one as a project. The phone has no git, so NewAl Code Lite brings its own: `git` in the

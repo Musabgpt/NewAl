@@ -1335,8 +1335,16 @@
     let d;
     try { d = await api("/api/extensions?root=" + encodeURIComponent(root)); } catch (e) { toast(e.message); return; }
     const list = (items, f) => items.length ? items.map(f).join("") : '<div class="muted">None.</div>';
-    const body = h("div", "", '<div class="section-title">Plugins</div><div class="card-list">' + list(d.plugins || [], p => '<div class="card"><div class="grow"><div class="name">' + esc(p.name) + (p.version ? ' <span class="badge">' + esc(p.version) + "</span>" : "") + '</div><div class="desc">' + esc(p.description) + (p.has.length ? " · " + esc(p.has.join(", ")) : "") + "</div></div></div>") + "</div>" +
-      ((d.marketplaces || []).length ? '<div class="muted">Marketplaces: ' + d.marketplaces.map(m => esc(m.name) + " (" + m.plugins.map(p => esc(p.name)).join(", ") + ")").join(" · ") + " — /plugin install name@marketplace</div>" : "") +
+    const installed = new Set((d.plugins || []).map(p => p.name));
+    const card = (name, desc, right) => '<div class="card"><div class="grow"><div class="name">' + name + '</div><div class="desc">' + desc + "</div></div>" + right + "</div>";
+    const body = h("div", "", '<div class="section-title">Plugins</div><div class="card-list">' + list(d.plugins || [], p => card(esc(p.name) +
+        (p.version ? ' <span class="badge">' + esc(p.version) + "</span>" : ""), esc(p.description) + (p.has.length ? " · " + esc(p.has.join(", ")) : ""),
+        '<button class="btn small" data-pl-rm="' + esc(p.name) + '">Remove</button>')) + "</div>" +
+      '<div class="form-row"><input id="pl-src" type="text" placeholder="A plugin: git URL, owner/repo or name@marketplace" autocomplete="off" spellcheck="false"><button class="btn primary" id="pl-add">Install</button></div>' +
+      (d.marketplaces || []).map(m => '<div class="section-title">Marketplace: ' + esc(m.name) + ' <button class="mini-btn" data-mk-rm="' + esc(m.name) + '" title="Remove this marketplace">' + icon("trash") + "</button></div>" +
+        '<div class="card-list">' + list(m.plugins, p => card(esc(p.name), esc(p.description || ""), installed.has(p.name) ? '<span class="badge good">installed</span>' :
+          '<button class="btn small" data-pl-add="' + esc(p.name + "@" + m.name) + '">Install</button>')) + "</div>").join("") +
+      '<div class="form-row"><input id="mk-src" type="text" placeholder="A plugin marketplace: owner/repo or git URL" autocomplete="off" spellcheck="false"><button class="btn" id="mk-add">Add marketplace</button></div>' +
       '<div class="section-title">Instructions (AGENTS.md / CLAUDE.md)</div>' +
       list(d.instructions, p => '<div class="card"><div class="grow"><div class="name">' + esc(p) + "</div></div></div>") +
       '<div class="section-title">Skills</div><div class="card-list">' + list(d.skills, s => '<div class="card"><div class="grow"><div class="name">' + esc(s.name) + '</div><div class="desc">' + esc(s.description) + " · " + esc(s.dir) + "</div></div></div>") + "</div>" +
@@ -1344,8 +1352,20 @@
       '<div class="section-title">Slash commands</div><div class="card-list">' + list(d.commands.filter(c => c.custom), c => '<div class="card"><div class="grow"><div class="name">/' + esc(c.name) + '</div><div class="desc">' + esc(c.description) + "</div></div></div>") + "</div>" +
       '<div class="section-title">MCP servers</div><div class="card-list">' + list(d.mcp, m => '<div class="card"><div class="grow"><div class="name">' + esc(m.name) + '</div><div class="desc">' + esc(m.url || [m.command].concat(m.args || []).join(" ")) + "</div></div></div>") + "</div>" +
       '<div class="section-title">Hooks</div>' + (Object.keys(d.hooks).length ? "<pre class=\"out\">" + esc(JSON.stringify(d.hooks, null, 1)) + "</pre>" : '<div class="muted">None.</div>') +
-      '<p class="muted">Add skills in .newal/skills or .claude/skills (a folder with SKILL.md), sub-agents in .newal/agents or .claude/agents, commands in .newal/commands or .claude/commands, MCP servers in .mcp.json, hooks in .newal/settings.json or .claude/settings.json. Codex\'s ~/.codex files work too. /plugin install &lt;git URL or folder&gt; adds a plugin (Claude Code\'s layout).</p>');
+      '<p class="muted">Add skills in .newal/skills or .claude/skills (a folder with SKILL.md), sub-agents in .newal/agents or .claude/agents, commands in .newal/commands or .claude/commands, MCP servers in .mcp.json, hooks in .newal/settings.json or .claude/settings.json. Codex\'s ~/.codex files work too. Plugins and marketplaces use Claude Code\'s layout (a plugin brings commands, agents, skills, hooks and MCP servers); /plugin does the same from a thread.</p>');
     modal("Skills, agents & MCP" + (root ? " · " + base(root) : ""), body);
+    const act = async (action, source, busy) => {
+      if (!source) return;
+      toast(busy, 60000);
+      try { await api("/api/plugins", { action, source, root }); } catch (e) { toast(e.message, 9000); return; }
+      toast("Done: new threads use it", 4000);
+      openExtensions();
+    };
+    body.querySelector("#pl-add").onclick = () => act("install", body.querySelector("#pl-src").value.trim(), "Installing the plugin…");
+    body.querySelector("#mk-add").onclick = () => act("marketplace_add", body.querySelector("#mk-src").value.trim(), "Adding the marketplace…");
+    body.querySelectorAll("[data-pl-add]").forEach(b => b.onclick = () => act("install", b.dataset.plAdd, "Installing " + b.dataset.plAdd + "…"));
+    body.querySelectorAll("[data-pl-rm]").forEach(b => b.onclick = () => confirm("Remove the plugin " + b.dataset.plRm + "?") && act("remove", b.dataset.plRm, "Removing…"));
+    body.querySelectorAll("[data-mk-rm]").forEach(b => b.onclick = () => confirm("Remove the marketplace " + b.dataset.mkRm + "?") && act("marketplace_remove", b.dataset.mkRm, "Removing…"));
   }
 
   // ------------------------------------------------------------------ GitHub

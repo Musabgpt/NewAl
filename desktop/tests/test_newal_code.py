@@ -1730,6 +1730,40 @@ class ServerTest(unittest.TestCase):
         self.assertNotIn(sid, [x["id"] for x in self.call("/api/sessions")])
         self.assertEqual(self.call("/api/sessions/" + sid)["meta"]["id"], sid)
 
+    def test_plugins_and_marketplaces_from_the_extensions_page(self):
+        from newal_code import plugins
+        kit = make_project({".claude-plugin/plugin.json": json.dumps({"name": "hello-kit", "description": "Greets"}),
+                            "commands/hello.md": "Say hello to $ARGUMENTS\n"})
+        market = make_project({
+            ".claude-plugin/marketplace.json": json.dumps({"name": "phone-tools", "plugins": [
+                {"name": "fmt", "source": "./plugins/fmt", "description": "Formatting"}]}),
+            "plugins/fmt/.claude-plugin/plugin.json": json.dumps({"name": "fmt"}),
+            "plugins/fmt/commands/fmt.md": "Format $ARGUMENTS\n"})
+        root = make_project(CALC)
+        try:
+            self.assertEqual(self.call("/api/plugins", {"action": "install", "source": kit})["name"], "hello-kit")
+            m = self.call("/api/plugins", {"action": "marketplace_add", "source": market})
+            self.assertEqual((m["name"], m["plugins"]), ("phone-tools", ["fmt"]))
+            self.call("/api/plugins", {"action": "install", "source": "fmt@phone-tools"})
+            ext = self.call("/api/extensions?root=" + urllib.request.quote(root))
+            self.assertEqual(sorted(p["name"] for p in ext["plugins"]), ["fmt", "hello-kit"])
+            self.assertEqual([x["name"] for x in ext["marketplaces"]], ["phone-tools"])
+            self.assertIn("hello", [c["name"] for c in ext["commands"]])
+            with self.assertRaises(urllib.error.HTTPError) as e:             # already there
+                self.call("/api/plugins", {"action": "install", "source": kit})
+            self.assertEqual(e.exception.code, 400)
+            self.call("/api/plugins", {"action": "remove", "source": "hello-kit", "root": root})
+            self.call("/api/plugins", {"action": "marketplace_remove", "source": "phone-tools"})
+            ext = self.call("/api/extensions?root=" + urllib.request.quote(root))
+            self.assertEqual([p["name"] for p in ext["plugins"]], ["fmt"])
+            self.assertEqual(ext["marketplaces"], [])
+        finally:
+            for name in ("fmt", "hello-kit"):
+                try:
+                    plugins.remove(name)
+                except ValueError:
+                    pass
+
     def test_termux_link_command_works_once(self):
         cmd = self.call("/api/termux/link", {})["command"]
         token = cmd.split("once=")[1].split("'")[0]
