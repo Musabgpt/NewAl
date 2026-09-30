@@ -262,7 +262,7 @@ class Client:
         r = settings.user().get("reasoning", "auto")
         if r and r != "auto":
             return r
-        return self.spec.get("reasoning") or ("off" if self.local else "medium")
+        return self.spec.get("reasoning") or ("off" if self.local or self.spec.get("small") else "medium")
 
     def stopped(self):
         """A local model whose server the pool stopped to make room for another one (RAM)."""

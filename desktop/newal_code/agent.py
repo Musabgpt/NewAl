@@ -376,7 +376,7 @@ class Agent:
         self._dirs_noted = list(s.dirs)
         parts += extra_context
         parts.append(text)
-        if self.depth == 0 and self.client is not None and self.client.local:
+        if self.depth == 0 and self.client is not None and (self.client.local or self.client.spec.get("small")):
             # Small models follow the last thing they read best: the reply rule again, where it is read last.
             parts.append("(When done, reply in one sentence.)")
         return "\n\n".join(p for p in parts if p), prefetch
@@ -686,6 +686,8 @@ class Agent:
     def _tiny(self):
         """A local model under 1.5 GB (the phone models): gets the simplest context."""
         c = self.client
+        if c is not None and c.spec.get("small"):     # a small model served elsewhere (the phone's, for Termux)
+            return True
         return bool(c is not None and c.local and 0 < int(c.spec.get("size") or 0) < 1.5 * 1024 ** 3)
 
     def _sandbox_on(self, mode=None):

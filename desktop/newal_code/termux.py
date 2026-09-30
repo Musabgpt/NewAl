@@ -98,7 +98,8 @@ key, app = sys.argv[1], sys.argv[2]
 cfg = settings.user()
 models = dict(cfg.get("models") or {})
 models["phone"] = {"provider": "openai", "base_url": app + "/v1", "model": "phone", "api_key": key,
-                   "name": "The phone's model (NewAl Code Lite)", "context": 16384}
+                   "name": "The phone's model (NewAl Code Lite)", "context": 16384,
+                   "small": True}
 values = {"models": models, "recent_projects": cfg.get("recent_projects") or []}
 if not cfg.get("model") or cfg.get("model") == "auto":
     values["model"] = "phone"

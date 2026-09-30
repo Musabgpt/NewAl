@@ -689,6 +689,12 @@ class PhoneTest(unittest.TestCase):
                              providers.OpenAICompat(llm.url), "tiny")
         names = agentmod.Agent(session.Session(make_project(CALC)), client=tiny).tool_names()
         self.assertEqual(set(names) - {"skill"}, {"read", "edit", "write", "bash", "phone"})
+        # the phone's model as NewAl Code in Termux reaches it (through the app): small too
+        served = models.Client({"id": "phone", "name": "phone", "provider": "openai", "small": True},
+                               providers.OpenAICompat(llm.url), "phone")
+        ag = agentmod.Agent(session.Session(make_project(CALC)), client=served)
+        self.assertEqual(set(ag.tool_names()) - {"skill"}, {"read", "edit", "write", "bash", "phone"})
+        self.assertEqual(served.default_reasoning(), "off")
         schema = json.dumps(tools.REGISTRY["phone"].schema())
         self.assertLess(len(schema), 2000)                   # read at the start of every thread on a phone
         self.assertIn("open_app", schema)
