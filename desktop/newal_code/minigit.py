@@ -84,17 +84,24 @@ def _repo():
         raise Fatal("not a git repository (or any of the parent directories): .git")
 
 
+def _real(folder):
+    """A folder in one spelling: Windows gives the same one as C:\\Users\\RUNNER~1\\... or by its long name, macOS
+    /var/... or /private/var/..., and git's relative paths come from comparing them."""
+    return os.path.realpath(folder)
+
+
 def _rel(repo, path):
     """A repository path as git shows it: relative to the current folder (a folder keeps its slash)."""
     path = _s(path)
-    rel = os.path.relpath(os.path.join(repo.path, path), os.getcwd()).replace(os.sep, "/")
+    rel = os.path.relpath(os.path.join(_real(repo.path), path), _real(os.getcwd())).replace(os.sep, "/")
     return rel + "/" if path.endswith("/") else rel
 
 
 def _repo_path(repo, p):
     """A path the user typed (relative to the current folder) as a repository path."""
     full = os.path.abspath(p)
-    rel = os.path.relpath(full, repo.path).replace(os.sep, "/")
+    full = os.path.join(_real(os.path.dirname(full)), os.path.basename(full))    # (a link itself stays a path)
+    rel = os.path.relpath(full, _real(repo.path)).replace(os.sep, "/")
     if rel.startswith(".."):
         raise Fatal("%s: '%s' is outside repository" % (p, p))
     return "" if rel == "." else rel
@@ -585,7 +592,8 @@ def cmd_rev_parse(args):
         if "--is-inside-work-tree" in seen:
             out.append("true")
         if "--git-dir" in seen or "--absolute-git-dir" in seen:
-            out.append(repo.controldir() if "--absolute-git-dir" in seen or os.getcwd() != repo.path else ".git")
+            out.append(repo.controldir() if "--absolute-git-dir" in seen or _real(os.getcwd()) != _real(repo.path)
+                       else ".git")
         if "--show-prefix" in seen:
             pre = _repo_path(repo, ".")
             out.append(pre + "/" if pre else "")
