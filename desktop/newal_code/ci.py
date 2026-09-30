@@ -274,6 +274,8 @@ def heal(agent, tries=TRIES, say=None, poll=None, appear=None):
     cancel = agent.cancel
     say = say or (lambda st, text: agent.emit({"type": "ci", "state": st, "text": text}))
     top, full, branch, sha = repo(s.root)
+    if not s.title:
+        s.title = "/ci %s (%s)" % (full, branch)     # not the first fix prompt's words
     dirty_before = set(_status(top))
     code, up = _git(top, "rev-parse", "@{u}")
     up = up.strip() if code == 0 and re.fullmatch(r"[0-9a-f]{40}", up.strip()) else ""
@@ -326,7 +328,7 @@ def heal(agent, tries=TRIES, say=None, poll=None, appear=None):
         if not ok:
             return False, "The fix is committed but could not be pushed: %s" % text
         sha = _head(top)
-        say("pushed", "Committed %s and pushed: %s" % (", ".join(committed) or "the agent's commit", text))
+        say("pushed", "Committed %s. %s" % (", ".join(committed) or "the agent's commit", text.replace("\n", " ")))
 
 
 # ------------------------------------------------------------------ the github tool

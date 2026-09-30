@@ -690,7 +690,7 @@
         n.dir = "auto";
         X.turn.appendChild(n);
         if (!replay) { if (end) { stopWorking(); setBusyUI(false); } else { ensureWorking("CI"); setBusyUI(true); } }
-        scrollDown();
+        scrollDown(end && !replay);          // how it ended is always shown
         break;
       }
       case "error":
