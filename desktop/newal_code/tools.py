@@ -73,10 +73,12 @@ def resolve(ctx, path, new=False):
     mistyped: small models copy long paths badly. Then the longest tail of it that fits the project is taken
     (/tmp/x/src/app.py: src/app.py when the project has src/, else app.py), and the result shows the real path."""
     path = os.path.normpath(os.path.join(ctx.root, os.path.expanduser(str(path or ".").strip())))
-    missing = not os.path.isdir(os.path.dirname(path)) if new else not os.path.exists(path)
+    folder = os.path.dirname(path)
+    # (a new file where nothing may be written, as /hello.py on a phone, is as surely a mistake as a missing folder)
+    missing = (not os.path.isdir(folder) or not os.access(folder, os.W_OK)) if new else not os.path.exists(path)
     if missing and not inside(ctx, path):
         parts = [p for p in re.split(r"[\\/]+", path) if p and not p.endswith(":")]
-        for i in range(1, len(parts)):
+        for i in range(0, len(parts)):
             cand = os.path.join(ctx.root, *parts[i:])
             if os.path.isdir(os.path.dirname(cand)) if new else os.path.exists(cand):
                 return cand

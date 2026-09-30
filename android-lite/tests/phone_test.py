@@ -323,9 +323,20 @@ def layout():
     under those bars (the page's top bar, with the threads and settings buttons, was hidden under them)."""
     time.sleep(8)                              # the page loads once the server answers
     bounds, xml = None, ""
-    for _ in range(6):
+    for _ in range(8):
         adb("shell", "uiautomator", "dump", "/sdcard/ui.xml", check=False, timeout=90)
         xml = adb("shell", "cat", "/sdcard/ui.xml", check=False)
+        if "android:id/aerr_wait" in xml:
+            # "... isn't responding" over the screen: another app on a slow emulator (Wait), or NewAl Code (a bug)
+            title = (re.findall(r'text="([^"]*)"[^>]*resource-id="android:id/alertTitle"', xml) or ["?"])[0]
+            print("an app is not responding: %s" % title, flush=True)
+            check("layout: NewAl Code responds", "NewAl" not in title, title)
+            w = re.search(r'resource-id="android:id/aerr_wait"[^>]*bounds="\[(\d+),(\d+)\]\[(\d+),(\d+)\]"', xml)
+            if w:
+                x1, y1, x2, y2 = [int(v) for v in w.groups()]
+                adb("shell", "input", "tap", str((x1 + x2) // 2), str((y1 + y2) // 2), check=False)
+            time.sleep(4)
+            continue
         m = re.search(r'class="android\.webkit\.WebView"[^>]*?bounds="\[(\d+),(\d+)\]\[(\d+),(\d+)\]"', xml)
         if m:
             bounds = [int(x) for x in m.groups()]

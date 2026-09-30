@@ -199,6 +199,13 @@ class ToolsTest(unittest.TestCase):
         self.assertTrue(os.path.exists(os.path.join(root, "src", "b.py")))
         text, _ = tools.call(c, "read", {"path": "/elsewhere/project/src/app.py"})
         self.assertIn("x = 1", text)
+        if os.name != "nt" and os.geteuid() != 0:
+            # a new file where nothing may be written (a small model's /hello.py on a phone): the project's
+            ro = tempfile.mkdtemp()
+            os.chmod(ro, 0o555)
+            self.addCleanup(os.chmod, ro, 0o755)
+            tools.call(c, "write", {"path": os.path.join(ro, "hello2.py"), "content": "print(2)\n"})
+            self.assertTrue(os.path.exists(os.path.join(root, "hello2.py")))
         out = os.path.join(tempfile.mkdtemp(), "out.txt")           # a real folder elsewhere: written there
         tools.call(c, "write", {"path": out, "content": "z\n"})
         self.assertTrue(os.path.exists(out))
