@@ -122,12 +122,12 @@ def watch(full, sha, say=None, cancel=None, poll=None, appear=None, longest=None
         if cancel is not None and cancel.is_set():
             raise Stopped()
         items = runs(full, sha)
+        if items and all(r["status"] == "completed" for r in items):
+            return items                         # how they ended is said by the caller
         line = summary(sha, items) if items else "CI for %s: waiting for GitHub Actions to start" % sha[:7]
         if line != last and say:
             say(line)
         last = line
-        if items and all(r["status"] == "completed" for r in items):
-            return items
         waited = time.time() - started
         if not items and waited > appear:
             return []

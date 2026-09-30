@@ -1455,7 +1455,7 @@ class CITest(unittest.TestCase):
         self.assertIn(" M notes.txt", status)
         self.assertIn("?? draft.txt", status)
         states = [st for st, _ in said]
-        self.assertEqual(states[:3], ["watching", "watching", "fixing"])
+        self.assertEqual(states[:2], ["watching", "fixing"])       # the end of a watch is said once, with what follows
         self.assertIn("Tests … in progress", said[0][1])
         self.assertIn("Tests ✗", said[1][1])
         self.assertIn("pushed", states)
