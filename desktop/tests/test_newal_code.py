@@ -421,23 +421,32 @@ class RepairArgsTest(unittest.TestCase):
 class SlipsTest(unittest.TestCase):
     """A small model's slips that no longer end its turn (seen with a 2B model in the speed test)."""
 
-    UNREADABLE = {"status": 500, "error": "Failed to parse tool call arguments as JSON: [json.exception.parse_error"
-                                          ".101] parse error at line 1, column 14717: syntax error"}
-
-    def test_a_tool_call_the_server_could_not_read_is_asked_again_once(self):
+    def test_a_call_cut_off_at_the_output_limit_is_not_run_and_the_history_stays_json(self):
+        # A 2B model ran away inside an edit's arguments until the output limit: the half call was "repaired" and
+        # half an edit written, and its arguments, sent back as they were, made llama.cpp answer every later request
+        # of the thread with HTTP 500 "Failed to parse tool call arguments as JSON".
+        cut = {"tools": [("edit", '{"path": "calc.py", "old": "    return a - b", "new": "    return a +')],
+               "finish": "length"}
         fix = {"tools": [("edit", {"path": "calc.py", "old": "return a - b", "new": "return a + b"})]}
-        answer, events, _, llm, root = run_agent([self.UNREADABLE, fix, "Fixed add."], on_device=True)
+        answer, events, s, llm, root = run_agent([cut, fix, "Fixed add."], on_device=True)
         self.assertEqual(answer, "Fixed add.")
-        self.assertIn("the model's tool call could not be read: asking again",
-                      [e.get("text") for e in events if e.get("type") == "status"])
+        first = next(e for e in events if e.get("type") == "tool_end")
+        self.assertFalse(first["ok"])
+        self.assertIn("cut off at the output limit", first["text"])
         with open(os.path.join(root, "calc.py")) as f:
-            self.assertIn("return a + b", f.read())
-        self.assertEqual(llm.requests[0]["messages"], llm.requests[1]["messages"])     # the same request again
-        answer, _, _, _, _ = run_agent([self.UNREADABLE, self.UNREADABLE, "never"], on_device=True)
-        self.assertTrue(answer.startswith("Model error: HTTP 500: Failed to parse tool call"), answer)    # once only
-        answer, _, _, llm, _ = run_agent([{"status": 500, "error": "out of memory"}, "never"], on_device=True)
-        self.assertTrue(answer.startswith("Model error"), answer)                  # other errors: as before
-        self.assertEqual(len(llm.requests), 1)
+            self.assertIn("return a + b", f.read())                        # the whole edit, not half of the cut one
+        for req in llm.requests[1:]:
+            for m in req["messages"]:
+                for tc in m.get("tool_calls") or []:
+                    json.loads(tc["function"]["arguments"])                # every call sent back is JSON
+        # a thread saved before (a broken call in its transcript) is sent with JSON arguments too
+        s.messages.insert(1, {"role": "assistant", "content": "", "tool_calls": [{"id": "old", "type": "function",
+                              "function": {"name": "edit", "arguments": '{"path": "a.py", "new": "x'}}]})
+        s.messages.insert(2, {"role": "tool", "tool_call_id": "old", "content": "error"})
+        ag = agentmod.Agent(s, client=fake_client(FakeLLM([]), on_device=True))
+        sent = ag.request_messages()[2]["tool_calls"][0]["function"]["arguments"]
+        self.assertEqual(json.loads(sent), {"path": "a.py", "new": "x"})
+        self.assertEqual(providers.valid_arguments("not json at all"), "{}")
 
     def test_an_empty_reply_is_asked_for_its_answer_once(self):
         answer, _, _, llm, _ = run_agent(["<think>it is 8000 + 80</think>", "8080"], files={"README.md": "# x\n"},

@@ -45,7 +45,7 @@ class Completion:
         msg = {"role": "assistant", "content": self.content}
         if self.tool_calls:
             msg["tool_calls"] = [{"id": c["id"], "type": "function",
-                                  "function": {"name": c["name"], "arguments": c["arguments"] or "{}"}}
+                                  "function": {"name": c["name"], "arguments": valid_arguments(c["arguments"])}}
                                  for c in self.tool_calls]
         if self.reasoning:
             msg["reasoning_content"] = self.reasoning
@@ -348,6 +348,21 @@ class OpenAICompat:
             return [m.get("id") for m in data.get("data", []) if m.get("id")]
         except Exception:  # noqa: BLE001 - listing is a convenience
             return []
+
+
+def valid_arguments(text):
+    """A tool call's arguments as JSON a request can carry. Arguments that are not JSON - a small model's slip, or a call
+    cut off at the output limit - sent back as they are make llama.cpp refuse every later request of the conversation
+    (HTTP 500 "Failed to parse tool call arguments as JSON"): they go back repaired when they can be, else as {}."""
+    text = text or "{}"
+    try:
+        json.loads(text)
+        return text
+    except ValueError:
+        pass
+    from . import repair
+    obj = repair.loads(text)
+    return json.dumps(obj, ensure_ascii=False) if isinstance(obj, dict) else "{}"
 
 
 def _error_text(status, text):

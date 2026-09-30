@@ -85,7 +85,8 @@ class FakeLLM:
             for j in range(0, len(a), 11):
                 events.append({"choices": [{"index": 0, "delta": {"tool_calls": [
                     {"index": i, "function": {"arguments": a[j:j + 11]}}]}}]})
-        events.append({"choices": [{"index": 0, "delta": {}, "finish_reason": "tool_calls" if calls else "stop"}],
+        finish = (None if isinstance(reply, str) else reply.get("finish")) or ("tool_calls" if calls else "stop")
+        events.append({"choices": [{"index": 0, "delta": {}, "finish_reason": finish}],
                        "usage": {"prompt_tokens": 100, "completion_tokens": 10,
                                  "prompt_tokens_details": {"cached_tokens": 60}}})
         self._sse(h, events)

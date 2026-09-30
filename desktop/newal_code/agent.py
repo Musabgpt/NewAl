@@ -18,7 +18,6 @@ from . import context as ctxmod
 from . import circuit, extensions, hooks, mcp, models, permissions, prompts, providers, repair, settings, tools
 from .session import Session
 
-UNREADABLE_CALL = re.compile(r"pars\w* tool call|tool call arguments|json\.exception\.parse_error", re.I)
 MAX_DEPTH = 2              # the main agent may start sub-agents, which may not start their own
 MAX_VERIFY = 2             # rounds of "the tests fail after your change"
 MAX_GOAL_ROUNDS = 6
@@ -158,7 +157,7 @@ class Agent:
         return self.session.system
 
     def request_messages(self):
-        return [{"role": "system", "content": self.system_prompt()}] + self.session.messages
+        return [{"role": "system", "content": self.system_prompt()}] + [_sendable(m) for m in self.session.messages]
 
     # ------------------------------------------------------------ warm start
 
@@ -292,7 +291,7 @@ class Agent:
         max_steps = circuit.step_budget(cfg, self.agent_def, local=client.on_device)
         self.breaker = circuit.Breaker()
         error = ""
-        acted = nudged = asked_empty = retried_call = False
+        acted = nudged = asked_empty = False
         try:
             while True:
                 if self.cancel.is_set():
@@ -301,18 +300,16 @@ class Agent:
                     answer = answer or "Stopped after %d steps without finishing." % max_steps
                     break
                 self._maybe_compact()
-                try:
-                    comp = self._call()
-                except providers.ProviderError as e:
-                    # llama.cpp could not read the tool call the model wrote (seen: a 2B model running away inside an
-                    # edit's arguments for 4096 tokens): the same request once more - its sampling differs
-                    if retried_call or not UNREADABLE_CALL.search(str(e)):
-                        raise
-                    retried_call = True
-                    self.step += 1
-                    self.emit({"type": "status", "text": "the model's tool call could not be read: asking again"})
-                    continue
+                comp = self._call()
                 self.step += 1
+                if comp.tool_calls and comp.finish == "length":
+                    # the output limit came inside a call: its arguments are not whole (a runaway edit of 4096
+                    # tokens, seen with a 2B model), and a repaired half would write half an edit - it is not run
+                    for c in comp.tool_calls:
+                        try:
+                            json.loads(c["arguments"] or "{}")
+                        except ValueError:
+                            c["cut_off"] = True
                 if not comp.tool_calls and comp.content and client.on_device:
                     # calls a model on this device wrote as text (<tool_call>, a json block, SEARCH/REPLACE...): run,
                     # not shown. (An API model makes its calls itself: a call it shows is an example, and stays text.)
@@ -536,7 +533,7 @@ class Agent:
         parsed = []
         for c in calls:
             # not quite JSON (a small model's): repaired; other agents' tool and argument names: made ours
-            args = repair.loads(c["arguments"])
+            args = None if c.get("cut_off") else repair.loads(c["arguments"])
             if args is not None:
                 c["name"], args = repair.normalize(c["name"], args, s.tool_names)
             parsed.append((c, args))
@@ -612,6 +609,11 @@ class Agent:
         s = self.session
         name = call["name"]
         cid = call["id"]
+        if args is None and call.get("cut_off"):
+            text = ("error: this call was cut off at the output limit before its arguments ended, so nothing was run. "
+                    "Make it again, smaller: with edit, only the few lines that change.")
+            self.emit({"type": "tool_end", "id": cid, "name": name, "ok": False, "text": text, "args": {}})
+            return text
         if args is None:
             text = "error: the arguments are not valid JSON: %s" % str(call.get("arguments"))[:300]
             self.emit({"type": "tool_end", "id": cid, "name": name, "ok": False, "text": text, "args": {}})
@@ -968,6 +970,24 @@ def shown(text):
     t = re.sub(r"</?think>", "", t).strip()
     bare = re.sub(r"^\(?(?:in )?one sentence\)?\s*[:\-\u2013\u2014]\s*", "", t, flags=re.I)   # ...or answering it
     return bare[:1].upper() + bare[1:] if bare != t else t
+
+
+def _sendable(m):
+    """A message as a request can carry it: tool call arguments that are not JSON (a thread saved before they were
+    put right) would make llama.cpp refuse the whole request. Unchanged messages stay the same objects."""
+    calls = m.get("tool_calls") if m.get("role") == "assistant" else None
+    if not calls:
+        return m
+    fixed, changed = [], False
+    for tc in calls:
+        fn = tc.get("function") or {}
+        args = fn.get("arguments")
+        good = providers.valid_arguments(args) if isinstance(args, str) or args is None else args
+        if good != args:
+            changed = True
+            tc = dict(tc, function=dict(fn, arguments=good))
+        fixed.append(tc)
+    return dict(m, tool_calls=fixed) if changed else m
 
 
 def _title(text):
