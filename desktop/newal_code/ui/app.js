@@ -250,7 +250,7 @@
     $("#project-chip").hidden = !root;
     $("#project-chip").textContent = base(root);
     $("#project-chip").title = root;
-    api("/api/commands?root=" + encodeURIComponent(root)).then(c => { S.commands = c; }).catch(() => {});
+    api("/api/commands?root=" + encodeURIComponent(root)).then(c => { S.commands = c; renderEmpty(); }).catch(() => {});
     if (root && !S.current) api("/api/git?root=" + encodeURIComponent(root)).then(d => { if (!S.current) $("#btn-sync").hidden = !d.git; }).catch(() => {});
     renderEmpty();
     renderSidebar();
@@ -370,6 +370,27 @@
       };
       box.appendChild(b);
     });
+    // One tap for the plugins' programs (⚡): run at once, or wait for their argument in the box
+    const quick = $("#quick");
+    const order = ["sysinfo", "create", "serve", "disk", "csv", "secrets", "clean", "ports", "programs", "rtl"];
+    const rank = c => (order.indexOf(c.name) + 1 || 99);
+    const cmds = S.root ? (S.commands || []).filter(c => c.instant && c.custom).sort((a, b) => rank(a) - rank(b)) : [];
+    quick.innerHTML = "";
+    quick.hidden = !S.root;
+    cmds.slice(0, 12).forEach(c => {
+      const b = h("button", "chip-btn", "⚡ /" + esc(c.name));
+      b.title = c.description;
+      b.onclick = () => {
+        if (/^</.test(c.args || "")) { $("#input").value = "/" + c.name + " "; autoGrow(); $("#input").focus(); }
+        else send("/" + c.name);
+      };
+      quick.appendChild(b);
+    });
+    if (S.root && !cmds.length) {
+      const b = h("button", "chip-btn", "⚡ Add NewAl's plugins");
+      b.onclick = openExtensions;
+      quick.appendChild(b);
+    }
   }
 
   // ------------------------------------------------------------------ rendering a thread
@@ -1593,7 +1614,7 @@
     const card = (name, desc, right) => '<div class="card"><div class="grow"><div class="name">' + name + '</div><div class="desc">' + desc + "</div></div>" + right + "</div>";
     const parts = has => (has || []).map(x => '<span class="badge">' + esc(x === "commands" ? "commands" : x) + "</span>").join(" ");
     const market = m => '<div class="section-title">' + (m.builtin ? "NewAl's plugins" : "Marketplace: " + esc(m.name)) +
-        (m.builtin ? ' <span class="badge good">built in · no download</span>' : ' <button class="mini-btn" data-mk-rm="' + esc(m.name) + '" title="Remove this marketplace">' + icon("trash") + "</button>") + "</div>" +
+        (m.builtin ? ' <span class="badge good">built in · no download</span>' + (m.plugins.some(p => !installed.has(p.name)) ? ' <button class="btn small" id="pl-all">Install all</button>' : "") : ' <button class="mini-btn" data-mk-rm="' + esc(m.name) + '" title="Remove this marketplace">' + icon("trash") + "</button>") + "</div>" +
         '<div class="card-list">' + list(m.plugins, p => card(esc(p.name) + " " + parts(p.has), esc(p.description || ""), installed.has(p.name) ?
           '<button class="btn small" data-pl-rm="' + esc(p.name) + '">Remove</button>' :
           '<button class="btn small primary" data-pl-add="' + esc(p.name + "@" + m.name) + '">Install</button>')) + "</div>";
@@ -1619,10 +1640,22 @@
       toast(busy, 60000);
       try { await api("/api/plugins", { action, source, root }); } catch (e) { toast(e.message, 9000); return; }
       toast("Done: new threads use it", 4000);
-      api("/api/commands?root=" + encodeURIComponent(root)).then(c => { S.commands = c; }).catch(() => {});
+      api("/api/commands?root=" + encodeURIComponent(root)).then(c => { S.commands = c; renderEmpty(); }).catch(() => {});
       openExtensions();
     };
     body.querySelector("#pl-add").onclick = () => act("install", body.querySelector("#pl-src").value.trim(), "Installing the plugin…");
+    const all = body.querySelector("#pl-all");
+    if (all) all.onclick = async () => {
+      const m = (d.marketplaces || []).find(x => x.builtin);
+      toast("Installing NewAl's plugins…", 60000);
+      for (const p of m.plugins.filter(p => !installed.has(p.name))) {
+        try { await api("/api/plugins", { action: "install", source: p.name + "@" + m.name, root }); }
+        catch (e) { toast(e.message, 9000); return; }
+      }
+      toast("Done: new threads use them", 4000);
+      api("/api/commands?root=" + encodeURIComponent(root)).then(c => { S.commands = c; renderEmpty(); }).catch(() => {});
+      openExtensions();
+    };
     body.querySelector("#mk-add").onclick = () => act("marketplace_add", body.querySelector("#mk-src").value.trim(), "Adding the marketplace…");
     body.querySelectorAll("[data-pl-add]").forEach(b => b.onclick = () => act("install", b.dataset.plAdd, "Installing " + b.dataset.plAdd + "…"));
     body.querySelectorAll("[data-pl-rm]").forEach(b => b.onclick = () => confirm("Remove the plugin " + b.dataset.plRm + "?") && act("remove", b.dataset.plRm, "Removing…"));
