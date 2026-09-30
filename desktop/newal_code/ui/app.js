@@ -183,6 +183,7 @@
     const sid = ev.session;
     if (ev.type === "turn_start" && !ev.sub) { S.busy.add(sid); if (!S.sessions.some(x => x.id === sid)) refreshSessions(); }
     if (ev.type === "turn_end" && !ev.sub) { S.busy.delete(sid); refreshSessions(); }
+    if (ev.type === "ci") { if (ev.state === "end") S.busy.delete(sid); else S.busy.add(sid); }   // /ci: busy between its turns too
     if (ev.type === "session_created") refreshSessions();
     if (ev.type === "download") return onDownload(ev);
     if (ev.type && ev.type.startsWith("terminal_")) return onTerminal(ev);
@@ -460,6 +461,7 @@
     if (name === "task") return esc(a.agent || "worker") + ": " + esc((a.prompt || "").slice(0, 160));
     if (name === "skill") return esc(a.name || "");
     if (name === "job") return esc((a.action || "output") + " " + (a.id || ""));
+    if (name === "github") return esc((a.action || "") + " " + (a.number || a.title || ""));
     if (name.startsWith("mcp__")) { const p = name.split("__"); return esc(p[1] + " · " + p.slice(2).join("__")); }
     return esc(a.path || a.file_path || "");
   }
@@ -676,6 +678,21 @@
       case "notice":
         turnBox().turn.appendChild(h("div", "notice", esc(ev.text || "")));
         break;
+      case "ci": {
+        // /ci: what GitHub Actions says, live while it runs; each step (push, a fix, the end) stays in the thread
+        const X = turnBox();
+        if (ev.state === "watching") {
+          if (!replay) { ensureWorking(ev.text.split("\n")[0]); setBusyUI(true); }
+          break;
+        }
+        const end = ev.state === "end";
+        const n = h("div", "notice" + (end && !ev.ok ? " error" : ""), "⚙ " + esc(ev.text || ""));
+        n.dir = "auto";
+        X.turn.appendChild(n);
+        if (!replay) { if (end) { stopWorking(); setBusyUI(false); } else { ensureWorking("CI"); setBusyUI(true); } }
+        scrollDown();
+        break;
+      }
       case "error":
         turnBox().turn.appendChild(h("div", "notice error", esc(ev.message || "error")));
         break;

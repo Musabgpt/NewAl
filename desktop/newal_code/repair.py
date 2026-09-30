@@ -29,6 +29,7 @@ TOOL_ALIASES = {
     "Grep": "grep", "search_files": "grep", "codebase_search": "grep",
     "list_files": "glob", "find_files": "glob", "fd": "glob", "file_search": "glob", "Glob": "glob", "ls": "glob",
     "list_dir": "glob",
+    "github_cli": "github", "gh": "github", "github_actions": "github",
     "manage_background_process": "job", "background_process": "job", "process": "job",
     "fetch": "web_fetch", "fetch_url": "web_fetch", "WebFetch": "web_fetch",
     "web": "web_search", "WebSearch": "web_search",

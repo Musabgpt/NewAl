@@ -19,8 +19,9 @@ ALLOW, ASK, DENY = "allow", "ask", "deny"
 TOOL_NAMES = {"bash": "Bash", "edit": "Edit", "write": "Write", "apply_patch": "Edit", "read": "Read", "glob": "Glob",
               "grep": "Grep", "web_fetch": "WebFetch", "web_search": "WebSearch", "task": "Task", "todo": "TodoWrite", "skill": "Skill",
               "job": "BashOutput", "notebook_edit": "NotebookEdit", "phone": "Phone",
-              "powershell": "PowerShell"}
+              "powershell": "PowerShell", "github": "GitHub"}
 COMMAND_TOOLS = ("bash", "powershell")
+GITHUB_LOOKS = ("runs", "run", "logs", "prs", "pr", "issues", "issue")     # the github tool's actions that only look
 
 # Commands that only look: fine in every mode.
 READ_ONLY_CMD = re.compile(
@@ -104,7 +105,7 @@ def matches(rule, tool, args, root=""):
             d = spec[len("domain:"):]
             return host == d or host.endswith("." + d)
         return fnmatch.fnmatch(str(args.get("url") or ""), spec)
-    if canonical == "Phone":
+    if canonical in ("Phone", "GitHub"):
         return fnmatch.fnmatch(str(args.get("action") or ""), spec)
     path = _path_arg(args)
     if tool == "apply_patch":
@@ -162,7 +163,8 @@ def decide(mode, tool, kind, args, root, rules, inside_root=True, sandboxed=Fals
         if matches(r, tool, args, root):
             return Decision(ALLOW, "allowed by rule %s" % r)
 
-    if kind in ("read", "meta") or (kind == "phone" and _phone_looks(args)):
+    if kind in ("read", "meta") or (kind == "phone" and _phone_looks(args)) or \
+            (kind == "github" and str(args.get("action") or "") in GITHUB_LOOKS):
         return Decision(ALLOW)
     if mode == "full-auto":
         return Decision(ALLOW)
@@ -186,6 +188,10 @@ def decide(mode, tool, kind, args, root, rules, inside_root=True, sandboxed=Fals
         if mode == "auto-edit":
             return Decision(ALLOW)
         return Decision(ASK, "fetch %s" % (args.get("url") or "a web page"))
+    if kind == "github":
+        if mode == "read-only":
+            return Decision(DENY, "read-only mode: GitHub is only looked at (runs, logs, issues, pull requests)")
+        return Decision(ASK, "GitHub: %s %s" % (args.get("action") or "?", args.get("number") or args.get("title") or ""))
     if kind == "phone":
         if mode == "read-only":
             return Decision(DENY, "read-only mode: the phone is only looked at (screen, apps, battery)")
@@ -221,6 +227,6 @@ def always_rule(tool, args):
     if tool == "web_fetch":
         host = urllib.parse.urlsplit(str(args.get("url") or "")).hostname or ""
         return "WebFetch(domain:%s)" % host if host else "WebFetch"
-    if tool == "phone":
-        return "Phone(%s)" % (args.get("action") or "*")
+    if tool in ("phone", "github"):
+        return "%s(%s)" % (canonical, args.get("action") or "*")
     return canonical

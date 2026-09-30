@@ -34,6 +34,7 @@ BUILTIN_COMMANDS = [
     ("security-review", "[focus]", "Review the changes for security problems (a reviewer sub-agent)"),
     ("sync", "", "Pull the remote's changes, then push this branch's (git, with NewAl Code's GitHub sign-in)"),
     ("issues", "[number]", "The GitHub repository's open issues; with a number, work on that issue"),
+    ("ci", "[tries]", "Watch this commit's GitHub Actions; when a job fails, fix it, commit, push and watch again"),
     ("permissions", "", "Show the permission mode and the allow / ask / deny rules"),
     ("export", "", "Save this thread as Markdown in the project"),
     ("memory", "", "Show the instruction files (# <note> adds a note to AGENTS.md)"),
@@ -221,6 +222,8 @@ class Service:
             return {"started": False, "reply": remember(s.root, text[1:].strip())}
         if text.startswith("/") and not text.startswith("//"):
             out = self.command(s, text, lang=lang)
+            if out.get("run"):
+                return self.start(sid, out.pop("run"), out)         # a command that works in the background (/ci)
             if out.get("prompt") is None:
                 return out
             text = out["prompt"]
@@ -235,6 +238,34 @@ class Service:
             self.threads[sid] = t
         t.start()
         return {"started": True, "session": sid}
+
+    def start(self, sid, target, out=None):
+        """Runs target in the thread's background (the thread is busy until it ends)."""
+        if self.busy(sid):
+            return {"started": False, "reply": "busy: this thread is still working (interrupt it first)"}
+        t = threading.Thread(target=target, daemon=True)
+        with self.lock:
+            self.threads[sid] = t
+        t.start()
+        return dict(out or {}, started=True, session=sid)
+
+    def ci(self, sid, tries):
+        """/ci in the background: GitHub Actions watched and fixed until green (ci.py); ends with a "ci" event whose
+        state is "end"."""
+        from . import ci
+        a = self.agent(sid)
+        a.cancel.clear()
+        a.emit({"type": "ci", "state": "start", "text": "Looking at GitHub Actions for this commit..."})
+        try:
+            ok, text = ci.heal(a, tries)
+        except ci.Stopped:
+            ok, text = False, "Stopped watching CI."
+        except ci.CIError as e:
+            ok, text = False, "CI: %s" % e
+        except Exception as e:  # noqa: BLE001 - reported to the interface
+            ok, text = False, "CI: %s: %s" % (type(e).__name__, e)
+        a.emit({"type": "ci", "state": "end", "ok": ok, "text": text})
+        return ok, text
 
     def _turn(self, sid, text, images):
         a = self.agent(sid)
@@ -372,6 +403,14 @@ class Service:
         if name == "issues":
             from . import github
             return github.issues_command(s.root, args)
+        if name == "ci":
+            from . import ci
+            try:
+                ci.repo(s.root)
+            except ci.CIError as e:
+                return {"reply": str(e)}
+            tries = int(args) if args.isdigit() else ci.TRIES
+            return {"run": lambda: self.ci(s.id, tries)}
         if name == "sync":
             from . import sync
             ok, text = sync.sync(s.root)

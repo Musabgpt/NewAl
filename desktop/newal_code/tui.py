@@ -146,6 +146,10 @@ class Printer:
             self.last_usage = ev
         elif t == "goal_check":
             self.w(c(MAGENTA, "🎯 " + ev.get("text", "")))
+        elif t == "ci" and ev.get("text"):
+            self.end_text()
+            color = (GREEN if ev.get("ok") else RED) if ev.get("state") == "end" else CYAN
+            self.w(c(color, "⚙ " + ev["text"]))
         elif t in ("notice", "status") and ev.get("text"):
             self.end_text()
             self.w(c(DIM, ev["text"]))
@@ -286,6 +290,7 @@ def run(root, model=None, mode=None, prompt=None, resume=None, dirs=()):
         text = text.strip()
         if not text:
             continue
+        job = None
         if text.startswith("/") and not text.startswith("//"):
             out = svc.command(s, text)
             if out.get("exit"):
@@ -302,14 +307,18 @@ def run(root, model=None, mode=None, prompt=None, resume=None, dirs=()):
                     print(reply)                     # what a command's program printed
                 else:
                     print(c(DIM, reply))
-            if out.get("prompt") is None:
+            if out.get("run"):
+                job = out["run"]
+            elif out.get("prompt") is None:
                 continue
-            text = out["prompt"]
-            if out.get("read_only"):
-                svc.plan_turn.add(s.id)
+            else:
+                text = out["prompt"]
+                if out.get("read_only"):
+                    svc.plan_turn.add(s.id)
         old = signal.signal(signal.SIGINT, on_sigint)
         try:
-            t = threading.Thread(target=svc._turn, args=(s.id, text, None), daemon=True)
+            run = job or (lambda t=text: svc._turn(s.id, t, None))
+            t = threading.Thread(target=run, daemon=True)
             svc.threads[s.id] = t
             t.start()
             while t.is_alive():
@@ -375,6 +384,22 @@ def exec_once(root, prompt, model=None, mode="auto-edit", json_out=False, full_a
                 sys.stdout.flush()
         else:
             printer.event(ev)
+    if prompt.strip().split(" ")[0].lower() == "/ci":
+        # CI that fixes itself, without an interface: exit code 0 when this commit's GitHub Actions end green
+        from . import ci
+        args = prompt.strip()[3:].strip()
+        try:
+            ok, text = ci.heal(Agent(s, emit=emit, approve=None), int(args) if args.isdigit() else ci.TRIES)
+        except (ci.CIError, ci.Stopped) as e:
+            ok, text = False, str(e) or "stopped"
+        if json_out:
+            sys.stdout.write(json.dumps({"type": "ci", "state": "end", "ok": ok, "text": text}, ensure_ascii=False) + "\n")
+        else:
+            print(text)
+        if output:
+            with open(output, "w", encoding="utf-8") as f:
+                f.write(text + "\n")
+        return 0 if ok else 1
     if prompt.startswith("/") and not prompt.startswith("//"):
         # a custom command: a program runs now and prints (its exit code is exec's); a prompt goes to the agent
         from . import extensions

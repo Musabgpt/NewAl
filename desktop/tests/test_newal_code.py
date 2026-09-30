@@ -1259,6 +1259,252 @@ class GitHubTest(unittest.TestCase):
         self.assertFalse(github.account()["connected"])
 
 
+CI_LOG = "\n".join("2026-09-30T10:00:%02d.1234567Z %s" % (i % 60, line) for i, line in enumerate([
+    "##[group]Run actions/checkout@v4", "with:", "  repository: musab/newal", "##[endgroup]",
+    "Syncing repository: musab/newal",
+    "##[group]Run python -m pytest -q", "\x1b[36;1mpython -m pytest -q\x1b[0m", "shell: /usr/bin/bash -e {0}",
+    "##[endgroup]",
+    "F                                                                        [100%]",
+    "=================================== FAILURES ===================================",
+    "___________________________________ test_add ___________________________________", "",
+    "    def test_add():", ">       assert add(2, 3) == 5", "E       assert -1 == 5", "E        +  where -1 = add(2, 3)",
+    "", "test_calc.py:5: AssertionError",
+    "=========================== short test summary info ============================",
+    "FAILED test_calc.py::test_add - assert -1 == 5", "\x1b[31m1 failed\x1b[0m in 0.03s",
+    "##[error]Process completed with exit code 1.", "Post job cleanup."]))
+
+
+class CITest(unittest.TestCase):
+    """/ci end to end: a real repository and a real push (to a bare repository standing in for github.com), GitHub
+    Actions answered by a fake API (a run in progress, then failed, its job's log behind a redirect), and the agent
+    fixing the code; the fix is committed and pushed, and the new commit's run is watched until it is green."""
+
+    def setUp(self):
+        from unittest import mock
+        from fake_github import FakeGitHub
+        self.top = tempfile.mkdtemp(prefix="nc-ci-")
+        self.addCleanup(shutil.rmtree, self.top, True)
+        self.gh = FakeGitHub()
+        self.addCleanup(self.gh.close)
+        env = mock.patch.dict(os.environ, {"NEWAL_GITHUB_API": self.gh.url, "GH_TOKEN": "ghp_" + "c" * 36,
+                                           "GIT_CONFIG_NOSYSTEM": "1"})
+        env.start()
+        self.addCleanup(env.stop)
+        # a path that ends in github.com/musab/newal.git: this project's origin "is on GitHub", and pushes work
+        self.bare = os.path.join(self.top, "github.com", "musab", "newal.git")
+        subprocess.run(["git", "init", "-q", "--bare", "-b", "main", self.bare], check=True)
+        self.root = os.path.join(self.top, "work")
+        subprocess.run(["git", "init", "-q", "-b", "main", self.root], check=True)
+        for name, text in CALC.items():
+            with open(os.path.join(self.root, name), "w", newline="\n") as f:
+                f.write(text)
+        with open(os.path.join(self.root, "notes.txt"), "w") as f:
+            f.write("mine\n")
+        for cmd in (["add", "-A"], ["commit", "-q", "-m", "add()"], ["remote", "add", "origin", self.bare],
+                    ["push", "-q", "-u", "origin", "main"]):
+            subprocess.run(["git"] + cmd, cwd=self.root, check=True)
+        self.broken = self.head()
+        self.looks = {}
+
+        def runs(m, b, h):
+            sha = re.search(r"head_sha=(\w+)", m.group(0)).group(1)
+            n = self.looks[sha] = self.looks.get(sha, 0) + 1
+            if sha == self.broken or self.always_red:
+                done = n > 1                                       # the first look: still running
+                return 200, {"total_count": 1, "workflow_runs": [{
+                    "id": 100 + len(self.looks), "name": "Tests", "head_sha": sha, "event": "push",
+                    "status": "completed" if done else "in_progress", "conclusion": "failure" if done else None,
+                    "html_url": "https://github.com/musab/newal/actions/runs/1"}]}, {}
+            return 200, {"total_count": 1, "workflow_runs": [{"id": 200, "name": "Tests", "head_sha": sha,
+                                                              "status": "completed", "conclusion": "success"}]}, {}
+        self.always_red = False
+        self.gh.route("GET", r"/repos/musab/newal/actions/runs\?head_sha=\w+&per_page=100", runs)
+        self.gh.route("GET", r"/repos/musab/newal/actions/runs/\d+/jobs\?filter=latest&per_page=100",
+                      lambda m, b, h: (200, {"jobs": [{"id": 555, "name": "pytest (ubuntu)", "status": "completed", "conclusion": "failure",
+                                                       "html_url": "https://github.com/musab/newal/job/555",
+                                                       "steps": [{"name": "Set up job", "conclusion": "success"},
+                                                                 {"name": "Run tests", "conclusion": "failure"}]}]}, {}))
+        self.gh.route("GET", r"/repos/musab/newal/actions/jobs/555/logs",
+                      lambda m, b, h: (302, b"", {"Location": self.gh.url + "/blob/555.txt?sig=x"}))
+        self.gh.route("GET", r"/blob/555\.txt\?sig=x", lambda m, b, h: (200, CI_LOG.encode(), {}))
+
+    def head(self):
+        return subprocess.run(["git", "rev-parse", "HEAD"], cwd=self.root, capture_output=True,
+                              text=True).stdout.strip()
+
+    def remote_log(self):
+        return subprocess.run(["git", "--git-dir", self.bare, "log", "--format=%s", "main"], capture_output=True,
+                              text=True).stdout.split("\n")
+
+    def agent(self, script, mode="auto-edit"):
+        llm = FakeLLM(script)
+        self.addCleanup(llm.close)
+        s = session.Session(self.root, mode=mode)
+        events = []
+        return agentmod.Agent(s, emit=events.append, approve=lambda r: "once", client=fake_client(llm)), events, llm
+
+    def test_the_log_excerpt_is_the_failed_step(self):
+        from newal_code import ci
+        text = ci.excerpt(CI_LOG)
+        self.assertTrue(text.startswith("$ python -m pytest -q\n"), text)
+        for part in ("E       assert -1 == 5", "FAILED test_calc.py::test_add", "1 failed in 0.03s",
+                     "Error: Process completed with exit code 1."):
+            self.assertIn(part, text)
+        for gone in ("Syncing repository", "Post job cleanup", "2026-09-30T", "\x1b[", "shell: /usr/bin/bash"):
+            self.assertNotIn(gone, text)
+        short = ci.excerpt(CI_LOG, limit=300)                   # a long log: its end, where the errors are
+        self.assertIn("lines above", short)
+        self.assertIn("FAILED test_calc.py::test_add", short)
+        self.assertIn("warning: disk", ci.excerpt("2026-01-01T00:00:00Z a\n2026-01-01T00:00:01Z warning: disk\n"))
+
+    def test_a_red_run_is_fixed_committed_pushed_and_watched_until_green(self):
+        from newal_code import ci
+        with open(os.path.join(self.root, "notes.txt"), "a") as f:
+            f.write("not committed\n")                          # the user's own work: stays out of the fix
+        with open(os.path.join(self.root, "draft.txt"), "w") as f:
+            f.write("draft\n")
+        ag, events, llm = self.agent([{"tools": [("edit", {"path": "calc.py", "old": "return a - b",
+                                                            "new": "return a + b"})]},
+                                      "Fixed add(): it subtracted instead of adding."])
+        said = []
+        ok, text = ci.heal(ag, say=lambda st, t: said.append((st, t)), poll=0.05)
+        self.assertTrue(ok, text)
+        fixed = self.head()
+        self.assertEqual(text, "CI is green for %s: Tests ✓" % fixed[:7])
+        prompt = next(m["content"] for m in llm.requests[0]["messages"] if m["role"] == "user")
+        for part in ("GitHub Actions failed on musab/newal (branch main, commit %s)" % self.broken[:7],
+                     "## Tests / pytest (ubuntu) (failed step: Run tests)", "$ python -m pytest -q",
+                     "E       assert -1 == 5", "never skip, disable or delete a test"):
+            self.assertIn(part, prompt)
+        self.assertEqual(self.remote_log()[:2], ["Fix CI: Tests / pytest (ubuntu)", "add()"])       # pushed
+        body = subprocess.run(["git", "log", "-1", "--format=%b"], cwd=self.root, capture_output=True,
+                              text=True).stdout
+        self.assertIn("Fixed add(): it subtracted instead of adding.", body)
+        files = subprocess.run(["git", "show", "--name-only", "--format=", "HEAD"], cwd=self.root,
+                               capture_output=True, text=True).stdout.split()
+        self.assertEqual(files, ["calc.py"])
+        status = subprocess.run(["git", "status", "--porcelain"], cwd=self.root, capture_output=True,
+                                text=True).stdout
+        self.assertIn(" M notes.txt", status)
+        self.assertIn("?? draft.txt", status)
+        states = [st for st, _ in said]
+        self.assertEqual(states[:3], ["watching", "watching", "fixing"])
+        self.assertIn("Tests … in progress", said[0][1])
+        self.assertIn("Tests ✗", said[1][1])
+        self.assertIn("pushed", states)
+        self.assertEqual(self.gh.calls("GET", "/blob/555.txt")[0]["auth"], None)     # the log's storage: no token
+        self.assertTrue(self.gh.calls("GET", "/repos/musab/newal/actions/jobs/555/logs")[0]["auth"])
+
+    def test_it_gives_up_after_its_tries_and_pushes_nothing_half_done(self):
+        from newal_code import ci
+        self.always_red = True
+        ag, _, _ = self.agent([{"tools": [("edit", {"path": "calc.py", "old": "return a - b",
+                                                     "new": "return a - b  # checked"})]}, "Added a note."])
+        ag.cfg["verify"] = False
+        ok, text = ci.heal(ag, tries=1, say=lambda st, t: None, poll=0.01)
+        self.assertFalse(ok)
+        self.assertIn("Still failing after 1 fix: Tests / pytest (ubuntu)", text)
+        self.assertEqual(self.remote_log()[0], "Fix CI: Tests / pytest (ubuntu)")
+        # a fix the circuit breaker stopped is not committed
+        ag, _, _ = self.agent([{"tools": [("bash", {"command": "false"})]}] * 3)
+        before = self.head()
+        ok, text = ci.heal(ag, tries=1, say=lambda st, t: None, poll=0.01)
+        self.assertFalse(ok)
+        self.assertIn("The fix did not finish: Stopped: bash failed 3 times the same way", text)
+        self.assertEqual(self.head(), before)
+
+    def test_no_runs_and_read_only(self):
+        from newal_code import ci
+        self.gh.reply("GET", r"/repos/musab/newal/actions/runs\?head_sha=\w+&per_page=100",
+                      {"total_count": 0, "workflow_runs": []})
+        ag, _, _ = self.agent([])
+        ok, text = ci.heal(ag, say=lambda st, t: None, poll=0.01, appear=0.05)
+        self.assertFalse(ok)
+        self.assertIn("No GitHub Actions run started for %s" % self.broken[:7], text)
+        self.gh.routes = self.gh.routes[1:]                       # the red run again
+        ag, _, llm = self.agent([], mode="read-only")
+        ok, text = ci.heal(ag, say=lambda st, t: None, poll=0.01)
+        self.assertFalse(ok)
+        self.assertIn("E       assert -1 == 5", text)
+        self.assertIn("(read-only mode: nothing is fixed.)", text)
+        self.assertEqual(llm.requests, [])
+
+    def test_the_command_runs_in_the_background_and_says_how_it_ended(self):
+        from unittest import mock
+        from newal_code import ci, service
+        svc = service.Service()
+        s = svc.create(self.root, mode="auto-edit")
+        llm = FakeLLM([{"tools": [("edit", {"path": "calc.py", "old": "return a - b", "new": "return a + b"})]},
+                       "Fixed add()."])
+        self.addCleanup(llm.close)
+        svc.agent(s.id).client = fake_client(llm)
+        q = svc.subscribe()
+        with mock.patch.object(ci, "POLL", 0.05):
+            r = svc.send(s.id, "/ci")
+            self.assertTrue(r["started"])
+            self.assertEqual(svc.send(s.id, "/ci")["reply"], "busy: this thread is still working (interrupt it first)")
+            svc.threads[s.id].join(60)
+        events = []
+        while not q.empty():
+            events.append(q.get())
+        ci_events = [e for e in events if e.get("type") == "ci"]
+        self.assertEqual(ci_events[0]["state"], "start")
+        self.assertEqual(ci_events[-1]["state"], "end")
+        self.assertTrue(ci_events[-1]["ok"], ci_events[-1]["text"])
+        self.assertIn("CI is green for", ci_events[-1]["text"])
+        self.assertTrue(any(e.get("type") == "turn_end" for e in events))           # the fix was an agent turn
+        self.assertEqual(svc.command(s, "/help")["reply"].count("/ci [tries]"), 1)
+        not_git = service.Service().create(make_project({}))
+        self.assertIn("not a git repository", svc.command(not_git, "/ci")["reply"])
+
+    def test_the_github_tool(self):
+        from newal_code import ci
+        self.gh.reply("GET", r"/repos/musab/newal/actions/runs\?branch=main&per_page=15", {"workflow_runs": [
+            {"id": 101, "name": "Tests", "status": "completed", "conclusion": "failure", "head_sha": self.broken,
+             "created_at": "2026-09-30T10:00:00Z"}]})
+        self.gh.reply("GET", r"/repos/musab/newal/actions/runs/101", {"name": "Tests", "status": "completed",
+                                                                      "conclusion": "failure", "head_sha": self.broken})
+        self.gh.reply("POST", r"/repos/musab/newal/actions/runs/101/rerun-failed-jobs", None, status=201)
+        self.gh.reply("GET", r"/repos/musab/newal/pulls\?state=open&per_page=20", [
+            {"number": 9, "title": "Faster sums", "head": {"ref": "sums"}, "base": {"ref": "main"},
+             "user": {"login": "sara"}, "updated_at": "2026-09-29T00:00:00Z"}])
+        self.gh.reply("POST", r"/repos/musab/newal/issues/9/comments", {"html_url": "https://github.com/c/1"})
+        ag, _, _ = self.agent([])
+        c = agentmod.ToolContext(ag)
+        text, _ = tools.call(c, "github", {"action": "runs"})
+        self.assertIn("101  Tests ✗  %s (this commit)" % self.broken[:7], text)
+        text, _ = tools.call(c, "github", {"action": "run", "number": "101"})
+        self.assertIn("pytest (ubuntu): ✗", text)
+        self.assertIn("failed step: Run tests", text)
+        text, meta = tools.call(c, "github", {"action": "logs", "number": "101"})
+        self.assertIn("E       assert -1 == 5", text)
+        self.assertEqual(meta, {"failed_jobs": 1})
+        text, _ = tools.call(c, "github", {"action": "rerun", "number": "#101"})
+        self.assertIn("Run 101: its failed jobs run again", text)
+        text, _ = tools.call(c, "github", {"action": "prs"})
+        self.assertIn("#9 Faster sums (sums -> main, @sara", text)
+        text, _ = tools.call(c, "github", {"action": "comment", "number": "9", "body": "Looks good."})
+        self.assertEqual(self.gh.calls("POST", "/repos/musab/newal/issues/9/comments")[0]["body"],
+                         {"body": "Looks good."})
+        with self.assertRaises(tools.ToolError):
+            tools.call(c, "github", {"action": "logs"})               # a run id is needed
+        self.assertIn("github", tools.default_set(root=self.root))    # offered in a GitHub project...
+        self.assertNotIn("github", tools.default_set(root=make_project({})))     # ...and only there
+        from newal_code import repair
+        self.assertEqual(repair.normalize("github_cli", {"action": "runs"}, ["github", "bash"])[0], "github")
+        d = permissions.decide
+        self.assertEqual(d("ask", "github", "github", {"action": "logs"}, self.root, {}).action, permissions.ALLOW)
+        self.assertEqual(d("auto-edit", "github", "github", {"action": "rerun"}, self.root, {}).action,
+                         permissions.ASK)
+        self.assertEqual(d("read-only", "github", "github", {"action": "comment"}, self.root, {}).action,
+                         permissions.DENY)
+        self.assertEqual(d("full-auto", "github", "github", {"action": "create_pr"}, self.root, {}).action,
+                         permissions.ALLOW)
+        self.assertEqual(d("ask", "github", "github", {"action": "rerun"}, self.root,
+                           {"allow": ["GitHub(rerun)"]}).action, permissions.ALLOW)
+        self.assertEqual(permissions.always_rule("github", {"action": "comment"}), "GitHub(comment)")
+
+
 class MiniGitTest(unittest.TestCase):
     """The phone's git (dulwich behind git's commands) against the computer's git: the same steps, the same output,
     the same commits."""

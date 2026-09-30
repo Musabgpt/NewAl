@@ -1163,6 +1163,31 @@ def t_skill(ctx, name):
     return s["body"] + extra, {"skill": name}
 
 
+# ------------------------------------------------------------------ GitHub
+
+@tool("github", "This project's GitHub repository (its origin), through GitHub's API. action=runs: the latest GitHub "
+      "Actions runs of this branch; run (number=run id): its jobs and failed steps; logs (number=run id): the failed "
+      "jobs' logs where the error is; rerun (number=run id): its failed jobs again; prs, issues: the open ones; pr, "
+      "issue (number): one with its comments; comment (number, body); create_pr (title, body): a pull request from "
+      "this branch.",
+      {"action": _s("runs, run, logs, rerun, prs, pr, issues, issue, comment or create_pr"),
+       "number": _s("a run id, or an issue or pull request number"), "title": _s("create_pr: the title"),
+       "body": _s("comment, create_pr: the text")}, ["action"], "github")
+def t_github(ctx, action, number="", title="", body=""):
+    from . import ci, github
+    try:
+        text, meta = ci.tool(ctx.root, str(action).strip().lower(), number, title, body)
+    except (ci.CIError, github.GitHubError) as e:
+        raise ToolError(str(e))
+    return clip(text, 12000), meta
+
+
+def on_github(root):
+    """Whether the project's origin is a GitHub repository (the github tool is offered then)."""
+    from . import cloud
+    return bool(root and cloud.repo_of(root))
+
+
 # ------------------------------------------------------------------ the phone (NewAl Code Lite)
 
 def _phone_tool():
@@ -1204,6 +1229,8 @@ def default_set(model_profile=None, root=None):
         names.insert(names.index("bash") + 1, "powershell")
     if settings.user().get("web", True):
         names += ["web_search", "web_fetch"]
+    if on_github(root):
+        names.append("github")
     from . import phone
     if phone.available():
         names.append("phone")
