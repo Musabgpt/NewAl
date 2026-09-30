@@ -84,7 +84,7 @@ mkdir -p "$H" "$HOME/projects"
 chmod 700 "$HOME/.newal-code" "$H"
 printf '%s' "$KEY" > "$H/key"
 chmod 600 "$H/key"
-curl -fsSL -H "X-NewAl-Key: $KEY" "$APP/termux/app.zip" -o "$H/app.zip"
+curl -fsSL --retry 20 --retry-connrefused --retry-delay 3 -H "X-NewAl-Key: $KEY" "$APP/termux/app.zip" -o "$H/app.zip"
 rm -rf "$H/app.new"
 python -c 'import sys, zipfile; zipfile.ZipFile(sys.argv[1]).extractall(sys.argv[2])' "$H/app.zip" "$H/app.new"
 rm -rf "$H/app" && mv "$H/app.new" "$H/app"
@@ -121,7 +121,7 @@ case "${1:-start}" in
   status) if up; then echo "running"; else echo "stopped"; fi ;;
   update)
     APP="$(python -c 'import json,os; print(json.load(open(os.path.expanduser("~/.newal-code/phone.json")))["app"])')"
-    curl -fsSL -H "X-NewAl-Key: $NEWAL_SERVER_KEY" "$APP/termux/app.zip" -o "$H/app.zip" && rm -rf "$H/app.new" &&
+    curl -fsSL --retry 20 --retry-connrefused --retry-delay 3 -H "X-NewAl-Key: $NEWAL_SERVER_KEY" "$APP/termux/app.zip" -o "$H/app.zip" && rm -rf "$H/app.new" &&
       python -c 'import sys, zipfile; zipfile.ZipFile(sys.argv[1]).extractall(sys.argv[2])' "$H/app.zip" "$H/app.new" &&
       rm -rf "$H/app" && mv "$H/app.new" "$H/app" && "$0" stop; "$0" start ;;
   *) echo "newal-termux start | stop | status | update"; exit 2 ;;

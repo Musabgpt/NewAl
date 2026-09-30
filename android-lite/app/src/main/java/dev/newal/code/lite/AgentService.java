@@ -18,6 +18,7 @@ import android.util.Log;
 public class AgentService extends Service {
     private static final String CHANNEL = "newal";
     private static Process python;
+    private static volatile boolean stopping;
     static volatile String error = "";
 
     @Override
@@ -27,6 +28,7 @@ public class AgentService extends Service {
 
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
+        stopping = false;
         foreground();
         new Thread(this::ensureRunning, "newal-start").start();
         return START_STICKY;
@@ -62,14 +64,47 @@ public class AgentService extends Service {
             PhoneServer.start(this, s.key());
             python = s.start();
             error = "";
+            watch(python);
         } catch (Exception e) {
             error = String.valueOf(e);
             Log.e("NewAlCode", "cannot start", e);
         }
     }
 
+    /**
+     * NewAl Code started again when it ends while the app runs: Android may kill it to free memory (a 3 GB phone
+     * installing Termux's packages with a model loaded did), and without it the app shows nothing. At most five
+     * restarts in ten minutes (a crash on start would not end).
+     */
+    private void watch(Process p) {
+        new Thread(() -> {
+            try {
+                int code = p.waitFor();
+                if (stopping) {
+                    return;
+                }
+                Log.w("NewAlCode", "NewAl Code ended (" + code + "): starting it again");
+                long now = System.currentTimeMillis();
+                synchronized (AgentService.class) {
+                    restarts.removeIf(t -> now - t > 600_000);
+                    if (restarts.size() >= 5) {
+                        error = "NewAl Code keeps stopping (exit " + code + ")";
+                        return;
+                    }
+                    restarts.add(now);
+                }
+                Thread.sleep(1500);
+                ensureRunning();
+            } catch (InterruptedException ignored) {
+            }
+        }, "newal-watch").start();
+    }
+
+    private static final java.util.List<Long> restarts = new java.util.ArrayList<>();
+
     @Override
     public void onDestroy() {
+        stopping = true;
         if (python != null) {
             python.destroy();          // SIGTERM: NewAl Code stops its models, then exits
         }

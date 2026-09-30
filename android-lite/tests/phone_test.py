@@ -229,6 +229,25 @@ def features(state):
     adb("shell", "am", "start", "-n", PKG + "/.MainActivity", check=False)
 
 
+def wait_up(limit=120):
+    """The app's NewAl Code answering (after Android killed it, the app starts it again)."""
+    t = time.time()
+    while time.time() - t < limit:
+        try:
+            return api("/api/state", timeout=10)
+        except Exception:  # noqa: BLE001 - not up yet
+            time.sleep(3)
+    return None
+
+
+def why_down():
+    """What the app and Android said: NewAl Code's log and the low-memory killer's lines."""
+    log = adb("shell", "tail", "-n", "40", "/data/data/%s/files/newal.log" % PKG, check=False)
+    kills = [line for line in adb("logcat", "-d", "-t", "3000", check=False).splitlines()
+             if re.search(r"lowmemorykiller|lmkd|NewAlCode|Killing .*newal|am_kill", line)]
+    print("newal.log:\n%s\nAndroid:\n%s" % (log[-3000:], "\n".join(kills[-40:])), flush=True)
+
+
 def termux_apk():
     """Termux's newest release for this emulator (its GitHub build, which adb may run commands in)."""
     path = os.path.join(tempfile.gettempdir(), "termux.apk")
@@ -266,6 +285,9 @@ def termux(state, model):
     code, out = in_termux(cmd, timeout=1500)
     print(out[-3000:], flush=True)
     check("termux: set up with the app's command", code == 0 and "runs in Termux" in out, out[-600:])
+    if "runs in Termux" not in out:
+        why_down()
+        return
     adb("forward", "tcp:8791", "tcp:8791")
     st = api("/api/state", timeout=20, base=TERMUX_BASE)
     check("termux: NewAl Code answers in Termux with the app's key", st.get("name") == "NewAl Code", st.get("home"))
@@ -316,6 +338,7 @@ def layout():
 def storage(model):
     """A GGUF file the user already has in the phone's Download folder: listed in Models once the app may read the
     phone's files (All files access, given here with appops as the user gives it in Settings), and it runs."""
+    check("storage: the app answers", wait_up() is not None)
     listing = api("/api/models")
     mine = next(m for m in listing["models"] if m["id"] == model)
     src = mine.get("file") or ""
