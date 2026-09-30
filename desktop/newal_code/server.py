@@ -210,6 +210,10 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/api/system":
                 from . import system
                 return self._json(system.status())
+            if path == "/api/doctor":
+                from . import health
+                items = health.checks(quick=bool(q.get("quick")))
+                return self._json({"checks": items, "report": health.report(items)})
             if path == "/api/github":
                 from . import github
                 return self._json(github.account())

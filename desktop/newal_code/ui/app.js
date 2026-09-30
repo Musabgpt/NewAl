@@ -1207,6 +1207,50 @@
     box.querySelector("#sys-term").onclick = () => api("/api/system", { action: "terminal_here", root: S.root || "" }).catch(e => toast(e.message));
   }
 
+  async function openHealth() {
+    // Check everything: what NewAl Code needs here, each with its fix, and a report to copy (to send when asking
+    // for help). On the phone, Android's permissions and Termux too.
+    const body = h("div", "health", '<div class="muted">Checking…</div>');
+    modal("Check everything", body);
+    let d;
+    try { d = await api("/api/doctor"); } catch (e) { body.innerHTML = '<div class="muted">' + esc(e.message) + "</div>"; return; }
+    const items = d.checks.slice();
+    const st = phoneStatus();
+    if (st) {
+      const t = st.termux || {};
+      items.push({ key: "files", ok: !!st.files, title: "The phone's files", detail: st.files ? "readable (your GGUF files are models)" : "not readable", fix: st.files ? "" : "files" });
+      items.push({ key: "screen", ok: st.accessibility ? true : null, title: "Screen control", detail: st.accessibility ? "on" : "off (the agent cannot see or tap the screen)", fix: st.accessibility ? "" : "screen" });
+      items.push({ key: "notifications", ok: st.notifications ? true : null, title: "Notifications", detail: st.notifications ? "on" : "off (no notice when a task finishes)", fix: st.notifications ? "" : "fullaccess" });
+      items.push({ key: "termux", ok: t.up ? true : null, title: "Termux", detail: !t.installed ? "not installed" : t.up ? "NewAl Code runs in Termux" : "installed, not linked or not running", fix: t.up ? "" : "termux" });
+    }
+    const mark = ok => ok === true ? '<span class="good">✓</span>' : ok === false ? '<span class="bad">✗</span>' : '<span class="muted">–</span>';
+    const labels = { download: "Download", connect: "Connect an API", github: "Connect GitHub", install: "Add", access: "Give full access",
+      files: "Allow", screen: "Turn on", fullaccess: "Allow", termux: "Open This phone" };
+    body.innerHTML = '<div class="card-list">' + items.map((c, i) => '<div class="card"><div class="grow"><div class="name">' + mark(c.ok) + " " + esc(c.title) +
+      '</div><div class="desc">' + esc(c.detail || "") + "</div></div>" + (c.fix ? '<button class="btn small" data-fix="' + i + '">' +
+      esc(labels[c.fix.split(":")[0]] || "Fix") + "</button>" : "") + "</div>").join("") + "</div>" +
+      '<div class="form-row" style="justify-content:flex-end"><button class="btn" id="hl-again">Check again</button><button class="btn" id="hl-copy">Copy report</button></div>';
+    body.querySelectorAll("[data-fix]").forEach(b => b.onclick = async () => {
+      const [what, arg] = items[+b.dataset.fix].fix.split(":");
+      if (what === "download") { await api("/api/models/download", { id: arg }).catch(e => toast(e.message)); toast("Downloading " + arg + "…"); return; }
+      if (what === "connect") return openModels();
+      if (what === "github") return openGitHub();
+      if (what === "install") { await api("/api/system", { action: "install" }).catch(e => toast(e.message)); return openHealth(); }
+      if (what === "access") { await setFullAccess(true); return openHealth(); }
+      if (what === "files") return NewAlPhone.allowStorage();
+      if (what === "screen") return NewAlPhone.openAccessibilitySettings();
+      if (what === "fullaccess") return NewAlPhone.fullAccess();
+      if (what === "termux") return openPhone();
+    });
+    body.querySelector("#hl-again").onclick = openHealth;
+    body.querySelector("#hl-copy").onclick = () => {
+      const extra = items.slice(d.checks.length).map(c => (c.ok === true ? "OK  " : c.ok === false ? "FIX " : "--  ") + c.title + ": " + (c.detail || ""));
+      const text = [d.report].concat(extra).join("\n");
+      try { if (window.NewAlPhone && NewAlPhone.setClipboard) NewAlPhone.setClipboard(text); else navigator.clipboard.writeText(text); } catch (_) { /* no clipboard */ }
+      toast("Copied: paste it where you ask for help");
+    };
+  }
+
   async function openWelcome() {
     // Set up once: a model, the one permission, GitHub, the terminal. Shown at the first start; Settings has it too.
     const phone = !!window.NewAlPhone;
@@ -1701,12 +1745,13 @@
       '<div class="section-title">GitHub</div><div id="st-github"></div>' +
       '<div class="section-wrap"><div class="section-title">This phone</div><div id="st-phone"></div></div>' +
       '<div class="section-wrap"><div class="section-title">This computer</div><div id="st-system"></div></div>' +
-      '<div class="form-row"><button class="btn" id="st-welcome">Set up again (model, access, GitHub, terminal)</button></div>');
+      '<div class="form-row"><button class="btn primary" id="st-health">Check everything</button><button class="btn" id="st-welcome">Set up again (model, access, GitHub, terminal)</button></div>');
     accessSection(body.querySelector("#st-access"));
     githubSection(body.querySelector("#st-github"));
     phoneSection(body.querySelector("#st-phone"));
     systemSection(body.querySelector("#st-system"));
     body.querySelector("#st-welcome").onclick = openWelcome;
+    body.querySelector("#st-health").onclick = openHealth;
     body.querySelector("#st-save").onclick = async () => {
       const v = {
         mode: body.querySelector("#st-mode").value, reasoning: body.querySelector("#st-reasoning").value,

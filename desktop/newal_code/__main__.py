@@ -180,6 +180,18 @@ def cmd_models(download=""):
 
 
 def cmd_doctor():
+    from newal_code import health
+    items = health.checks()
+    print(health.report(items))
+    fixes = {"download": "newal-code models --download %s", "connect": "the app: Models > An API in one tap",
+             "github": "the app: GitHub (or GH_TOKEN)", "install": "newal-code install",
+             "access": "newal-code access full (if you want it)"}
+    for c in items:
+        fix = c.get("fix") or ""
+        if c.get("ok") is False and fix:
+            what, _, arg = fix.partition(":")
+            print("  -> %s: %s" % (c["title"], fixes.get(what, fix).replace("%s", arg)))
+    print()
     hw = hardware.summary()
     print(json.dumps(hw, indent=1))
     exe = runtime.find_server()

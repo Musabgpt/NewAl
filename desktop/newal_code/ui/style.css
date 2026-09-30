@@ -421,3 +421,5 @@ pre.out { margin: 0; background: var(--bg-code); border: 1px solid var(--border)
 @media (max-width: 900px) {
   [dir="rtl"] #review { right: auto; left: 0; }
 }
+.health .bad { color: #b3261e; font-weight: 700; }
+.health .good { font-weight: 700; }

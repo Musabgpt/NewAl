@@ -1863,6 +1863,16 @@ class ServerTest(unittest.TestCase):
         c.close()
         return out
 
+    def test_check_everything(self):
+        d = self.call("/api/doctor?quick=1")
+        keys = [c["key"] for c in d["checks"]]
+        for k in ("model", "llama", "memory", "git", "shell", "access", "github"):
+            self.assertIn(k, keys)
+        model = next(c for c in d["checks"] if c["key"] == "model")
+        self.assertIs(model["ok"], True, model)              # the fake API model needs no key
+        self.assertTrue(all(c["ok"] in (True, False, None) for c in d["checks"]))
+        self.assertIn("NewAl Code", d["report"])
+
     def test_new_folder_gguf_files_and_threads_listed_from_their_first_message(self):
         top = tempfile.mkdtemp()
         made = self.call("/api/mkdir", {"parent": top, "name": "my app"})["path"]
