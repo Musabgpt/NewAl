@@ -1526,6 +1526,91 @@ class StoreTest(unittest.TestCase):
             self.assertEqual(r["code"], 0, r["reply"])
             self.assertIn("coreutils", r["reply"])
 
+    def test_csv_reads_csv_excel_json_and_arabic_files_and_draws_a_chart(self):
+        import zipfile
+        self.install("data")
+        with open(os.path.join(self.root, "sales.csv"), "w", encoding="utf-8", newline="") as f:
+            f.write('region,sales,date,note\nNorth,"1,200",2026-01-05,ok\nSouth,800,2026-01-06,\n'
+                    'North,300.5,2026-02-01,late\nEast,50,2026-02-03,ok\n')
+        with open(os.path.join(self.root, "ar.csv"), "wb") as f:              # Excel's Arabic "CSV": cp1256, ;
+            f.write("المدينة;المبلغ\nعمان;100\nإربد;250\nعمان;50\n".encode("cp1256"))
+        with open(os.path.join(self.root, "s.json"), "w") as f:
+            json.dump([{"name": "a", "score": 3}, {"name": "b", "score": 5}, {"name": "c", "score": None}], f)
+        m = "http://schemas.openxmlformats.org/spreadsheetml/2006/main"
+        with zipfile.ZipFile(os.path.join(self.root, "book.xlsx"), "w") as z:
+            z.writestr("xl/workbook.xml", '<workbook xmlns="%s" xmlns:r="http://schemas.openxmlformats.org/'
+                       'officeDocument/2006/relationships"><sheets><sheet name="D" sheetId="1" r:id="rId1"/>'
+                       '</sheets></workbook>' % m)
+            z.writestr("xl/_rels/workbook.xml.rels", '<Relationships xmlns="http://schemas.openxmlformats.org/'
+                       'package/2006/relationships"><Relationship Id="rId1" Type="x" Target="worksheets/d.xml"/>'
+                       '</Relationships>')
+            z.writestr("xl/sharedStrings.xml", '<sst xmlns="%s"><si><t>item</t></si><si><t>price</t></si>'
+                       '<si><t>pen</t></si><si><t>book</t></si></sst>' % m)
+            z.writestr("xl/worksheets/d.xml", '<worksheet xmlns="%s"><sheetData>'
+                       '<row r="1"><c r="A1" t="s"><v>0</v></c><c r="B1" t="s"><v>1</v></c></row>'
+                       '<row r="2"><c r="A2" t="s"><v>2</v></c><c r="B2"><v>1.5</v></c></row>'
+                       '<row r="3"><c r="A3" t="s"><v>3</v></c><c r="B3"><v>12</v></c></row>'
+                       '<row r="4"><c r="A4" t="inlineStr"><is><t>bag</t></is></c></row></sheetData></worksheet>' % m)
+        r = self.run_cmd("/csv sales.csv region sales")
+        self.assertEqual(r["code"], 0, r["reply"])
+        self.assertIn("sales.csv: 4 rows, 4 columns", r["reply"])
+        self.assertIn("min 50 · max 1,200 · mean 587.62 · median 550.25 · total 2,350.50", r["reply"])
+        self.assertIn("2026-01-05 → 2026-02-03", r["reply"])
+        svg = os.path.join(self.root, "sales-sales-by-region.svg")
+        with open(svg, encoding="utf-8") as f:
+            chart = f.read()
+        self.assertIn("North", chart)
+        self.assertIn("1,500.50", chart)                                  # 1,200 + 300.5
+        r = self.run_cmd("/csv ar.csv")
+        self.assertIn("(cp1256)", r["reply"])
+        self.assertIn("عمان (2)", r["reply"])
+        self.assertIn("total 400", r["reply"])
+        r = self.run_cmd("/csv book.xlsx price")
+        self.assertIn("book.xlsx: 3 rows, 2 columns", r["reply"])
+        self.assertIn("total 13.50", r["reply"])
+        self.assertTrue(os.path.isfile(os.path.join(self.root, "book-price.svg")))
+        r = self.run_cmd("/csv s.json")
+        self.assertRegex(r["reply"], r"score\s+number\s+2\s+1\s+2\s+min 3 · max 5")
+        r = self.run_cmd("/csv sales.csv nope")
+        self.assertEqual(r["code"], 2)
+        self.assertIn("no such column", r["reply"])
+
+    def test_rtl_lists_then_rewrites_css_and_pages(self):
+        self.install("arabic")
+        files = {"index.html": '<!doctype html>\n<html>\n<head><style>\n'
+                               '.nav-left:hover { margin-left: 8px; text-align: left; }\n'
+                               '.card { padding: 4px 12px 4px calc(1rem + 2px) !important; float: right; left: 0; }\n'
+                               '</style></head>\n<body><div class="left" style="padding-right: 3px">x</div></body>\n'
+                               '</html>\n',
+                 "css/app.css": ".side { margin-right: 2rem; }\n.same { padding: 1px 2px 1px 2px; }\n",
+                 "src/App.jsx": 'const S = () => <div style={{ marginLeft: 4, textAlign: "left" }} />;\n'
+                                'const obj = { left: 1 };\n'}
+        for rel, text in files.items():
+            os.makedirs(os.path.dirname(os.path.join(self.root, rel)), exist_ok=True)
+            with open(os.path.join(self.root, rel), "w", encoding="utf-8") as f:
+                f.write(text)
+        r = self.run_cmd("/rtl")
+        self.assertEqual(r["code"], 0, r["reply"])
+        self.assertIn("margin-left → margin-inline-start", r["reply"])
+        self.assertIn("/rtl --apply", r["reply"])
+        with open(os.path.join(self.root, "css", "app.css")) as f:
+            self.assertIn("margin-right", f.read())                        # listing writes nothing
+        self.run_cmd("/rtl --apply")
+
+        def read(rel):
+            with open(os.path.join(self.root, rel), encoding="utf-8") as f:
+                return f.read()
+        page = read("index.html")
+        self.assertIn('<html dir="rtl" lang="ar">', page)
+        self.assertIn(".nav-left:hover { margin-inline-start: 8px; text-align: start; }", page)
+        self.assertIn("padding-block: 4px 4px !important; padding-inline: calc(1rem + 2px) 12px !important;", page)
+        self.assertIn("float: inline-end; inset-inline-start: 0;", page)
+        self.assertIn('class="left" style="padding-inline-end: 3px"', page)
+        self.assertEqual(read("css/app.css"), ".side { margin-inline-end: 2rem; }\n.same { padding: 1px 2px 1px 2px; }\n")
+        self.assertEqual(read("src/App.jsx"), 'const S = () => <div style={{ marginInlineStart: 4, textAlign: '
+                                              '"start" }} />;\nconst obj = { left: 1 };\n')
+        self.assertIn("Nothing to change", self.run_cmd("/rtl")["reply"])
+
     def test_guard_asks_even_with_full_access(self):
         self.install("guard")
         asked = []
@@ -1629,6 +1714,162 @@ class StoreTest(unittest.TestCase):
                            cwd=os.path.dirname(HERE), capture_output=True, text=True, env=env, timeout=120)
         self.assertEqual(p.returncode, 0, p.stderr)
         self.assertIn("free, nothing listens on it", p.stdout)
+
+
+class SyncTest(unittest.TestCase):
+    """/sync against a real remote (a bare repository), with the computer's git and with the phone's (minigit)."""
+
+    def setUp(self):
+        from unittest import mock
+        self.top = tempfile.mkdtemp(prefix="nc-sync-")
+        self.addCleanup(shutil.rmtree, self.top, True)
+        env = mock.patch.dict(os.environ, {"GIT_AUTHOR_NAME": "T", "GIT_AUTHOR_EMAIL": "t@x", "GIT_COMMITTER_NAME": "T",
+                                           "GIT_COMMITTER_EMAIL": "t@x", "GIT_CONFIG_NOSYSTEM": "1",
+                                           "HOME": self.top, "USERPROFILE": self.top})
+        env.start()
+        self.addCleanup(env.stop)
+        self.bare = os.path.join(self.top, "remote.git")
+        subprocess.run(["git", "init", "-q", "--bare", "-b", "main", self.bare], check=True)
+        seed = os.path.join(self.top, "seed")
+        subprocess.run(["git", "init", "-q", "-b", "main", seed], check=True)
+        self.write(seed, "a.txt", "one\ntwo\n")
+        for cmd in (["add", "-A"], ["commit", "-q", "-m", "first"], ["remote", "add", "origin", self.bare],
+                    ["push", "-q", "-u", "origin", "main"]):
+            subprocess.run(["git"] + cmd, cwd=seed, check=True)
+
+    def write(self, root, name, text):
+        with open(os.path.join(root, name), "w", newline="\n") as f:
+            f.write(text)
+
+    def clone(self, name):
+        d = os.path.join(self.top, name)
+        subprocess.run(["git", "clone", "-q", self.bare, d], check=True)
+        return d
+
+    def commit(self, root, name, text, msg):
+        self.write(root, name, text)
+        subprocess.run(["git", "add", "-A"], cwd=root, check=True)
+        subprocess.run(["git", "commit", "-q", "-m", msg], cwd=root, check=True)
+
+    def remote_log(self):
+        return subprocess.run(["git", "--git-dir", self.bare, "log", "--format=%s", "main"], capture_output=True,
+                              text=True).stdout.split("\n")
+
+    def test_pulls_then_pushes_and_says_so(self):
+        from newal_code import sync
+        a, b = self.clone("a"), self.clone("b")
+        self.commit(b, "b.txt", "from b\n", "from b")
+        subprocess.run(["git", "push", "-q"], cwd=b, check=True)
+        self.commit(a, "c.txt", "from a\n", "from a")
+        ok, text = sync.sync(a)
+        self.assertTrue(ok, text)
+        self.assertIn("Pulled 1 new commit from origin/main.", text)
+        self.assertIn("Pushed 1 commit to origin/main.", text)
+        self.assertEqual(self.remote_log()[:3], ["from a", "from b", "first"])     # rebased: no merge commit
+        ok, text = sync.sync(a)
+        self.assertTrue(ok, text)
+        self.assertIn("Nothing new on origin/main.", text)
+        self.assertIn("Nothing to push", text)
+
+    def test_a_conflict_says_which_files_and_how_to_finish_or_undo(self):
+        from newal_code import sync
+        a, b = self.clone("a"), self.clone("b")
+        self.commit(b, "a.txt", "one\nTWO from b\n", "b edits")
+        subprocess.run(["git", "push", "-q"], cwd=b, check=True)
+        self.commit(a, "a.txt", "one\nTWO from a\n", "a edits")
+        ok, text = sync.sync(a)
+        self.assertFalse(ok)
+        self.assertIn("a.txt", text)
+        self.assertIn("git rebase --continue", text)
+        self.assertIn("git rebase --abort", text)
+        self.assertEqual(self.remote_log()[0], "b edits")                              # nothing pushed
+
+    def test_a_new_branch_is_pushed_and_followed(self):
+        from newal_code import sync
+        a = self.clone("a")
+        subprocess.run(["git", "switch", "-q", "-c", "feature"], cwd=a, check=True)
+        self.commit(a, "f.txt", "f\n", "feature work")
+        ok, text = sync.sync(a)
+        self.assertTrue(ok, text)
+        self.assertIn("Pushed the branch to origin/feature.", text)
+        up = subprocess.run(["git", "rev-parse", "--abbrev-ref", "@{u}"], cwd=a, capture_output=True, text=True)
+        self.assertEqual(up.stdout.strip(), "origin/feature")
+
+    def test_outside_a_repository_or_without_a_remote(self):
+        from newal_code import sync
+        ok, text = sync.sync(tempfile.mkdtemp())
+        self.assertFalse(ok)
+        self.assertIn("not a git repository", text)
+        solo = os.path.join(self.top, "solo")
+        subprocess.run(["git", "init", "-q", "-b", "main", solo], check=True)
+        ok, text = sync.sync(solo)
+        self.assertFalse(ok)
+        self.assertIn("git remote add origin", text)
+
+    def phones_git(self):
+        """git on PATH is the phone's (minigit, over dulwich) inside the with block."""
+        from unittest import mock
+        if os.name == "nt":
+            self.skipTest("a shell script stands in for the phone's git")
+        try:
+            import dulwich  # noqa: F401
+            import merge3  # noqa: F401
+        except ImportError:
+            self.skipTest("dulwich and merge3 (the phone's git) are not installed")
+        bin_dir = os.path.join(self.top, "bin")
+        if not os.path.isdir(bin_dir):
+            os.makedirs(bin_dir)
+            with open(os.path.join(bin_dir, "git"), "w") as f:
+                f.write('#!/bin/sh\nPYTHONPATH="%s" exec "%s" -m newal_code.minigit "$@"\n' % (
+                    os.path.dirname(HERE), sys.executable))
+            os.chmod(os.path.join(bin_dir, "git"), 0o755)
+        return mock.patch.dict(os.environ, {"PATH": bin_dir + os.pathsep + os.environ["PATH"]})
+
+    def test_the_phones_git_stops_on_a_conflict_then_finishes_or_undoes_the_merge(self):
+        from newal_code import sync
+        a, b = self.clone("a"), self.clone("b")
+        self.commit(b, "a.txt", "one\nTWO from b\n", "b edits")
+        subprocess.run(["git", "push", "-q"], cwd=b, check=True)
+        self.commit(a, "a.txt", "one\nTWO from a\n", "a edits")
+        with self.phones_git():
+            ok, text = sync.sync(a)
+            self.assertFalse(ok)
+            self.assertIn("a.txt", text)
+            self.assertIn("git merge --continue", text)
+            with open(os.path.join(a, "a.txt")) as f:
+                self.assertIn("<<<<<<<", f.read())
+            r = subprocess.run(["git", "commit", "-am", "x"], cwd=a, capture_output=True, text=True)
+            self.assertNotEqual(r.returncode, 0)                   # never a commit with the markers in it
+            self.assertIn("unmerged files", r.stderr + r.stdout)
+            r = subprocess.run(["git", "merge", "--abort"], cwd=a, capture_output=True, text=True)
+            self.assertEqual(r.returncode, 0, r.stderr)
+            with open(os.path.join(a, "a.txt")) as f:
+                self.assertEqual(f.read(), "one\nTWO from a\n")     # as before the pull
+            self.assertFalse(sync.sync(a)[0])                         # the same conflict again
+            self.write(a, "a.txt", "one\nTWO from a and b\n")
+            for cmd in (["add", "a.txt"], ["merge", "--continue"]):
+                r = subprocess.run(["git"] + cmd, cwd=a, capture_output=True, text=True)
+                self.assertEqual(r.returncode, 0, r.stderr + r.stdout)
+            ok, text = sync.sync(a)
+            self.assertTrue(ok, text)
+        parents = subprocess.run(["git", "--git-dir", self.bare, "log", "-1", "--format=%P", "main"],
+                                 capture_output=True, text=True).stdout.split()
+        self.assertEqual(len(parents), 2)                                 # a merge of both sides, pushed
+        self.assertIn("b edits", self.remote_log())
+
+    def test_with_the_phones_git(self):
+        from newal_code import sync
+        a, b = self.clone("a"), self.clone("b")
+        self.commit(b, "b.txt", "from b\n", "from b")
+        subprocess.run(["git", "push", "-q"], cwd=b, check=True)
+        self.commit(a, "c.txt", "from a\n", "from a")
+        with self.phones_git():
+            ok, text = sync.sync(a)
+        self.assertTrue(ok, text)
+        self.assertIn("Pulled the new commits from origin/main.", text)                # a merge: no rev-list
+        log = self.remote_log()
+        self.assertIn("from a", log)
+        self.assertIn("from b", log)
 
 
 class HooksTest(unittest.TestCase):

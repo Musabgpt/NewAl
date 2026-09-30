@@ -1,0 +1,8 @@
+{
+  "name": "data",
+  "version": "1.0.0",
+  "author": {
+    "name": "NewAl"
+  },
+  "description": "/csv: a CSV, Excel or JSON file at a glance, and a chart of a column (SVG), without the model."
+}

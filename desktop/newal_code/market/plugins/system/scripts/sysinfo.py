@@ -28,8 +28,9 @@ def system():
             build = int(version.split(".")[2])
         except (IndexError, ValueError):
             build = 0
-        name = "Windows 11" if build >= 22000 else "Windows " + release
         edition = getattr(platform, "win32_edition", lambda: "")() or ""
+        name = "Windows Server" if "server" in edition.lower() else \
+            "Windows 11" if build >= 22000 else "Windows " + release          # 11 still says release 10
         return "%s %s (build %s), %s" % (name, edition, build or version, arch)
     if MAC:
         return "macOS %s, %s" % (platform.mac_ver()[0] or "?", arch)

@@ -32,6 +32,7 @@ BUILTIN_COMMANDS = [
     ("resume", "[id]", "List threads, or reopen one"),
     ("title", "<text>", "Rename this thread"),
     ("security-review", "[focus]", "Review the changes for security problems (a reviewer sub-agent)"),
+    ("sync", "", "Pull the remote's changes, then push this branch's (git, with NewAl Code's GitHub sign-in)"),
     ("permissions", "", "Show the permission mode and the allow / ask / deny rules"),
     ("export", "", "Save this thread as Markdown in the project"),
     ("memory", "", "Show the instruction files (# <note> adds a note to AGENTS.md)"),
@@ -275,7 +276,8 @@ class Service:
     # ------------------------------------------------------------ slash commands
 
     def commands(self, root):
-        out = [{"name": n, "args": a, "description": d, "custom": False} for n, a, d in BUILTIN_COMMANDS]
+        out = [{"name": n, "args": a, "description": d, "custom": False, "instant": n == "sync"}
+               for n, a, d in BUILTIN_COMMANDS]
         for name, c in sorted(extensions.custom_commands(root).items()):
             out.append({"name": name, "args": c.get("hint", ""), "description": c.get("description", ""),
                         "custom": True, "instant": bool(c.get("script"))})
@@ -365,6 +367,10 @@ class Service:
             lines.append("Sandbox: %s" % ("%s (commands write only in the project%s)" % (
                 on, "" if sandbox.active(s.root, s.mode, s.dirs) else "; not in this mode") if on else "off"))
             return {"reply": "\n".join(lines)}
+        if name == "sync":
+            from . import sync
+            ok, text = sync.sync(s.root)
+            return {"reply": text, "output": True, "code": 0 if ok else 1}
         if name == "security-review":
             return self.command(s, "/review " + ("security: " + args if args else
                                                   "security problems only: injection, unsafe deserialization, path "

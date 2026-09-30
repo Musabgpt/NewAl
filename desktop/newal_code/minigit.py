@@ -417,6 +417,18 @@ def cmd_commit(args):
     try:
         if not messages and "--amend" in seen and "--no-edit" in seen and _head(repo):
             messages = [_s(repo[_head(repo)].message)]
+        merging = os.path.isfile(os.path.join(repo.controldir(), "MERGE_HEAD"))
+        if merging:
+            left = _unresolved(repo)
+            if left:
+                raise Fatal("Committing is not possible because you have unmerged files: %s\n"
+                            "fix them (no <<<<<<< or >>>>>>> left), git add them, then commit" % ", ".join(left), 128)
+            if not messages:
+                try:
+                    with open(os.path.join(repo.controldir(), "MERGE_MSG"), encoding="utf-8") as f:
+                        messages = [f.read()]
+                except OSError:
+                    messages = ["Merge"]
         if not messages:
             raise Fatal("Aborting commit due to empty commit message (use -m \"message\").", 1)
         message = "\n\n".join(m.strip() for m in messages).strip() + "\n"
@@ -426,7 +438,7 @@ def cmd_commit(args):
             if tracked:
                 porcelain.add(repo, [os.path.join(repo.path, p) for p in tracked])
         staged = [p for p, c in _changes(repo).items() if c[0] not in (" ", "?")]
-        if not staged and "--allow-empty" not in seen and "--amend" not in seen:
+        if not staged and "--allow-empty" not in seen and "--amend" not in seen and not merging:
             print("nothing to commit, working tree clean" if not _changes(repo) else
                   "no changes added to commit (use \"git add\" and/or \"git commit -a\")")
             return 1
@@ -443,6 +455,11 @@ def cmd_commit(args):
                     if m.group(2) else 0
         sha = porcelain.commit(repo, message=message.encode("utf-8"), amend="--amend" in seen,
                                no_verify=bool(seen & {"--no-verify", "-n"}), sign=False, **kw)
+        for name in ("MERGE_MSG", CONFLICTS):              # (dulwich removes MERGE_HEAD itself)
+            try:
+                os.remove(os.path.join(repo.controldir(), name))
+            except OSError:
+                pass
         if not seen & {"-q", "--quiet"}:
             first = message.splitlines()[0] if message.strip() else ""
             print("[%s %s] %s" % (_branch(repo) or "detached HEAD", _s(sha)[:7], first))
@@ -919,6 +936,15 @@ def cmd_fetch(args, pull=False):
             try:
                 porcelain.pull(repo, url, refspecs=refspec, errstream=err, outstream=io.BytesIO(),
                                ff_only="--ff-only" in seen)
+            except porcelain.DivergedBranches as e:
+                # both sides have new commits: a merge, as git pull does (dulwich pulls only fast-forwards)
+                if "--ff-only" in seen:
+                    raise Fatal("Not possible to fast-forward, aborting.", 128)
+                if branch and refspec:
+                    repo.refs[("refs/remotes/%s/%s" % (remote, refspec.split("refs/heads/")[-1])).encode()] = \
+                        e.new_sha
+                return _merge(repo, e.new_sha, "Merge branch '%s' of %s" % (
+                    (refspec or "").split("refs/heads/")[-1] or branch, url), quiet=bool(seen & {"-q", "--quiet"}))
             except Exception as e:  # noqa: BLE001
                 raise Fatal("could not pull from %s: %s" % (url, e), 1)
             if not seen & {"-q", "--quiet"}:
@@ -1035,6 +1061,85 @@ def cmd_show(args):
         repo.close()
 
 
+def _merge(repo, sha, message, quiet=False):
+    """Merges the commit sha into HEAD: a merge commit, or, on a conflict, the files with git's markers, MERGE_HEAD
+    (the next commit is the merge), MERGE_MSG, ORIG_HEAD and the conflicted paths, as git leaves them."""
+    from dulwich import porcelain
+    head = _head(repo)
+    try:
+        merged, conflicts = porcelain.merge(repo, sha, message=message.encode("utf-8"))
+    except ImportError:
+        raise Fatal("merging needs the merge3 module (NewAl Code Lite brings it)", 1)
+    if not conflicts:
+        if not quiet:
+            print("Merge made by the 'ort' strategy." if merged else "Already up to date.")
+        return 0
+    git_dir = repo.controldir()
+    for name, text in (("MERGE_HEAD", _s(sha)), ("ORIG_HEAD", _s(head) if head else ""), ("MERGE_MSG", message),
+                       (CONFLICTS, "\n".join(_s(c) for c in conflicts))):
+        with open(os.path.join(git_dir, name), "w", encoding="utf-8") as f:
+            f.write(text + "\n")
+    for c in conflicts:
+        print("CONFLICT (content): Merge conflict in %s" % _s(c))
+    print("Automatic merge failed; fix conflicts and then commit the result.")
+    return 1
+
+
+CONFLICTS = "NEWAL_CONFLICTS"          # the paths a merge left conflicted (git keeps them in the index's stages)
+
+
+def _unresolved(repo):
+    """The conflicted paths that still hold a conflict marker."""
+    path = os.path.join(repo.controldir(), CONFLICTS)
+    if not os.path.isfile(path):
+        return []
+    out = []
+    with open(path, encoding="utf-8") as f:
+        for p in [l.strip() for l in f if l.strip()]:
+            try:
+                with open(os.path.join(repo.path, p), encoding="utf-8", errors="replace") as g:
+                    if re.search(r"^(<{7}|>{7})( |$)", g.read(), re.M):
+                        out.append(p)
+            except OSError:
+                pass
+    return out
+
+
+def cmd_merge(args):
+    from dulwich import porcelain
+    seen, vals, rest = _opts(args, ("--abort", "--continue", "--no-edit", "-q", "--quiet", "--no-ff", "--ff"),
+                             ("-m", "--message"))
+    repo = _repo()
+    try:
+        git_dir = repo.controldir()
+        merging = os.path.isfile(os.path.join(git_dir, "MERGE_HEAD"))
+        if "--abort" in seen:
+            if not merging:
+                raise Fatal("There is no merge to abort (MERGE_HEAD missing).", 128)
+            with open(os.path.join(git_dir, "ORIG_HEAD"), encoding="utf-8") as f:
+                orig = f.read().strip()
+            porcelain.reset(repo, "hard", orig or "HEAD")
+            for name in ("MERGE_HEAD", "MERGE_MSG", CONFLICTS):
+                try:
+                    os.remove(os.path.join(git_dir, name))
+                except OSError:
+                    pass
+            return 0
+        if "--continue" in seen:
+            if not merging:
+                raise Fatal("There is no merge in progress (MERGE_HEAD missing).", 128)
+            return cmd_commit(["--no-edit"])
+        if not rest:
+            raise Fatal("usage: git merge <branch> | --abort | --continue", 129)
+        if merging:
+            raise Fatal("You have not concluded your merge (MERGE_HEAD exists).", 128)
+        sha = _resolve(repo, rest[0])
+        message = vals.get("-m") or vals.get("--message") or "Merge branch '%s'" % rest[0]
+        return _merge(repo, sha, message, quiet=bool(seen & {"-q", "--quiet"}))
+    finally:
+        repo.close()
+
+
 def cmd_stash(args):
     from dulwich import porcelain
     sub = args[0] if args and not args[0].startswith("-") else "push"
@@ -1062,7 +1167,7 @@ COMMANDS = {
     "log": cmd_log, "diff": cmd_diff, "rev-parse": cmd_rev_parse, "branch": cmd_branch, "checkout": cmd_checkout,
     "switch": lambda a: cmd_checkout(a, switch=True), "restore": cmd_restore, "reset": cmd_reset,
     "remote": cmd_remote, "push": cmd_push, "fetch": cmd_fetch, "pull": lambda a: cmd_fetch(a, pull=True),
-    "config": cmd_config, "ls-files": cmd_ls_files, "show": cmd_show, "stash": cmd_stash,
+    "config": cmd_config, "ls-files": cmd_ls_files, "show": cmd_show, "stash": cmd_stash, "merge": cmd_merge,
 }
 
 

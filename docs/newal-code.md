@@ -155,6 +155,7 @@ It uses NewAl desktop's `llama-server` and the models NewAl already downloaded (
 | Compaction | ✓ auto + `/compact` | ✓ | ✓ auto at 85% of the context + `/compact [focus]` |
 | Checkpoints / undo | ✓ /rewind | ✓ /undo | ✓ every changed file saved first; `/undo`, "Undo last turn", revert one file |
 | Diff / review | /review | ✓ /diff, /review, review pane | ✓ `/diff`, `/review` (reviewer sub-agent), review pane with per-file diffs |
+| Pull and push in one step | – | – | ✓ `/sync`: pull (rebase, or a merge with the phone's git), then push, with the connected GitHub account; conflicts explained with the way out |
 | Git commit, push, pull request from the app | – | ✓ | ✓ Commit / Commit and push / Commit and create PR (a branch of its own when on main; `gh` when installed, else GitHub's API with the connected token, else GitHub's PR page) |
 | GitHub account in the app | – | ✓ (cloud) | ✓ Settings > GitHub: connect with a token, then clone any of your repositories (the ⬇ button beside Threads); cloud tasks and pull requests use it |
 | `/init` AGENTS.md | ✓ | ✓ | ✓ |
@@ -332,6 +333,8 @@ model or no model at all:
 | Plugin | What it does |
 |---|---|
 | `system` | `/sysinfo`: the system, processor, memory, storage, graphics, battery, network, uptime, the developer tools found, and which GGUF sizes fit in the free memory now. `/disk [folder]`: the drives' free space and the biggest folders and files (disk use as `du` counts it: sparse files, hard links once). `/clean [--yes]`: pip, npm, yarn, Go, Gradle and Termux's package caches, temporary files untouched for a day, unfinished model downloads and the project's `__pycache__`-style caches, listed with their sizes; `--yes` deletes them, nothing else. `/ports [port]`: what listens on which port, reachable from the network or this device only, with its process. `/programs search\|install\|update\|remove\|list`: winget on Windows, pkg in Termux, Homebrew, apt/dnf/pacman/zypper (printing the `sudo` command where rights are missing). On Windows, macOS, Linux, the phone app and Termux; in Arabic when the app is. |
+| `data` | `/csv <file> [column] [value column]`: a CSV/TSV (separator and encoding found by themselves, Arabic Windows files and Arabic digits included), Excel `.xlsx` (its first sheet) or JSON list at a glance: rows, each column's type, empty cells, distinct values, minimum, maximum, mean, median and total, the most common values; with a column, a chart as an SVG file beside the data (a text column's most common values, a number column's spread, or with a value column its total for each value: "sales by region"). |
+| `arabic` | `/rtl [file or folder] [--apply]`: a site right-to-left for Arabic: `dir="rtl"` (and `lang="ar"` where none is set) on the page, and CSS's left and right in their logical forms (margin/padding/border/scroll `-inline-start`/`-end`, `inset-inline`, logical corner radii, `text-align: start`, `float`/`clear: inline-start`, a 4-value margin or padding whose sides differ split into `-block` + `-inline`) in CSS files, `<style>` blocks, `style=""` and JSX style objects; selectors and class names are left alone. It lists the changes; `--apply` writes them, and running it again finds nothing left. |
 | `guard` | With full access too: asks before an edit to a file that holds secrets (`.env`, keys, credential files) and before a force push, a hard reset, `git clean`, deleting a branch, discarding all changes, deleting the home folder or `.git`, dropping a database or publishing a package. |
 | `format-on-edit` | After each edit, formats the file: gofmt, rustfmt and `dart format` always; ruff or black, prettier and clang-format where the project is set up for them (so a project that uses none is never reformatted); it tells the model when a file changed. |
 
@@ -348,7 +351,20 @@ agent's commands and in the review panel's Commit, Push and Create PR is NewAl C
 output over dulwich (git written in Python; the app's launcher answers to the name `git`). On the steps it is tested
 with (init, status, add, commit, log, diff, branch, checkout, remote, push, show, rev-parse...) it prints what git
 prints and makes the same commits, hash for hash; pushes to and clones from github.com use the connected token.
-Pull requests go through GitHub's API.
+Pull requests go through GitHub's API. When both sides have new commits, `git pull` merges as git does (dulwich
+alone only fast-forwards): a merge commit, or on a conflict git's markers in the files, `MERGE_HEAD` and the
+`CONFLICT` lines; a commit is refused while a conflicted file still has a marker, `git merge --continue` finishes
+the merge and `git merge --abort` puts things back (merge3, bundled, does the three-way merge).
+
+**/sync.** One command for "get my branch and GitHub in step": `git pull` (your commits rebased on top where git
+can; the phone's git merges), then `git push`, with the GitHub account connected in NewAl Code (the token for that
+command only, never written to the repository's config; the phone's git uses it by itself). A branch GitHub does
+not have yet is pushed and followed; one it has is followed, then pulled. It says what came in and what went out
+("Pulled 1 new commit from origin/main. Pushed 2 commits to origin/main."), or what stops it in words, with the
+way out: a conflict (the files, then `git add` and `git rebase --continue` / `git merge --continue`, or `--abort`),
+work not committed on the phone, no remote, a refused sign-in, no connection. Tested against real remotes with the
+computer's git and the phone's, conflicts included, and in the Android emulator (a commit from the computer and
+one from the phone, merged and pushed by /sync on the phone).
 
 **Termux.** Termux has a whole Linux: git, compilers, Node, any package, and your projects in its home. This phone (in
 the side menu, or in Settings) > Connect Termux copies one command and opens Termux: pasted there, it installs Python and git from Termux's

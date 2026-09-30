@@ -51,7 +51,7 @@ jobs:
 
       - name: Python packages
         run: |
-          python -m pip install --upgrade pip pyinstaller pytest dulwich
+          python -m pip install --upgrade pip pyinstaller pytest dulwich merge3
           if [ "$RUNNER_OS" != Linux ]; then python -m pip install pywebview; fi
 
       - name: Tests, with this system's command sandbox

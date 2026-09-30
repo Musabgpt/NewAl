@@ -189,6 +189,8 @@ def features(state):
         {"tools": [("bash", {"command": "git clone -q git://10.0.2.2/shared.git && cd shared && echo hi > phone.txt "
                                         "&& git add phone.txt && git commit -q -m 'from the phone' && "
                                         "git push -q origin HEAD && git log --oneline -1 && echo PUSH-OK"})]},
+        {"tools": [("bash", {"command": "cd shared && echo more >> phone.txt && git commit -q -am 'second from the "
+                                        "phone' && echo LOCAL-OK"})]},
         {"tools": [("bash", {"command": "git clone -q --depth 1 https://github.com/octocat/Hello-World.git hw && "
                                         "ls hw && echo HTTPS-OK"})]},
         {"tools": [("phone", {"action": "device"})]},
@@ -204,9 +206,21 @@ def features(state):
                             "model": "fake", "name": "scripted"})
     root = api("/api/mkdir", {"parent": home + "/projects", "name": "features"})["path"]
     check("a new project folder", root.endswith("/projects/features"), root)
+    synced = {}
     try:
         sid = api("/api/sessions", {"root": root, "model": "scripted", "mode": "full-auto", "warm": False})["id"]
         d, seconds, _ = run_turn(sid, "go", limit=900)
+        # /sync: the computer pushes a commit meanwhile, the phone has one of its own; /sync merges both and pushes
+        host = os.path.join(top, "host")
+        env = dict(os.environ, GIT_AUTHOR_NAME="CI", GIT_AUTHOR_EMAIL="ci@x", GIT_COMMITTER_NAME="CI",
+                   GIT_COMMITTER_EMAIL="ci@x")
+        subprocess.run(["git", "clone", "-q", os.path.join(top, "shared.git"), host], check=True)
+        with open(os.path.join(host, "computer.txt"), "w") as f:
+            f.write("from the computer\n")
+        for cmd in (["add", "-A"], ["commit", "-q", "-m", "from the computer"], ["push", "-q", "origin", "main"]):
+            subprocess.run(["git"] + cmd, cwd=host, env=env, check=True)
+        sync_sid = api("/api/sessions", {"root": root + "/shared", "mode": "full-auto", "warm": False})["id"]
+        synced = api("/api/sessions/%s/send" % sync_sid, {"text": "/sync"}, timeout=600)
     finally:
         llm.close()
         daemon.kill()
@@ -216,12 +230,18 @@ def features(state):
                                    indent=1), flush=True)
     check("git: init, commit, log, status", len(bash) > 0 and "STATUS-OK" in bash[0] and "first on the phone" in bash[0],
           bash[:1])
-    pushed = subprocess.run(["git", "--git-dir", os.path.join(top, "shared.git"), "log", "--oneline", "-1", "main"],
+    pushed = subprocess.run(["git", "--git-dir", os.path.join(top, "shared.git"), "log", "--oneline", "main"],
                             capture_output=True, text=True).stdout
     check("git: clone and push over git://", len(bash) > 1 and "PUSH-OK" in bash[1] and "from the phone" in pushed,
           (bash[1:2], pushed))
-    check("git: clone from github.com over HTTPS", len(bash) > 2 and "HTTPS-OK" in bash[2] and "README" in bash[2],
-          bash[2:3])
+    check("git: clone from github.com over HTTPS", len(bash) > 3 and "HTTPS-OK" in bash[3] and "README" in bash[3],
+          bash[3:4])
+    remote = subprocess.run(["git", "--git-dir", os.path.join(top, "shared.git"), "log", "--format=%s", "main"],
+                            capture_output=True, text=True).stdout
+    print("/sync on the phone: %r\nthe remote now: %r" % (synced, remote), flush=True)
+    check("git: /sync merges the computer's commit and pushes the phone's",
+          synced.get("code") == 0 and "second from the phone" in remote and "from the computer" in remote,
+          (synced.get("reply"), remote))
     check("phone: device", len(phone) > 0 and "Android" in phone[0], phone[:1])
     check("phone: open Settings", len(phone) > 1 and "opened Settings" in phone[1], phone[1:2])
     check("phone: read the screen", len(phone) > 3 and "com.android.settings" in phone[3], phone[3:4])

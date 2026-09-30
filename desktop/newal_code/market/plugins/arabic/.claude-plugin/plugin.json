@@ -1,0 +1,8 @@
+{
+  "name": "arabic",
+  "version": "1.0.0",
+  "author": {
+    "name": "NewAl"
+  },
+  "description": "/rtl: web pages right-to-left for Arabic, by a program: dir=\"rtl\" and CSS's left/right in their logical forms."
+}

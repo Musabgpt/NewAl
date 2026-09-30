@@ -15,6 +15,18 @@
       "description": "Your computer or phone, answered at once by a program (no model needed): /sysinfo (system, memory, storage, battery, the model sizes that fit), /disk (what takes the space), /clean (caches and old temporary files), /ports (what listens on which port), /programs (search, install, update with winget, pkg, Homebrew, apt)."
     },
     {
+      "name": "data",
+      "source": "./plugins/data",
+      "category": "data",
+      "description": "/csv <file> [column] [value column]: a CSV, TSV, Excel (.xlsx) or JSON file at a glance, computed by a program: rows, each column's type, empty cells, distinct values, minimum, maximum, mean, median and total, the most common values; with a column, a chart as an SVG file (\"sales by region\"). Arabic Windows files and Arabic digits included."
+    },
+    {
+      "name": "arabic",
+      "source": "./plugins/arabic",
+      "category": "language",
+      "description": "/rtl [file or folder] [--apply]: turns a site right-to-left for Arabic: dir=\"rtl\" (and lang=\"ar\") on the page, and CSS's left and right in their logical forms (margin-inline-start, text-align: start, float: inline-start, inset-inline, logical corner radii, 4-value margins split), in CSS files, <style> blocks, style attributes and JSX style objects. It lists the changes first; --apply writes them."
+    },
+    {
       "name": "guard",
       "source": "./plugins/guard",
       "category": "safety",
