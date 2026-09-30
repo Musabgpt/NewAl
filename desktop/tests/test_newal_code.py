@@ -219,6 +219,13 @@ class ToolsTest(unittest.TestCase):
             patch.parse("no patch here")
 
 
+class ClipTest(unittest.TestCase):
+    def test_windows_line_ends_and_progress_bars(self):
+        self.assertEqual(tools.clip("a.txt\r\nb.txt\r\nlast\r\n").strip(), "a.txt\nb.txt\nlast")
+        self.assertEqual(tools.clip("download 10%\rdownload 100%\ndone\n").strip(), "download 100%\ndone")
+        self.assertEqual(tools.clip("x 1%\rx 99%\r\nok\r\n").strip(), "x 99%\nok")
+
+
 class PermissionsTest(unittest.TestCase):
     def test_powershell_and_cmd_commands(self):
         c = permissions.classify_command

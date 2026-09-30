@@ -678,7 +678,9 @@ def has_powershell_tool():
 def clip(text, limit=MAX_OUTPUT):
     """Command output as the model sees it: colours and progress bars out, the start and the end kept."""
     text = re.sub(r"\x1b\[[0-9;?]*[A-Za-z]", "", text or "")
-    text = "\n".join(l.split("\r")[-1] for l in text.split("\n"))
+    # Windows' line ends first (PowerShell, and Python or Node on Windows, end lines with \r\n), then a bare \r: a
+    # progress bar drawing over its line, of which the last drawing is kept.
+    text = "\n".join(l.split("\r")[-1] for l in text.replace("\r\n", "\n").split("\n"))
     if len(text) <= limit:
         return text
     head = text[:limit // 4]
