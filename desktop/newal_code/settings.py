@@ -50,7 +50,7 @@ DEFAULTS = {
     "hooks": {},
     "mcp_servers": {},
     "auto_context": True,         # files named in a request are read with it (saves a model round)
-    "auto_compact": 0.85,         # compact the conversation when it fills this share of the context
+    "auto_compact": 0.8,          # at this share of the context: old tool outputs pruned, then a summary
     "port": 8790,
     "theme": "system",
     "web": True,                  # web_fetch tool

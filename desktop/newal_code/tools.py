@@ -562,9 +562,43 @@ def _ignored(pats, relpath):
     return False
 
 
-def files_in(ctx, base=None, limit=5000):
+def _fast_list(ctx, base):
+    """The project's files by ripgrep (rg --files) or fd, when installed: .gitignore respected, many times faster
+    than walking in Python on a big project. The same result as the walk: no hidden folder but .github, none of
+    IGNORED_DIRS. None when neither is installed (or fails)."""
+    rg = shutil.which("rg")
+    fd = None if rg else (shutil.which("fd") or shutil.which("fdfind"))
+    if not (rg or fd) or not os.path.isdir(base):
+        return None
+    cmd = [rg, "--files", "--no-messages"] if rg else [fd, "--type", "f", "--color", "never"]
+    try:
+        r = subprocess.run(cmd, cwd=base, capture_output=True, timeout=30, stdin=subprocess.DEVNULL,
+                           creationflags=0x08000000 if os.name == "nt" else 0)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if r.returncode not in (0, 1):
+        return None
+    names = [n.replace("\\", "/").lstrip("./") for n in r.stdout.decode("utf-8", "replace").splitlines() if n.strip()]
+    if os.path.isdir(os.path.join(base, ".github")):
+        names += [os.path.relpath(p, base).replace(os.sep, "/") for p, _ in _walk(ctx, os.path.join(base, ".github"))]
     out = []
-    for full, r in _walk(ctx, base or ctx.root):
+    for n in sorted(set(names)):
+        parts = n.split("/")
+        if any(p in IGNORED_DIRS or (p.startswith(".") and p != ".github" and i < len(parts) - 1)
+               for i, p in enumerate(parts)):
+            continue
+        full = os.path.join(base, *parts)
+        out.append((full, rel(ctx, full)))
+    return out
+
+
+def files_in(ctx, base=None, limit=5000):
+    base = base or ctx.root
+    fast = _fast_list(ctx, base)
+    if fast is not None:
+        return fast[:limit]
+    out = []
+    for full, r in _walk(ctx, base):
         out.append((full, r))
         if len(out) >= limit:
             break
@@ -601,16 +635,73 @@ def t_glob(ctx, pattern, path=""):
     return text, {"count": len(hits)}
 
 
+def _rg_grep(ctx, pattern, base, glob, ignore_case, context):
+    """grep by ripgrep (much faster on a big project): (text, meta) as the Python search gives them, or None when
+    ripgrep is missing or cannot take this pattern (Rust's regular expressions have no look-around)."""
+    rg = shutil.which("rg")
+    if not rg:
+        return None
+    cmd = [rg, "--line-number", "--no-heading", "--color", "never", "--no-messages", "--max-columns", str(MAX_LINE),
+           "--max-columns-preview", "--max-filesize", "2M", "--hidden"]       # (hidden folders filtered below)
+    cmd += ["-i"] if ignore_case else []
+    cmd += ["-C", str(context)] if context else []
+    cmd += ["--glob", glob] if glob else []
+    for d in IGNORED_DIRS:
+        cmd += ["--glob", "!%s/" % d]
+    cmd += ["-e", pattern, "--", os.path.relpath(base, ctx.root) if base != ctx.root else "."]
+    try:
+        r = subprocess.run(cmd, cwd=ctx.root, capture_output=True, timeout=60, stdin=subprocess.DEVNULL,
+                           creationflags=0x08000000 if os.name == "nt" else 0)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if r.returncode not in (0, 1):
+        return None
+    out, count, files, block = [], 0, set(), []
+    for line in r.stdout.decode("utf-8", "replace").splitlines():
+        if line == "--":
+            if block:
+                out.append("\n".join(block))
+                block = []
+            continue
+        m = re.match(r"^(.*?)([:-])(\d+)[:-](.*)$", line)
+        if not m:
+            continue
+        path = m.group(1).replace("\\", "/")
+        path = path[2:] if path.startswith("./") else path
+        parts = path.split("/")
+        if any(p.startswith(".") and p != ".github" for p in parts[:-1]):
+            continue                           # as the walk: no hidden folder but .github (hidden files do count)
+        if m.group(2) == ":":
+            count += 1
+            files.add(path)
+        if len(out) >= 80:
+            continue
+        if context:
+            block.append("%s:%s%s %s" % (path, m.group(3), ":" if m.group(2) == ":" else "-", m.group(4)[:MAX_LINE]))
+        elif m.group(2) == ":":
+            out.append("%s:%s: %s" % (path, m.group(3), m.group(4).strip()[:MAX_LINE]))
+    if block and len(out) < 80:
+        out.append("\n".join(block))
+    text = "\n".join(out) if out else "no matches for %s" % pattern
+    if count > len(out) and not context:
+        text += "\n… %d more matches in %d files" % (count - len(out), len(files))
+    return text, {"matches": count, "files": len(files), "rg": True}
+
+
 @tool("grep", "Search file contents with a regular expression; returns path:line: text.",
       {"pattern": _s("regular expression"), "path": _s("file or folder (default: project)"),
        "glob": _s("only files matching this pattern, e.g. *.py"), "ignore_case": _b("case-insensitive"),
        "context": _i("lines of context around each match")}, ["pattern"], "read")
 def t_grep(ctx, pattern, path="", glob="", ignore_case=False, context=0):
+    base = resolve(ctx, path) if path else ctx.root
+    context = max(0, min(int(context or 0), 5))
+    fast = _rg_grep(ctx, pattern, base, glob, ignore_case, context)
+    if fast is not None:
+        return fast
     try:
         rx = re.compile(pattern, re.I if ignore_case else 0)
     except re.error:
         rx = re.compile(re.escape(pattern), re.I if ignore_case else 0)
-    base = resolve(ctx, path) if path else ctx.root
     targets = [(base, rel(ctx, base))] if os.path.isfile(base) else files_in(ctx, base)
     out, count, files = [], 0, set()
     context = max(0, min(int(context or 0), 5))
@@ -624,6 +715,8 @@ def t_grep(ctx, pattern, path="", glob="", ignore_case=False, context=0):
         except (OSError, ToolError):
             continue
         lines = text.split("\n")
+        if lines and lines[-1] == "":
+            lines.pop()                            # no phantom empty line after the file's last line break
         for i, line in enumerate(lines):
             if rx.search(line):
                 count += 1
@@ -910,17 +1003,23 @@ def _job_text(job, limit=3000):
     return clip(data.decode("utf-8", "replace"), limit)
 
 
-@tool("job", "Background commands: action=output shows a job's output so far, action=stop ends it.",
-      {"id": _s("job id, e.g. job1"), "action": _s("output or stop")}, ["id"], "read")
-def t_job(ctx, id, action="output"):  # noqa: A002
-    job = ctx.session.jobs.get(str(id))
+@tool("job", "Background commands (started with bash background=true): action=output shows a job's output so far, "
+             "action=stop ends it, action=list shows them all with their process ids.",
+      {"id": _s("job id (job1) or process id"), "action": _s("output, stop or list")}, [], "read")
+def t_job(ctx, id="", action="output"):  # noqa: A002
+    jobs = ctx.session.jobs
+    if action == "list" or not str(id or "").strip():
+        rows = ["%s pid %d %s: %s" % (j.id, j.proc.pid, "running" if j.proc.poll() is None else
+                                      "exited %s" % j.proc.returncode, j.command) for j in jobs.values()]
+        return "\n".join(rows) or "no background jobs", {"jobs": len(rows)}
+    job = jobs.get(str(id)) or next((j for j in jobs.values() if str(j.proc.pid) == str(id).strip()), None)
     if not job:
-        return "no job %s (jobs: %s)" % (id, ", ".join(ctx.session.jobs) or "none"), {}
+        return "no job %s (jobs: %s)" % (id, ", ".join(jobs) or "none"), {}
     if action == "stop":
         _kill(job.proc)
-        return "stopped %s" % id, {"job": id}
+        return "stopped %s (pid %d)" % (job.id, job.proc.pid), {"job": job.id}
     state = "running" if job.proc.poll() is None else "exited %s" % job.proc.returncode
-    return "%s: %s\n%s" % (id, state, _job_text(job)), {"job": id}
+    return "%s (pid %d): %s\n%s" % (job.id, job.proc.pid, state, _job_text(job)), {"job": job.id}
 
 
 def stop_jobs(session):

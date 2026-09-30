@@ -43,7 +43,8 @@ INIT = ("Look at this project (list its files, read the README and the build/tes
         "commands), the code layout, and conventions to follow. Under 60 lines. If AGENTS.md exists, improve it.")
 
 GOAL_CHECK = ("Goal check (answer in one line, no tool calls): is this goal fully met by the work above, as shown by "
-              "tool results? Goal: {goal}\nReply DONE if it is, otherwise CONTINUE: <what is still missing>.")
+              "tool results? Goal: {goal}\nReply DONE if it is, otherwise CONTINUE <how much is done, 0-100>%: <what is "
+              "still missing>.")
 
 VERIFY_FAILED = "The project's tests fail after your change:\n{output}\nFix the cause (change a test only if the test itself is wrong), then run the tests again."
 

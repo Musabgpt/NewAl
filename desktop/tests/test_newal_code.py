@@ -226,6 +226,220 @@ class ToolsTest(unittest.TestCase):
             patch.parse("no patch here")
 
 
+class CircuitTest(unittest.TestCase):
+    """The circuit breaker (circuit.py): the same failing call a 3rd time, or the step budget, ends the turn."""
+
+    def test_states(self):
+        from newal_code import circuit
+        b = circuit.Breaker()
+        k = circuit.Breaker.key(-1, "bash", {"command": "pyhton x.py"})
+        self.assertEqual(b.record(k, True, "bash", "exit 127"), "")
+        self.assertEqual(b.state, circuit.CLOSED)
+        self.assertIn("change it", b.record(k, True, "bash", "exit 127"))
+        self.assertEqual(b.state, circuit.HALF_OPEN)
+        b.record(circuit.Breaker.key(-1, "read", {"path": "x.py"}), False, "read")
+        self.assertEqual(b.state, circuit.CLOSED)                         # a success closes it again
+        self.assertIn("Stopping", b.record(k, True, "bash", "exit 127"))
+        self.assertTrue(b.open)
+        self.assertEqual(b.reason, "bash failed 3 times the same way (exit 127)")
+        fresh = circuit.Breaker()
+        after_edit = circuit.Breaker.key(4, "bash", {"command": "pyhton x.py"})      # after a file change: a new try
+        fresh.record(k, True, "bash")
+        fresh.record(k, True, "bash")
+        self.assertEqual(fresh.record(after_edit, True, "bash"), "")
+        self.assertFalse(fresh.open)
+        self.assertTrue(circuit.Breaker().over_budget(25, 25))
+        self.assertEqual(circuit.step_budget({}, local=True), 25)
+        self.assertEqual(circuit.step_budget({}, local=False), 60)
+        self.assertEqual(circuit.step_budget({"max_steps": 9}, local=True), 9)
+        self.assertEqual(circuit.step_budget({"max_steps": 9}, {"steps": 4}), 4)
+
+    def test_a_turn_stops_at_the_third_identical_failure(self):
+        bad = {"tools": [("bash", {"command": "python3 no_such_file.py"})]}
+        answer, events, _, llm, _ = run_agent([bad, bad, bad, bad, "never reached"])
+        self.assertTrue(answer.startswith("Stopped: bash failed 3 times the same way (exit"), answer)
+        ends = [e for e in events if e.get("type") == "tool_end" and e.get("name") == "bash"]
+        self.assertEqual(len(ends), 3)                                     # the 4th never ran
+        self.assertIn("change it", ends[1]["text"])
+
+    def test_the_step_budget(self):
+        script = [{"tools": [("bash", {"command": "echo %d" % i})]} for i in range(10)] + ["done"]
+        llm = FakeLLM(script)
+        self.addCleanup(llm.close)
+        sess = session.Session(make_project(CALC))
+        ag = agentmod.Agent(sess, emit=lambda e: None, approve=lambda r: "once", client=fake_client(llm))
+        ag.cfg["max_steps"] = 4
+        self.assertEqual(ag.run("go"), "Stopped after 4 steps without finishing.")
+
+
+class RepairTest(unittest.TestCase):
+    """Tool calls a small model got wrong, put right and run (repair.py)."""
+
+    def test_json_that_is_not_quite_json(self):
+        from newal_code import repair
+        self.assertEqual(repair.loads("{'command': 'ls -la', }"), {"command": "ls -la"})
+        self.assertEqual(repair.loads('{"path": "a.js", "content": "const o = {a: 1,};\n"}'),
+                         {"path": "a.js", "content": "const o = {a: 1,};\n"})      # a string's ",}" stays
+        self.assertEqual(repair.loads('{"path": "x.py", "content": "print(1)\nprint(2)"'),
+                         {"path": "x.py", "content": "print(1)\nprint(2)"})           # left open: closed
+        self.assertEqual(repair.loads("{'all': True, 'x': None}"), {"all": True, "x": None})
+        self.assertEqual(repair.loads('```json\n{"command": "pytest -q"}\n```'), {"command": "pytest -q"})
+        self.assertEqual(repair.loads('"{\\"command\\": \\"ls\\"}"'), {"command": "ls"})
+        self.assertIsNone(repair.loads("not json at all"))
+
+    def test_calls_written_as_text(self):
+        from newal_code import repair
+        root = make_project(CALC)
+        allowed = ["read", "edit", "write", "bash", "glob", "grep"]
+
+        def calls(text, loose=True):
+            return [(c["name"], json.loads(c["arguments"])) for c in repair.calls_in_text(text, allowed, root,
+                                                                                            loose)[0]]
+        self.assertEqual(calls('<tool_call>\n{"name": "bash", "arguments": {"command": "ls"}}\n</tool_call>'),
+                         [("bash", {"command": "ls"})])
+        self.assertEqual(calls("<tool_call>\n{'name': 'execute_terminal', 'arguments': {'command': 'ls'}"),
+                         [("bash", {"command": "ls"})])
+        self.assertEqual(calls('<function=read_file>{"file_path": "calc.py", "start_line": 1, "end_line": 2}'
+                               '</function>'), [("read", {"path": "calc.py", "offset": 1, "limit": 2})])
+        self.assertEqual(calls('[TOOL_CALLS] [{"name": "search_codebase", "arguments": {"query": "def add"}}]'),
+                         [("grep", {"pattern": "def add"})])
+        self.assertEqual(calls("Action: bash\nAction Input: python3 -m pytest -q"),
+                         [("bash", {"command": "python3 -m pytest -q"})])
+        self.assertEqual(calls("Action: bash\nAction Input: ls", loose=False), [])      # API models: tags only
+        self.assertEqual(calls("calc.py\n```python\n<<<<<<< SEARCH\n    return a - b\n=======\n    return a + b\n"
+                               ">>>>>>> REPLACE\n```"), [("edit", {"path": "calc.py", "old": "    return a - b",
+                                                                   "new": "    return a + b"})])
+        self.assertEqual(calls("new.py\n<<<<<<< SEARCH\n=======\nprint('hi')\n>>>>>>> REPLACE"),
+                         [("write", {"path": "new.py", "content": "print('hi')\n"})])
+        for text in ('Use this:\n```json\n{"name": "Sam", "age": 3}\n```',        # a code example stays text
+                     "gone.py\n<<<<<<< SEARCH\nx = 1\n=======\nx = 2\n>>>>>>> REPLACE",   # no such file
+                     '<tool_call>{"name": "launch_rocket", "arguments": {}}</tool_call>'):   # no such tool
+            self.assertEqual(calls(text), [], text)
+
+    def test_a_call_written_as_text_runs(self):
+        answer, events, _, _, _ = run_agent(['<tool_call>\n{"name": "execute_terminal", "arguments": '
+                                             '{"command": "echo repaired"}}\n</tool_call>', "done"])
+        self.assertEqual(answer, "done")
+        end = next(e for e in events if e.get("type") == "tool_end")
+        self.assertEqual((end["name"], end["ok"]), ("bash", True))
+        self.assertIn("repaired", end["text"])
+
+    def test_a_search_replace_block_edits_the_file(self):
+        answer, _, _, _, root = run_agent(["calc.py\n<<<<<<< SEARCH\n    return a - b\n=======\n    return a + b\n"
+                                           ">>>>>>> REPLACE", "Fixed add."])
+        self.assertEqual(answer, "Fixed add.")
+        with open(os.path.join(root, "calc.py")) as f:
+            self.assertIn("return a + b", f.read())
+
+    def test_broken_arguments_and_other_agents_names_run(self):
+        broken = "{'file_path': 'calc.py', 'old_string': 'return a - b', 'new_string': 'return a + b',"
+        answer, events, _, _, root = run_agent([{"tools": [("apply_diff", broken)]}, "Fixed."])
+        end = next(e for e in events if e.get("type") == "tool_end")
+        self.assertEqual((end["name"], end["ok"]), ("edit", True), end)
+        with open(os.path.join(root, "calc.py")) as f:
+            self.assertIn("return a + b", f.read())
+
+
+class PruneTest(unittest.TestCase):
+    def test_old_outputs_pruned_at_80_percent_then_a_summary(self):
+        llm = FakeLLM(["The user fixed add; tests pass."])
+        self.addCleanup(llm.close)
+        sess = session.Session(make_project(CALC))
+        sess.save_meta()                                               # (a turn does this at its start)
+        ag = agentmod.Agent(sess, emit=lambda e: None, client=fake_client(llm))
+        sess.add({"role": "user", "content": "fix it"})
+        for i in range(10):
+            name, out = ("read", "1\tdef add(a, b):\n" + "x" * 900) if i == 3 else ("bash", "exit %d\n" % (i % 2) + "y" * 900)
+            sess.add({"role": "assistant", "content": "", "tool_calls": [
+                {"id": "c%d" % i, "type": "function", "function": {"name": name, "arguments": "{}"}}]})
+            sess.add({"role": "tool", "tool_call_id": "c%d" % i, "content": out})
+        self.assertEqual(settings.user()["auto_compact"], 0.8)
+        sess.last_prompt_tokens = int(0.81 * ag.client.context())
+        self.assertFalse(ag._maybe_compact())                          # pruned: no summary yet
+        results = [m["content"] for m in sess.messages if m.get("role") == "tool"]
+        self.assertEqual(results[0], "[Terminal output pruned: exit 0]")
+        self.assertEqual(results[1], "[Terminal output pruned: exit 1]")
+        self.assertEqual(results[3], "[File content pruned: read it again if you need it]")
+        self.assertTrue(all(len(r) > 900 for r in results[-6:]))      # the latest six stay whole
+        reloaded = session.Session.load(sess.id)                       # recorded: a resume sees the same
+        self.assertEqual([m["content"] for m in reloaded.messages if m.get("role") == "tool"][0],
+                         "[Terminal output pruned: exit 0]")
+        sess.last_prompt_tokens = int(0.9 * ag.client.context())      # still full: now the summary
+        self.assertTrue(ag._maybe_compact())
+        self.assertIn("The user fixed add; tests pass.", sess.messages[0]["content"])
+
+
+class OmniCodeTest(unittest.TestCase):
+    """The rest of OmniCode's list: search by ripgrep/fd with the same results as without, the goal's percentage,
+    background processes by their PIDs, and /status showing both."""
+
+    def test_ripgrep_and_the_python_search_agree(self):
+        from unittest import mock
+        root = make_project({"a/x.py": "def alpha():\n    return 1\n", "b/y.js": "function beta() {}\n",
+                             ".gitignore": "build/\n", "build/z.py": "def gamma(): pass\n",
+                             "node_modules/m/i.js": "def nope\n", ".hidden/h.py": "def hidden(): pass\n",
+                             ".github/workflows/ci.yml": "name: def ci\n"})
+        s = session.Session(root)
+        ag = agentmod.Agent(s, client=fake_client(FakeLLM([])))
+        c = tools.ToolContext(ag) if hasattr(tools, "ToolContext") else agentmod.ToolContext(ag)
+
+        def both(name, args):
+            fast = tools.call(c, name, args)
+            real_which = shutil.which
+            with mock.patch("shutil.which", lambda n, *a, **k: None if n in ("rg", "fd", "fdfind") else real_which(n)):
+                slow = tools.call(c, name, args)
+            return fast, slow
+        if not shutil.which("rg"):
+            self.skipTest("ripgrep is not installed here")
+        (ft, fm), (st, sm) = both("grep", {"pattern": r"def \w+"})
+        self.assertTrue(fm.get("rg"))
+        self.assertEqual(sorted(ft.splitlines()), sorted(st.splitlines()))
+        self.assertEqual((fm["matches"], fm["files"]), (sm["matches"], sm["files"]))
+        self.assertIn(".github/workflows/ci.yml:1: name: def ci", ft)
+        for gone in ("build/z.py", "node_modules", ".hidden"):
+            self.assertNotIn(gone, ft)
+        (ft, _), (st, _) = both("grep", {"pattern": "return", "context": 1, "ignore_case": True})
+        self.assertEqual(ft, st)
+        (ft, _), (st, _) = both("glob", {"pattern": "**/*.py"})
+        self.assertEqual(sorted(ft.splitlines()), sorted(st.splitlines()))
+        (ft, _), _ = both("grep", {"pattern": r"(?<=def )alpha"})         # look-behind: Python's search answers
+        self.assertIn("a/x.py:1:", ft)
+
+    def test_the_goal_has_a_percentage(self):
+        script = [{"tools": [("write", {"path": "a.py", "content": "x = 1\n"})]}, "Wrote a.py.",
+                  "CONTINUE 40%: b.py is missing", {"tools": [("write", {"path": "b.py", "content": "y = 2\n"})]},
+                  "Wrote b.py.", "DONE"]
+        answer, events, s, _, _ = run_agent(script, files={"README.md": "# x\n"}, goal="a.py and b.py exist",
+                                            text="make a.py and b.py")
+        checks = [e for e in events if e.get("type") == "goal_check"]
+        self.assertEqual([(e["done"], e["progress"]) for e in checks], [(False, 40), (True, 100)])
+        self.assertIn("b.py is missing", next(m["content"] for m in s.messages if "not met yet" in
+                                              str(m.get("content"))))
+        self.assertEqual(s.goal, "")
+
+    def test_background_processes_by_pid_and_status(self):
+        from newal_code import service
+        root = make_project({})
+        svc = service.Service()
+        s = svc.create(root)
+        ag = svc.agent(s.id)
+        c = agentmod.ToolContext(ag)
+        text, _ = tools.call(c, "bash", {"command": "echo up; sleep 30", "background": True})
+        pid = int(re.search(r"pid (\d+)", text).group(1))
+        try:
+            listed, _ = tools.call(c, "job", {"action": "list"})
+            self.assertIn("job1 pid %d running" % pid, listed)
+            out, _ = tools.call(c, "job", {"id": str(pid)})              # by its process id too
+            self.assertIn("job1 (pid %d): running" % pid, out)
+            s.goal, s.goal_progress = "ship it", 45
+            status = svc.command(s, "/status")["reply"]
+            self.assertIn("Goal: ship it (45% done)", status)
+            self.assertIn("job1 (pid %d) running: echo up; sleep 30" % pid, status)
+        finally:
+            stopped, _ = tools.call(c, "job", {"id": "job1", "action": "stop"})
+        self.assertIn("stopped job1 (pid %d)" % pid, stopped)
+
+
 class AnnounceTest(unittest.TestCase):
     def test_a_reply_that_only_announces_is_told_to_act(self):
         # the 0.8B on a phone once answered "I will create hello.py and run it." and stopped: told once, it acts

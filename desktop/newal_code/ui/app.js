@@ -333,7 +333,7 @@
     renderEmpty();
     setBusyUI(S.busy.has(id));
     renderSidebar();
-    showGoal(d.meta.goal);
+    showGoal(d.meta.goal, d.meta.goal_progress);
     scrollDown(true);
     api("/api/sessions/" + id + "/changes").then(c => setBranch(c.git)).catch(() => {});
   }
@@ -663,7 +663,8 @@
       }
       case "goal_check": {
         const X = turnBox();
-        X.turn.appendChild(h("div", "notice", "🎯 " + esc(ev.text || (ev.done ? "DONE" : "CONTINUE"))));
+        X.turn.appendChild(h("div", "notice", "🎯 " + (ev.progress != null ? ev.progress + "% · " : "") + esc(ev.text || (ev.done ? "DONE" : "CONTINUE"))));
+        if (!ev.done && S.meta && S.meta.goal) showGoal(S.meta.goal, ev.progress);
         break;
       }
       case "goal":
@@ -728,7 +729,7 @@
           $("#todo-pin").hidden = true;
           refreshChanges();
           if (S.meta) api("/api/sessions/" + S.current).then(d => {
-            S.meta = d.meta; $("#thread-title").textContent = d.meta.title || "New thread"; showGoal(d.meta.goal);
+            S.meta = d.meta; $("#thread-title").textContent = d.meta.title || "New thread"; showGoal(d.meta.goal, d.meta.goal_progress);
           }).catch(() => {});
         }
         scrollDown();
@@ -789,9 +790,9 @@
     sp.hidden = !parts.length;
   }
 
-  function showGoal(goal) {
+  function showGoal(goal, progress) {
     $("#goal-chip").hidden = !goal;
-    $("#goal-chip").textContent = goal ? "🎯 " + goal : "";
+    $("#goal-chip").textContent = goal ? "🎯 " + goal + (progress ? " · " + progress + "%" : "") : "";
   }
 
   function diffView(diff) {
@@ -852,7 +853,7 @@
     if (/^\/(model|mode|reasoning|approvals|permissions)\b/.test(text)) {
       const d = await api("/api/sessions/" + sid); S.meta = d.meta; updatePickers();
     }
-    if (/^\/goal\b/.test(text)) api("/api/sessions/" + sid).then(d => showGoal(d.meta.goal));
+    if (/^\/goal\b/.test(text)) api("/api/sessions/" + sid).then(d => { S.meta = d.meta; showGoal(d.meta.goal, d.meta.goal_progress); });
     if (/^\/undo\b/.test(text)) refreshChanges();
     scrollDown(true);
   }

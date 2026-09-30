@@ -338,6 +338,7 @@ class Service:
                 s.save_meta()
                 return {"reply": "Goal cleared." if args else "No goal set. Usage: /goal <condition>"}
             s.goal = args
+            s.goal_progress = 0
             s.save_meta()
             return {"prompt": "Work toward this goal until it holds: " + args}
         if name == "compact":
@@ -398,13 +399,17 @@ class Service:
             u = s.usage
             srv = [{"model": os.path.basename(x.path), "ctx": x.ctx, "rss_gb": round(x.rss() / 2 ** 30, 2),
                     "mtp": x.mtp} for x in runtime.pool.running()]
+            jobs = ["  %s (pid %d) %s: %s" % (j.id, j.proc.pid, "running" if j.proc.poll() is None else
+                                             "exited %s" % j.proc.returncode, j.command[:80]) for j in s.jobs.values()]
             return {"reply": "Model: %s · mode: %s · reasoning: %s\nContext used: %d tokens%s\nThis thread: %d "
                              "requests, %d tokens read (%d from cache), %d written, %.0f s\nComputer: %s, %d cores, "
-                             "%.1f GB RAM (%s tier, %.1f GB for models)\nRunning: %s" % (
+                             "%.1f GB RAM (%s tier, %.1f GB for models)\nRunning: %s\nGoal: %s\nBackground: %s" % (
                                  s.model, s.mode, s.reasoning, s.last_prompt_tokens,
                                  (" of %d" % a.client.context()) if a.client else "", u.get("calls", 0),
                                  u.get("prompt", 0), u.get("cached", 0), u.get("output", 0), u.get("seconds", 0),
-                                 hw["cpu"], hw["cores"], hw["ram_gb"], hw["tier"], hw["budget_gb"], srv or "none")}
+                                 hw["cpu"], hw["cores"], hw["ram_gb"], hw["tier"], hw["budget_gb"], srv or "none",
+                                 ("%s (%d%% done)" % (s.goal, s.goal_progress)) if s.goal else "none",
+                                 ("\n" + "\n".join(jobs)) if jobs else "none")}
         if name == "cost":
             u = s.usage
             return {"reply": "Read %d tokens (%d from cache, %d new), wrote %d, in %d requests (%.0f s reading, "

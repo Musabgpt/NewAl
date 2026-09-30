@@ -15,7 +15,7 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 
 from . import context as ctxmod
-from . import extensions, hooks, mcp, models, permissions, prompts, providers, settings, tools
+from . import circuit, extensions, hooks, mcp, models, permissions, prompts, providers, repair, settings, tools
 from .session import Session
 
 MAX_DEPTH = 2              # the main agent may start sub-agents, which may not start their own
@@ -83,6 +83,7 @@ class Agent:
         self.auto_tests = None         # None: not tried yet; False: off for this session (none, too slow, missing)
         self.think_next = False
         self.last_error = ""
+        self.breaker = circuit.Breaker()   # made anew by each run(): see circuit.py
         self.lock = threading.Lock()
         self.pending = {}          # approval id -> threading.Event, answer
         self.sub_count = 0
@@ -282,28 +283,38 @@ class Agent:
         answer = ""
         verify_rounds = goal_rounds = stop_rounds = 0
         verify = cfg.get("verify", True) if verify is None else verify
-        max_steps = int((self.agent_def or {}).get("steps") or cfg.get("max_steps") or 60)
-        repeats = {}
-        self._stuck = None
+        # The circuit breaker (circuit.py): the same failing call a 3rd time, or the step budget spent (25 steps for
+        # a local or small model, 60 for an API model), ends the turn.
+        max_steps = circuit.step_budget(cfg, self.agent_def, local=client.local or bool(client.spec.get("small")))
+        self.breaker = circuit.Breaker()
         error = ""
         acted = nudged = False
         try:
             while True:
                 if self.cancel.is_set():
                     raise providers.Cancelled()
-                if self.step >= max_steps:
+                if self.breaker.over_budget(self.step, max_steps):
                     answer = answer or "Stopped after %d steps without finishing." % max_steps
                     break
                 self._maybe_compact()
                 comp = self._call()
                 self.step += 1
+                if not comp.tool_calls and comp.content:
+                    # calls a model wrote as text (<tool_call>, a json block, SEARCH/REPLACE...): run, not shown
+                    found, rest = repair.calls_in_text(comp.content, s.tool_names, s.root,
+                                                       loose=client.local or bool(client.spec.get("small")))
+                    if found:
+                        comp.tool_calls, comp.content = found, rest
+                        self.emit({"type": "status", "text": "read %d tool call%s from the model's text" % (
+                            len(found), "" if len(found) == 1 else "s")})
                 msg = comp.message()
                 s.add(msg)
                 if comp.tool_calls:
                     acted = True
-                    self._run_tools(ctx, comp.tool_calls, repeats)
-                    if self._stuck:
-                        answer = ("Stopped: %s kept failing the same way (%s)." % self._stuck)
+                    self._run_tools(ctx, comp.tool_calls)
+                    if self.breaker.open:
+                        answer = "Stopped: %s." % self.breaker.reason
+                        self.emit({"type": "notice", "text": answer})
                         break
                     continue
                 answer = shown(comp.content)
@@ -501,30 +512,28 @@ class Agent:
 
     # ------------------------------------------------------------ tools
 
-    def _run_tools(self, ctx, calls, repeats):
+    def _run_tools(self, ctx, calls):
         s = self.session
         parsed = []
         for c in calls:
-            try:
-                args = json.loads(c["arguments"] or "{}") if isinstance(c["arguments"], str) else dict(c["arguments"])
-                if not isinstance(args, dict):
-                    args = {}
-            except ValueError:
-                args = None
+            # not quite JSON (a small model's): repaired; other agents' tool and argument names: made ours
+            args = repair.loads(c["arguments"])
+            if args is not None:
+                c["name"], args = repair.normalize(c["name"], args, s.tool_names)
             parsed.append((c, args))
         results = [None] * len(parsed)
         read_only = all(p[1] is not None and tools.REGISTRY.get(p[0]["name"]) is not None and
                         tools.REGISTRY[p[0]["name"]].kind == "read" for p in parsed)
         if read_only and len(parsed) > 1:
             with ThreadPoolExecutor(max_workers=min(8, len(parsed))) as ex:
-                futs = [ex.submit(self._one_tool, ctx, c, a, repeats) for c, a in parsed]
+                futs = [ex.submit(self._one_tool, ctx, c, a) for c, a in parsed]
                 results = [f.result() for f in futs]
         else:
             for i, (c, a) in enumerate(parsed):
                 if self.cancel.is_set():
                     results[i] = "interrupted by the user"
                     continue
-                results[i] = self._one_tool(ctx, c, a, repeats)
+                results[i] = self._one_tool(ctx, c, a)
         results = self._tests_after_step(ctx, parsed, results)
         for (c, _), text in zip(parsed, results):
             s.add({"role": "tool", "tool_call_id": c["id"], "content": text})
@@ -580,7 +589,7 @@ class Agent:
         self.last_error = sig
         return results
 
-    def _one_tool(self, ctx, call, args, repeats):
+    def _one_tool(self, ctx, call, args):
         s = self.session
         name = call["name"]
         cid = call["id"]
@@ -590,8 +599,7 @@ class Agent:
             return text
         self.emit({"type": "tool_start", "id": cid, "name": name, "args": _short_args(name, args)})
         # The same call again only repeats itself when nothing changed in between.
-        key = "%d:%s%s" % (self.last_change_step, name, json.dumps(args, sort_keys=True))
-        repeats[key] = repeats.get(key, 0) + 1
+        key = circuit.Breaker.key(self.last_change_step, name, args)
         is_mcp = name.startswith("mcp__")
         t = tools.REGISTRY.get(name)
         if not is_mcp and (t is None or name not in s.tool_names):
@@ -619,15 +627,11 @@ class Agent:
             raise
         except Exception as e:  # noqa: BLE001 - a tool failure is information for the model
             ok, text = False, "error: %s: %s" % (type(e).__name__, e)
-        if repeats[key] >= 3 and ok and name != "phone":     # the phone's screen does change between looks
-            text += "\n(Note: you already made this exact call %d times; the result will not change.)" % (repeats[key] - 1)
-        failed = not ok or (name == "bash" and meta.get("exit") not in (0, None))
-        if failed and repeats[key] >= 2:
-            # A small model can repeat a failing call until its steps run out (seen with a 0.8B model on a phone
-            # plan: 58 times the same mistyped path): say so, and stop the turn at the fourth time.
-            text += "\n(You made this exact call before and it failed the same way: change it.)"
-            if repeats[key] >= 4:
-                self._stuck = (name, text.split("\n", 1)[0][:200])
+        failed = not ok or (name in permissions.COMMAND_TOOLS and meta.get("exit") not in (0, None))
+        if failed or name != "phone":          # (the phone's screen does change between two looks)
+            # A small model can repeat a failing call until its steps run out (seen with a 0.8B model on a phone:
+            # 58 times the same mistyped path): the 2nd time it is told to change it, the 3rd stops the turn.
+            text += self.breaker.record(key, failed, name, text.split("\n", 1)[0])
         if name == "bash" and meta.get("exit") == 0 and re.search(r"\b(test|pytest|jest|vitest|unittest|cargo test|go test)\b",
                                                                    str(args.get("command", ""))):
             self.last_test_ok_step = self.step
@@ -771,8 +775,47 @@ class Agent:
             self._close_dangling_calls()
         text = (comp.content or "").strip()
         done = text.upper().startswith("DONE")
-        self.emit({"type": "goal_check", "done": done, "text": text[:300]})
-        return done, text.split(":", 1)[-1].strip() if ":" in text else text
+        m = re.match(r"\W*CONTINUE\W*(\d{1,3})\s*%", text, re.I)
+        # the evaluator's share of the goal done (never 100 while it is not met; kept when it gives none)
+        s.goal_progress = 100 if done else min(99, int(m.group(1))) if m else s.goal_progress
+        self.emit({"type": "goal_check", "done": done, "progress": s.goal_progress, "text": text[:300]})
+        missing = re.sub(r"^\W*CONTINUE\W*(\d{1,3}\s*%)?\s*:?\s*", "", text, flags=re.I)
+        return done, missing or text
+
+    PRUNE_KEEP = 6                    # the latest tool results stay whole when older ones are pruned
+
+    def _prune_outputs(self):
+        """The first answer to a full context (80% by default), before a summary: old tool results give way to one
+        line each - "[Terminal output pruned: exit 0]", a file read or a search to do again if needed - and the latest
+        PRUNE_KEEP stay whole. Returns how many were pruned."""
+        s = self.session
+        names = {}
+        for m in s.messages:
+            for tc in m.get("tool_calls") or [] if m.get("role") == "assistant" else []:
+                names[tc.get("id")] = (tc.get("function") or {}).get("name", "")
+        results = [i for i, m in enumerate(s.messages) if m.get("role") == "tool"]
+        old = set(results[:-self.PRUNE_KEEP]) if len(results) > self.PRUNE_KEEP else set()
+        pruned, out = 0, []
+        for i, m in enumerate(s.messages):
+            content = m.get("content")
+            if i in old and isinstance(content, str) and len(content) > 300 and "pruned" not in content[:60]:
+                name, first = names.get(m.get("tool_call_id"), ""), content.split("\n", 1)[0][:120]
+                if name in permissions.COMMAND_TOOLS or name == "job":
+                    stub = "[Terminal output pruned: %s]" % (first if re.match(r"(exit|started|stopped|job)", first)
+                                                             else "run earlier")
+                elif name in ("read", "notebook_edit"):
+                    stub = "[File content pruned: read it again if you need it]"
+                elif name in ("grep", "glob"):
+                    stub = "[Search results pruned: search again if you need them]"
+                else:
+                    stub = "[Output pruned: %s]" % first
+                m = dict(m, content=stub)
+                pruned += 1
+            out.append(m)
+        if pruned:
+            s.replace_messages(out, note="prune")
+            self.emit({"type": "status", "text": "pruned %d old tool output%s" % (pruned, "" if pruned == 1 else "s")})
+        return pruned
 
     def _maybe_compact(self, force=False, note=""):
         s = self.session
@@ -781,6 +824,9 @@ class Agent:
         if not force and (not limit or s.last_prompt_tokens < limit * ctx_len):
             return False
         if len(s.messages) < 4:
+            return False
+        if not force and self._prune_outputs():
+            s.last_prompt_tokens = 0              # measured again by the next request: a summary only if still full
             return False
         hook_cfg = self.cfg.get("hooks") or {}
         if hooks.configured(hook_cfg, "PreCompact"):

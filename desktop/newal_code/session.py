@@ -156,6 +156,7 @@ class Session:
         self.todo = []
         self.jobs = {}
         self.goal = ""
+        self.goal_progress = 0       # how much of the goal is done, as the last goal check judged it (0-100)
         self.usage = {"prompt": 0, "cached": 0, "new": 0, "output": 0, "calls": 0, "seconds": 0.0}
         self.last_prompt_tokens = 0
         self.allowed = []            # "allow always" rules given during this session
@@ -169,7 +170,7 @@ class Session:
     def meta(self):
         return {"id": self.id, "root": self.root, "title": self.title, "model": self.model, "mode": self.mode,
                 "reasoning": self.reasoning, "created": self.created, "updated": self.updated, "turn": self.turn,
-                "goal": self.goal, "usage": self.usage, "todo": self.todo, "team": self.team,
+                "goal": self.goal, "goal_progress": self.goal_progress, "usage": self.usage, "todo": self.todo, "team": self.team,
                 "origin": self.origin, "worktree": self.worktree, "base": self.base, "dirs": self.dirs}
 
     def _append(self, rec):
@@ -231,6 +232,7 @@ class Session:
         s.dirs = list(meta.get("dirs") or [])
         s.turn = meta.get("turn", 0)
         s.goal = meta.get("goal", "")
+        s.goal_progress = int(meta.get("goal_progress") or 0)
         s.usage = meta.get("usage", s.usage)
         s.todo = meta.get("todo", [])
         s.reasoning = meta.get("reasoning", s.reasoning)

@@ -71,7 +71,7 @@ class FakeLLM:
             events.append({"choices": [{"index": 0, "delta": {"tool_calls": [
                 {"index": i, "id": "call_%d_%d" % (len(self.requests), i), "type": "function",
                  "function": {"name": name, "arguments": ""}}]}}]})
-            a = json.dumps(args)
+            a = args if isinstance(args, str) else json.dumps(args)      # a string: sent as it is (broken JSON)
             for j in range(0, len(a), 11):
                 events.append({"choices": [{"index": 0, "delta": {"tool_calls": [
                     {"index": i, "function": {"arguments": a[j:j + 11]}}]}}]})
