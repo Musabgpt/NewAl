@@ -300,9 +300,13 @@ def layout():
     size = re.findall(r"(\d+)x(\d+)", adb("shell", "wm", "size"))
     width, height = (int(size[-1][0]), int(size[-1][1])) if size else (0, 0)
     sdk = adb("shell", "getprop", "ro.build.version.sdk").strip()
-    print("layout: Android API %s, screen %dx%d, page %s" % (sdk, width, height, bounds), flush=True)
+    # (an emulator with hardware keys has no navigation bar on the screen: the page may reach the bottom there)
+    navbar = "NavigationBar" in adb("shell", "dumpsys", "window", "windows", check=False)
+    print("layout: Android API %s, screen %dx%d, page %s, navigation bar %s" % (sdk, width, height, bounds,
+                                                                              navbar), flush=True)
     check("layout: the page is below the status bar and above the navigation bar",
-          bool(bounds) and bounds[1] > 0 and 0 < bounds[3] < height, (bounds, xml[-600:] if not bounds else ""))
+          bool(bounds) and bounds[1] > 0 and 0 < bounds[3] <= height and (bounds[3] < height or not navbar),
+          (bounds, xml[-600:] if not bounds else ""))
     page = xml[xml.find('class="android.webkit.WebView"'):] if bounds else ""      # the page's own items
     texts = re.findall(r'text="([^"]+)"[^>]*?bounds="\[\d+,(-?\d+)\]', page)
     top = [(t, int(y)) for t, y in texts if int(y) < bounds[1]]
