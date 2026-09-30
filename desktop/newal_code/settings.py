@@ -39,7 +39,8 @@ DEFAULTS = {
     "reasoning": "auto",          # off | low | medium | high | auto (off for local models, medium for APIs)
     "verify": True,               # after a change, run the project's tests; failures go back to the agent
     "test_after_edit": True,      # ...after each step that changes files, with that step's result (with verify)
-    "max_steps": 60,              # tool rounds per request
+    "max_steps": 0,               # model calls per request; 0: 25 for a model on this device, 60 for an API model
+    "local_prompt": True,         # a model on this device gets prompts.LOCAL (False: the API models' SYSTEM)
     "ram_budget_gb": 0,           # 0: from the computer's RAM
     "threads": 0,                 # 0: physical cores
     "context": 0,                 # 0: from the model and the RAM budget

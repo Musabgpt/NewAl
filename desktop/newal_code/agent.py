@@ -150,7 +150,10 @@ class Agent:
                 self.session.system = prompts.subagent(self.shell, self.agent_def.get("body", ""))
             else:
                 from . import phone
-                self.session.system = prompts.system(self.shell, phone=phone.available())
+                # a model on this device gets OmniCode's local prompt (prompts.LOCAL), which names its step budget
+                local = self.client is not None and self.client.on_device and self.cfg.get("local_prompt", True)
+                self.session.system = prompts.system(self.shell, phone=phone.available(), local=local,
+                                                     steps=circuit.step_budget(self.cfg, None, local=True))
         return self.session.system
 
     def request_messages(self):
@@ -285,7 +288,7 @@ class Agent:
         verify = cfg.get("verify", True) if verify is None else verify
         # The circuit breaker (circuit.py): the same failing call a 3rd time, or the step budget spent (25 steps for
         # a local or small model, 60 for an API model), ends the turn.
-        max_steps = circuit.step_budget(cfg, self.agent_def, local=client.local or bool(client.spec.get("small")))
+        max_steps = circuit.step_budget(cfg, self.agent_def, local=client.on_device)
         self.breaker = circuit.Breaker()
         error = ""
         acted = nudged = False
@@ -301,8 +304,7 @@ class Agent:
                 self.step += 1
                 if not comp.tool_calls and comp.content:
                     # calls a model wrote as text (<tool_call>, a json block, SEARCH/REPLACE...): run, not shown
-                    found, rest = repair.calls_in_text(comp.content, s.tool_names, s.root,
-                                                       loose=client.local or bool(client.spec.get("small")))
+                    found, rest = repair.calls_in_text(comp.content, s.tool_names, s.root, loose=client.on_device)
                     if found:
                         comp.tool_calls, comp.content = found, rest
                         self.emit({"type": "status", "text": "read %d tool call%s from the model's text" % (
@@ -398,7 +400,7 @@ class Agent:
         self._dirs_noted = list(s.dirs)
         parts += extra_context
         parts.append(text)
-        if self.depth == 0 and self.client is not None and (self.client.local or self.client.spec.get("small")):
+        if self.depth == 0 and self.client is not None and self.client.on_device:
             # Small models follow the last thing they read best: the reply rule again, where it is read last.
             parts.append("(When done, reply in one sentence.)")
         return "\n\n".join(p for p in parts if p), prefetch

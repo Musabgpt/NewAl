@@ -271,6 +271,41 @@ class CircuitTest(unittest.TestCase):
         ag.cfg["max_steps"] = 4
         self.assertEqual(ag.run("go"), "Stopped after 4 steps without finishing.")
 
+    def test_a_model_on_this_device_gets_25_steps_and_the_local_prompt(self):
+        from newal_code import circuit, prompts
+        script = [{"tools": [("bash", {"command": "echo %d" % i})]} for i in range(30)] + ["done"]
+        llm = FakeLLM(script)
+        self.addCleanup(llm.close)
+        spec = {"id": "ollama/qwen2.5-coder:1.5b", "name": "qwen", "provider": "openai", "preset": "ollama"}
+        client = models.Client(spec, providers.OpenAICompat(llm.url), "qwen2.5-coder:1.5b")
+        sess = session.Session(make_project({"README.md": "# x\n"}))
+        ag = agentmod.Agent(sess, emit=lambda e: None, approve=lambda r: "once", client=client)
+        self.assertEqual(ag.cfg.get("max_steps"), 0)                    # the settings as they come: automatic
+        self.assertEqual(ag.run("go"), "Stopped after 25 steps without finishing.")
+        self.assertEqual(len(llm.requests), 25)
+        system = llm.requests[0]["messages"][0]["content"]
+        self.assertTrue(system.startswith(prompts.system(ag.shell, local=True, steps=25)[:400]))
+        self.assertIn("The same failing call a third time ends your turn, and a turn has 25 steps.", system)
+        # an API model: the full prompt, and 60 steps
+        api = agentmod.Agent(session.Session(make_project({})), client=fake_client(FakeLLM([])))
+        self.assertFalse(api.client.on_device)
+        self.assertNotIn("a turn has", api.system_prompt())
+        self.assertEqual(circuit.step_budget(api.cfg, None, local=api.client.on_device), 60)
+        on = lambda **sp: models.Client(dict({"id": "x", "provider": "openai"}, **sp), None, "x").on_device  # noqa
+        self.assertTrue(on(base_url="http://localhost:11434/v1"))
+        self.assertTrue(on(preset="lmstudio"))
+        self.assertTrue(on(small=True))
+        self.assertTrue(on(provider="local"))
+        self.assertFalse(on(base_url="https://api.deepseek.com/v1", preset="deepseek"))
+        self.assertFalse(on(provider="anthropic"))
+
+    def test_the_documented_local_prompt_is_the_one_sent(self):
+        from newal_code import prompts
+        with open(os.path.join(HERE, "..", "..", "docs", "omnicode.md"), encoding="utf-8") as f:
+            doc = f.read()
+        block = re.search(r"<!-- the text of prompts.LOCAL[^>]*-->\s*```text\n(.*?)\n```", doc, re.S).group(1)
+        self.assertEqual(block, prompts.LOCAL)
+
 
 class RepairTest(unittest.TestCase):
     """Tool calls a small model got wrong, put right and run (repair.py)."""

@@ -341,6 +341,7 @@ class Service:
             models.resolve(args)                     # raises when unknown
             s.model = args
             s.tool_names = []
+            s.system = ""                    # the new model's own start (a model on this device: the local prompt)
             a.client = None
             a._schemas = None
             s.save_meta()

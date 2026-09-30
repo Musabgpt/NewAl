@@ -14,6 +14,7 @@ import json
 import os
 import re
 import time
+import urllib.parse
 
 from . import catalog, gguf, hardware, providers, runtime, settings
 from . import connect as onetap
@@ -252,6 +253,16 @@ class Client:
     @property
     def local(self):
         return self.spec.get("provider") == "local"
+
+    @property
+    def on_device(self):
+        """A model running on this device, or a small one: llama.cpp run by NewAl Code, Ollama, LM Studio, a llama.cpp
+        server, the phone's model. OmniCode's rules for weak devices apply to it: the local system prompt
+        (prompts.LOCAL), 25 steps a turn (circuit.py), tool calls read from its text too (repair.py)."""
+        if self.local or self.spec.get("small") or self.spec.get("preset") in ("ollama", "lmstudio", "llamacpp"):
+            return True
+        host = urllib.parse.urlsplit(str(self.spec.get("base_url") or "")).hostname or ""
+        return host in ("localhost", "127.0.0.1", "::1")
 
     def context(self):
         if self.server:

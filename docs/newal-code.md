@@ -9,7 +9,8 @@ run in an **OS sandbox** on all three desktop systems; tasks can run **in the cl
 **GitHub app** answers `@newal` in issues and pull requests.
 
 Code: `desktop/newal_code/` (standard library only). Tests: `desktop/tests/test_newal_code.py`. Speed test:
-`desktop/bench/`.
+`desktop/bench/`. OmniCode's specification, item by item, with the circuit breaker's diagram and the system prompt
+for local models: [omnicode.md](omnicode.md).
 
 ![A thread in the web app: explored, edited (with the diff), ran the tests, answered](images/newal-code-thread.png)
 
@@ -93,8 +94,9 @@ It uses NewAl desktop's `llama-server` and the models NewAl already downloaded (
             │            ▼  │ results
             │      permissions ─► hooks ─► approval (UI) ─► tools: read edit write apply_patch glob grep
             │                                                      bash job todo task web_search web_fetch
-            │                                                      skill notebook_edit mcp__*
-            │      checkpoints (undo) · verify (project tests) · Stop hooks · /goal check · compaction
+            │                                                      skill notebook_edit github mcp__*
+            │      checkpoints (undo) · verify (project tests) · Stop hooks · /goal check (n%) · compaction
+            │      circuit breaker (circuit.py) · tool calls repaired (repair.py) · /ci (ci.py)
             ▼
       web app (server.py + ui/) · terminal (tui.py) · exec
 ```
@@ -134,7 +136,7 @@ It uses NewAl desktop's `llama-server` and the models NewAl already downloaded (
 | Read / Write / Edit / Glob / Grep / LS | ✓ | via shell | ✓ `read` `write` `edit` `glob` `grep` (a folder given to `read` lists it); edits tolerate indentation and line-number mistakes |
 | apply_patch format | – | ✓ | ✓ (`apply_patch`, offered instead of `edit` to models trained on it) |
 | Jupyter notebooks | ✓ NotebookEdit | – | ✓ `read` shows the cells and their output; `notebook_edit` replaces, inserts or deletes a cell (offered in projects that have notebooks) |
-| Shell, background commands, output of a running job | ✓ Bash, BashOutput, KillShell | ✓ | ✓ `bash` (timeout, background) and `job`; on Windows `powershell` too |
+| Shell, background commands, output of a running job | ✓ Bash, BashOutput, KillShell | ✓ | ✓ `bash` (timeout, background) and `job` (list, output, stop, by job id or process id; `/status` lists them); on Windows `powershell` too |
 | One permission for full access, kept | – (a flag per run) | ✓ (a setting) | ✓ "Give full access" once (welcome, Settings, `newal-code access full`); on a phone it walks through Android's grants too |
 | Terminal and OS integration | ✓ `claude` in the terminal | ✓ `codex` | ✓ `newal` in PowerShell, cmd and Git Bash, Explorer's "Open with NewAl Code", a Windows Terminal profile (`newal-code install`) |
 | Plan / checklist | ✓ TodoWrite | ✓ update_plan | ✓ `todo` (pinned above the composer) |
@@ -152,15 +154,18 @@ It uses NewAl desktop's `llama-server` and the models NewAl already downloaded (
 | MCP servers | ✓ `.mcp.json` | ✓ config.toml | ✓ stdio and HTTP; `.mcp.json`, `~/.codex/config.toml`, NewAl desktop's add-ons |
 | Plugins and marketplaces | ✓ commands, agents, skills, hooks, MCP in one folder; `/plugin marketplace add` | – | ✓ Claude Code's plugin layout (`${CLAUDE_PLUGIN_ROOT}` included) in `.newal/plugins` or `~/.newal-code/plugins`; its marketplaces too: `/plugin marketplace add <owner/repo, git URL or folder>`, `/plugin install name@marketplace` (or a git URL or folder), `/plugin remove`; a built-in marketplace whose plugins are programs (`/sysinfo`, `/disk`, `/clean`, `/ports`, `/programs`, a guard, formatting), installed offline with one tap |
 | Sessions, resume | ✓ | ✓ | ✓ threads kept as JSONL; `/resume`; the web app lists them per project |
-| Compaction | ✓ auto + `/compact` | ✓ | ✓ auto at 85% of the context + `/compact [focus]` |
+| Compaction | ✓ auto + `/compact` | ✓ | ✓ at 80% of the context old tool outputs become one line each, then a summary if still full; `/compact [focus]` |
 | Checkpoints / undo | ✓ /rewind | ✓ /undo | ✓ every changed file saved first; `/undo`, "Undo last turn", revert one file |
 | Diff / review | /review | ✓ /diff, /review, review pane | ✓ `/diff`, `/review` (reviewer sub-agent), review pane with per-file diffs |
 | Pull and push in one step | – | – | ✓ `/sync`: pull (rebase, or a merge with the phone's git), then push, with the connected GitHub account; conflicts explained with the way out |
+| CI that fixes itself | – | – | ✓ `/ci`: watches the commit's GitHub Actions runs (like `gh run watch`, without gh); when a job fails, the agent gets the failed step's log, fixes the code, and the fix is committed, pushed and watched again, until green or 3 tries (see [omnicode.md](omnicode.md#github-and-ci-that-fixes-itself)); `newal-code exec "/ci"` exits 0 when green |
+| GitHub from the agent | via gh | – | ✓ the `github` tool in GitHub projects: workflow runs, failed jobs' logs, rerun, pull requests, issues, comments, a new pull request (writes ask first) |
+| Small models kept on track | – | – | ✓ a circuit breaker (the same failing call a 3rd time stops the turn; 25 steps a turn on this device), tool calls repaired from broken JSON or from text (`<tool_call>`, SEARCH/REPLACE blocks...), a system prompt for local models (see [omnicode.md](omnicode.md)) |
 | GitHub issues | – | – | ✓ `/issues` lists the repository's open issues (labels, age, comments; pull requests left out); `/issues 7` makes issue #7 (its text and comments) the task, to fix and to close with "Fixes #7" |
 | Git commit, push, pull request from the app | – | ✓ | ✓ Commit / Commit and push / Commit and create PR (a branch of its own when on main; `gh` when installed, else GitHub's API with the connected token, else GitHub's PR page) |
 | GitHub account in the app | – | ✓ (cloud) | ✓ Settings > GitHub: connect with a token, then clone any of your repositories (the ⬇ button beside Threads); cloud tasks and pull requests use it |
 | `/init` AGENTS.md | ✓ | ✓ | ✓ |
-| `/goal` (keep working until a condition holds) | ✓ | – | ✓ checked after every answer |
+| `/goal` (keep working until a condition holds) | ✓ | – | ✓ checked after every answer, with how much is done (%, in `/status` and above the composer) |
 | Plan first | plan mode | – | ✓ `/plan <task>` (read-only turn) → "Implement this plan" |
 | Headless run, JSON events | `claude -p --output-format stream-json` | `codex exec --json` | ✓ `exec [--json] [-o answer.txt] [--max-steps N] [--resume ID]` |
 | Reasoning effort | ✓ | ✓ | ✓ off / low / medium / high (thinking budget on llama.cpp, `reasoning_effort` on OpenAI, extended thinking on Anthropic) |
