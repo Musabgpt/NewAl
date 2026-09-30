@@ -82,6 +82,13 @@ def resolve(ctx, path, new=False):
             cand = os.path.join(ctx.root, *parts[i:])
             if os.path.isdir(os.path.dirname(cand)) if new else os.path.exists(cand):
                 return cand
+    elif missing:
+        # "Mg2/calc.py" in the project Mg2: a small model names the project folder again (a phone's did), where
+        # no such folder is - the project's own file is meant
+        parts = [p for p in re.split(r"[\\/]+", os.path.relpath(path, ctx.root)) if p]
+        if len(parts) > 1 and parts[0] == os.path.basename(os.path.normpath(ctx.root)) and \
+                not os.path.exists(os.path.join(ctx.root, parts[0])):
+            return os.path.join(ctx.root, *parts[1:])
     return path
 
 
@@ -194,6 +201,10 @@ def t_read(ctx, path, offset=1, limit=0):
 def t_write(ctx, path, content):
     p = resolve(ctx, path, new=True)
     old = read_text(p) if os.path.isfile(p) else None
+    if old is not None and old == content:
+        # (a small model writes the same file again and again: that it changed nothing is news to it)
+        return ("%s already has exactly this content: nothing changed. If the task is done, reply to the user."
+                % rel(ctx, p)), {"path": rel(ctx, p), "unchanged": True}
     write_text(ctx, p, content)
     n = content.count("\n") + (0 if content.endswith("\n") or not content else 1)
     diff = _diff(old or "", content, rel(ctx, p))

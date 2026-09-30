@@ -174,8 +174,12 @@ What else a local model gets, in code rather than in words:
   absolute paths badly.
 - **The project in the first message**: AGENTS.md / CLAUDE.md, the files, git's state, the test command, and the
   files the request names (with their definitions, imports and tests) as reads already made.
-- **The reply rule again at the end of each message**, `(When done, reply in one sentence.)`: small models follow
-  best what they read last.
+- **No reminder after the request.** `(When done, reply in one sentence.)` at the end of the message made
+  Qwen2.5-Coder 1.5B (on a phone) reply at once that it had done the task, with no tool call: 0 of 12 requests
+  (a file in Arabic, opening WhatsApp) made a call with it, 12 of 12 without it.
+- **A claim with nothing done is caught.** A reply that says something was created, opened or fixed in a turn that
+  used no tool gets "Nothing was done: no tool was used in this turn. Do it now with the tools (...)"; still only
+  said, the user is told plainly: "Nothing was done in this turn: the model used no tool."
 - **No thinking before acting** on a task (running the change checks it); a short think before answering a question
   and after a failed check.
 - **Tool calls read from the text too** (`repair.py`, loose mode): a bare JSON object naming a tool and ReAct's

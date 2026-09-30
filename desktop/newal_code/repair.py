@@ -16,6 +16,7 @@ in a folder that exists): a code example in an answer stays text."""
 import json
 import os
 import re
+import textwrap
 
 TOOL_ALIASES = {
     "apply_diff": "edit", "search_replace": "edit", "replace_in_file": "edit", "str_replace": "edit",
@@ -48,6 +49,10 @@ ARG_ALIASES = {
     "url": ("link", "href"),
     "id": ("job", "job_id", "pid"),
 }
+PHONE_ACTIONS = {"launch_app": "open_app", "start_app": "open_app", "open_application": "open_app", "openapp": "open_app",
+                 "open": "open_app", "launch": "open_app", "open_link": "open_url", "browse": "open_url",
+                 "read_screen": "screen", "screenshot": "screen", "press_key": "key", "set_alarm": "alarm",
+                 "set_timer": "timer"}
 MAIN_ARG = {"bash": "command", "powershell": "command", "read": "path", "glob": "pattern", "grep": "pattern",
             "web_fetch": "url", "web_search": "query", "job": "id", "skill": "name", "task": "prompt",
             "apply_patch": "patch"}
@@ -117,7 +122,15 @@ def loads(text):
     m = re.match(r"^```[\w-]*\s*\n?(.*?)\n?```\s*$", s, re.S)
     if m:
         s = m.group(1).strip()
-    for attempt in (s, _normalize(s)):
+    attempts = [s, _normalize(s)]
+    if '"""' in s or "'''" in s:
+        # a Python string in the JSON ("content": """def add(a, b): ..."""), as a small coding model writes it
+        def block(q):
+            inner = textwrap.dedent(q.group(1) if q.group(1) is not None else q.group(2)).strip("\n")
+            return json.dumps(inner + "\n" if inner else "")        # (indented like the JSON around it: dedented)
+        quoted = re.sub(r'"""(.*?)"""|\'\'\'(.*?)\'\'\'', block, s, flags=re.S)
+        attempts += [quoted, _normalize(quoted)]
+    for attempt in attempts:
         try:
             value = json.loads(attempt)
         except ValueError:
@@ -143,6 +156,12 @@ def normalize(name, args, allowed=None):
         if known is None or mapped in known or base not in known:
             base = mapped
     args = dict(args or {})
+    if known and "phone" in known and base not in known:
+        # a phone action called as a tool ({"name": "open_app", "arguments": {"name": "WhatsApp"}}): the phone's
+        from . import phone
+        action = PHONE_ACTIONS.get(base.lower(), base.lower())
+        if action in phone.ACTIONS:
+            base, args = "phone", dict(args, action=action)
     from . import tools
     t = tools.REGISTRY.get(base)
     params = set(t.params) if t else set()      # an MCP tool's (or an unknown one's) arguments stay as they came
@@ -273,6 +292,26 @@ def calls_in_text(text, allowed, root=None, loose=False):
                 obj = loads(m.group(1))
                 if obj is not None:
                     take(obj, m.span())
+        if not found:
+            # a call object anywhere in the text, with what a small model puts around it: doubled braces
+            # ({{"name": "write", "arguments": {...}}}, as Qwen2.5-Coder 1.5B writes on a phone), braces left over
+            dec = json.JSONDecoder(strict=False)          # (raw line breaks in its strings too)
+            done_to = -1
+            for m in re.finditer(r'\{\s*"(?:name|tool|tool_name|function)"\s*:', text):
+                if m.start() < done_to:
+                    continue
+                try:
+                    obj, end = dec.raw_decode(text, m.start())
+                except ValueError:
+                    continue
+                if not _obj_call(obj):
+                    continue
+                start = m.start()
+                while start > 0 and text[start - 1] == "{":
+                    start -= 1
+                extra = re.match(r"(\s*\})*", text[end:])
+                take(obj, (start, end + extra.end()))
+                done_to = end
     if "edit" in allowed or "write" in allowed:
         edits, edit_spans = _search_replace(text, root)
         for (name, args), span in zip(edits, edit_spans):

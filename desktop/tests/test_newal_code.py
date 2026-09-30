@@ -32,7 +32,7 @@ for _k, _v in (("GIT_AUTHOR_NAME", "t"), ("GIT_AUTHOR_EMAIL", "t@t"), ("GIT_COMM
 
 from fake_llm import FakeLLM  # noqa: E402
 from newal_code import (agent as agentmod, extensions, gguf, hardware, hooks, mcp, models, patch,  # noqa: E402
-                        permissions, providers, runtime, session, settings, tools)
+                        permissions, providers, repair, runtime, session, settings, tools)
 
 
 def make_project(files):
@@ -455,6 +455,63 @@ class SlipsTest(unittest.TestCase):
         self.assertEqual(llm.requests[1]["messages"][-1]["content"], "Reply to the user now, in one short sentence.")
         answer, _, _, llm, _ = run_agent(["", ""], files={"README.md": "# x\n"}, text="Which port?")
         self.assertEqual((answer, len(llm.requests)), ("", 2))                     # no loop
+
+
+class PhoneModelTest(unittest.TestCase):
+    """What Qwen2.5-Coder 1.5B did in the phone app (the user's screenshots): its calls, written as text, were shown
+    as answers and nothing ran; it named the project folder again; it said it had done what it had not."""
+
+    def one(self, text):
+        root = make_project({"README.md": "# x\n"})
+        calls, rest = repair.calls_in_text(text, ["read", "edit", "write", "bash", "phone"], root, loose=True)
+        self.assertEqual(rest, "")
+        return [(c["name"], json.loads(c["arguments"])) for c in calls]
+
+    def test_its_calls_as_the_phone_showed_them(self):
+        self.assertEqual(self.one('{{"name": "write", "arguments": {"path": "calculator.py", "content": '
+                                  '"def add(a, b):\\n return a + b"}}'),
+                         [("write", {"path": "calculator.py", "content": "def add(a, b):\n return a + b"})])
+        self.assertEqual(self.one('{{"name": "open_app", "arguments": {"name": "WhatsApp"}}}}}'),
+                         [("phone", {"name": "WhatsApp", "action": "open_app"})])        # an action as the tool
+        triple = ('```json\n{\n  "name": "write",\n  "arguments": {\n    "path": "calculator.py",\n    "content": '
+                  '"""\n    def add(a, b):\n        return a + b\n    """\n  }\n}\n```')
+        self.assertEqual(self.one(triple), [("write", {"path": "calculator.py",
+                                                       "content": "def add(a, b):\n    return a + b\n"})])
+
+    def test_the_project_folder_named_again_is_the_project(self):
+        root = os.path.join(tempfile.mkdtemp(), "Mg2")
+        os.makedirs(root)
+        c = agentmod.ToolContext(agentmod.Agent(session.Session(root), client=fake_client(FakeLLM([]))))
+        tools.call(c, "write", {"path": "Mg2/calculator.py", "content": "x = 1\n"})
+        self.assertTrue(os.path.isfile(os.path.join(root, "calculator.py")))
+        self.assertFalse(os.path.exists(os.path.join(root, "Mg2")))
+        text, meta = tools.call(c, "write", {"path": "calculator.py", "content": "x = 1\n"})
+        self.assertEqual(text, "calculator.py already has exactly this content: nothing changed. If the task is done, "
+                               "reply to the user.")
+        os.makedirs(os.path.join(root, "Mg2"))                   # a real folder of that name is used as it is
+        tools.call(c, "write", {"path": "Mg2/y.py", "content": "y = 1\n"})
+        self.assertTrue(os.path.isfile(os.path.join(root, "Mg2", "y.py")))
+
+    def test_saying_it_was_done_when_nothing_was(self):
+        answer, events, _, llm, root = run_agent(
+            ["I created a new file named calculator.py in the project folder.",
+             {"tools": [("write", {"path": "calculator.py", "content": "x = 1\n"})]}, "Wrote calculator.py."],
+            files={"README.md": "# x\n"}, text="انشئ ملف فيه كود الة حاسبة", on_device=True)
+        told = llm.requests[1]["messages"][-1]["content"]
+        self.assertTrue(told.startswith("Nothing was done: no tool was used in this turn."), told)
+        self.assertIn("write creates a file", told)
+        self.assertTrue(os.path.isfile(os.path.join(root, "calculator.py")))
+        self.assertEqual(answer, "Wrote calculator.py.")
+        # told once, and still only saying so: the user is told plainly that nothing was done
+        answer, events, _, _, _ = run_agent(["Opened WhatsApp.", "Opened WhatsApp."], files={"README.md": "# x\n"},
+                                            text="افتح تطبيق واتساب", on_device=True)
+        self.assertIn("Nothing was done in this turn: the model used no tool.",
+                      [e.get("text") for e in events if e.get("type") == "notice"])
+        for fine in ("The function returns 8080.", "Here is how it works: it adds two numbers.", "Hello!"):
+            self.assertFalse(agentmod.claims(fine), fine)
+        for said in ("I created calculator.py.", "Opened WhatsApp.", "تم فتح واتساب", "لقد أنشأت الملف",
+                     "The calculator.py file has been written."):
+            self.assertTrue(agentmod.claims(said), said)
 
 
 class PruneTest(unittest.TestCase):

@@ -341,9 +341,20 @@ class Agent:
                 # it."): nothing done yet in this turn and a reply that only announces is told, once, to do it.
                 if not acted and not nudged and not question and s.mode != "read-only" and \
                         not re.search(r"\b(plan|explain|describe|how would|what would)\b|خطة|اشرح", text, re.I) and \
-                        announces(answer):
+                        (announces(answer) or claims(answer)):
                     nudged = True
-                    s.add({"role": "user", "content": "Do it now with the tools; don't describe it."})
+                    if announces(answer):
+                        s.add({"role": "user", "content": "Do it now with the tools; don't describe it."})
+                    else:
+                        # a small model says it did what it did not do ("Opened WhatsApp." with no call: seen with
+                        # Qwen2.5-Coder 1.5B on a phone); it is told so, with the tools that would do it
+                        how = [w for n, w in (("write", "write creates a file"), ("edit", "edit changes one"),
+                                              ("bash", "bash runs a command"),
+                                              ("phone", "phone acts on the phone (action=open_app...)"))
+                               if n in s.tool_names]
+                        s.add({"role": "user", "content": "Nothing was done: no tool was used in this turn. Do it "
+                                                          "now with the tools%s, then reply." % (
+                                                              " (%s)" % ", ".join(how) if how else "")})
                     continue
                 # The computer checks the work: the project's tests, when this turn changed files.
                 if verify and ctx.changed and verify_rounds < MAX_VERIFY and self.depth == 0:
@@ -383,6 +394,9 @@ class Agent:
         finally:
             if self.depth == 0 and error == "interrupted":
                 tools.stop_jobs(s)
+        if self.depth == 0 and not acted and not error and not question and claims(answer):
+            # told once, and still saying it did what it did not: the user sees plainly that nothing was done
+            self.emit({"type": "notice", "text": "Nothing was done in this turn: the model used no tool."})
         seconds = time.time() - started
         s.usage["seconds"] = round(s.usage.get("seconds", 0) + seconds, 2)
         changes = s.changes(s.turn) if self.depth == 0 else []
@@ -414,9 +428,8 @@ class Agent:
         self._dirs_noted = list(s.dirs)
         parts += extra_context
         parts.append(text)
-        if self.depth == 0 and self.client is not None and self.client.on_device:
-            # Small models follow the last thing they read best: the reply rule again, where it is read last.
-            parts.append("(When done, reply in one sentence.)")
+        # (No reminder after the request: "(When done, reply in one sentence.)" there made Qwen2.5-Coder 1.5B, on a
+        # phone, reply at once that it had done the task - no call in 12 of 12 tries, 12 of 12 with calls without it.)
         return "\n\n".join(p for p in parts if p), prefetch
 
     def _context_block(self):
@@ -954,6 +967,23 @@ def error_signature(output):
 ANNOUNCES = re.compile(
     r"^\W*(ok(ay)?[,.!]?\s+|sure[,.!]?\s+|alright[,.!]?\s+|first[,]?\s+)?(i will|i'll|i am going to|i'm going to|"
     r"let me|i need to|i can now|now i will|سأ|سوف|راح|رح|خليني|دعني)", re.I)
+
+
+# A reply that says something was done ("I created calculator.py.", "Opened WhatsApp.", "تم فتح واتساب").
+CLAIMS = re.compile(
+    r"\bi(?:'ve| have)?\s+(?:just\s+|now\s+|already\s+)?(?:created|wrote|opened|added|fixed|updated|changed|ran|"
+    r"installed|deleted|removed|saved|made|implemented|renamed|edited|launched|started|sent|set up)\b|"
+    r"\b(?:has|have) been (?:created|written|opened|added|fixed|updated|changed|saved|made|implemented|renamed|"
+    r"edited|launched|started|sent|installed|deleted|removed)\b|"
+    r"^\W*(?:opened|created|wrote|added|fixed|updated|saved|launched|started|done)\b|"
+    r"(?:^|\s)(?:تم|لقد|قمت|أنشأت|انشأت|كتبت|فتحت|أضفت|اضفت|عدلت|عدّلت|صلحت|أصلحت|حفظت|شغلت|شغّلت|حذفت)(?:\s|$)",
+    re.I)
+
+
+def claims(text):
+    """Whether a final reply says something was done (which, without a tool call in its turn, it was not)."""
+    t = (text or "").strip()
+    return bool(t) and len(t) < 600 and bool(CLAIMS.search(t))
 
 
 def announces(text):
