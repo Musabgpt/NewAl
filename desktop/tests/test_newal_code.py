@@ -2457,6 +2457,14 @@ class ServerTest(unittest.TestCase):
         self.assertTrue(all(c["ok"] in (True, False, None) for c in d["checks"]))
         self.assertIn("NewAl Code", d["report"])
 
+    def test_speed_test_measures_the_model_in_use(self):
+        r = self.call("/api/speedtest", {})
+        self.assertEqual(r["model"], "fake")
+        self.assertFalse(r["local"])
+        for k in ("load_s", "first_token_s", "read_tps", "write_tps", "prompt_tokens", "output_tokens"):
+            self.assertGreaterEqual(r[k], 0, k)
+        self.assertIn("Speed of fake (an API)", r["report"])
+
     def test_a_projects_branch_before_any_thread(self):
         root = make_project(CALC)
         self.assertIsNone(self.call("/api/git?root=" + urllib.parse.quote(root))["git"])

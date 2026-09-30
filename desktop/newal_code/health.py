@@ -89,6 +89,44 @@ def checks(quick=False):
     return out
 
 
+SPEED_TEXT = ("NewAl Code measures how fast the model in use reads and writes on this device. " * 3 +
+              "A coding agent reads its instructions, the tools it may use and the files it opens, then writes its "
+              "answer and the changes it makes. Reading speed decides how long the first answer takes; writing "
+              "speed decides how long a long answer or a new file takes. " * 6)
+
+
+def speed(model=None):
+    """The model in use, measured here: loading it, the first token, reading (prompt tokens per second, nothing
+    from the cache: the text starts with a new number each time) and writing (tokens per second)."""
+    import random
+    import time
+    spec = models.resolve(model or settings.user().get("model") or "auto")
+    started = time.time()
+    client = models.connect(spec)
+    loaded = time.time() - started
+    messages = [{"role": "system", "content": "Speed test %d. %s" % (random.randrange(10 ** 9), SPEED_TEXT)},
+                {"role": "user", "content": "Count from 1 to 60, the numbers separated by spaces, nothing else."}]
+    t0 = time.time()
+    comp = client.chat(messages, owner="speed-test", max_tokens=96, temperature=0)
+    total = time.time() - t0
+    u, tm = comp.usage, comp.timings
+    new = int(u.get("new") or u.get("prompt") or 0)
+    out = int(u.get("output") or 0) or len((comp.content or "").split())
+    read = new / (tm["prompt_ms"] / 1000) if tm.get("prompt_ms") else 0.0
+    write = tm.get("tps") or (out / (tm["gen_ms"] / 1000) if tm.get("gen_ms") else 0.0)
+    return {"model": spec.get("name", spec["id"]), "local": spec.get("provider") == "local",
+            "load_s": round(loaded, 2), "first_token_s": round((tm.get("ttft_ms") or 0) / 1000, 2),
+            "read_tps": round(read, 1), "write_tps": round(write, 1), "prompt_tokens": new, "output_tokens": out,
+            "total_s": round(total, 2)}
+
+
+def speed_report(r):
+    return ("Speed of %s (%s): loaded in %.1f s, first token after %.1f s, reads %.0f tokens/s (%d read), writes "
+            "%.1f tokens/s (%d written)" % (r["model"], "on this device" if r["local"] else "an API", r["load_s"],
+                                            r["first_token_s"], r["read_tps"], r["prompt_tokens"], r["write_tps"],
+                                            r["output_tokens"]))
+
+
 def _has_key(spec):
     if not (spec.get("api_key_env") or spec.get("preset") or spec.get("api_key")):
         return True                       # a server that needs no key (Ollama, LM Studio, one's own)

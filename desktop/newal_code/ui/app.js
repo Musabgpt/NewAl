@@ -1264,7 +1264,19 @@
     body.innerHTML = '<div class="card-list">' + items.map((c, i) => '<div class="card"><div class="grow"><div class="name">' + mark(c.ok) + " " + esc(c.title) +
       '</div><div class="desc">' + esc(c.detail || "") + "</div></div>" + (c.fix ? '<button class="btn small" data-fix="' + i + '">' +
       esc(labels[c.fix.split(":")[0]] || "Fix") + "</button>" : "") + "</div>").join("") + "</div>" +
-      '<div class="form-row" style="justify-content:flex-end"><button class="btn" id="hl-again">Check again</button><button class="btn" id="hl-copy">Copy report</button></div>';
+      '<div id="hl-speed" class="card-list"></div>' +
+      '<div class="form-row" style="justify-content:flex-end"><button class="btn" id="hl-measure">Speed test</button><button class="btn" id="hl-again">Check again</button><button class="btn" id="hl-copy">Copy report</button></div>';
+    let speedLine = "";
+    body.querySelector("#hl-measure").onclick = async () => {
+      const box = body.querySelector("#hl-speed");
+      box.innerHTML = '<div class="muted">Measuring the model in use… (the first time loads it)</div>';
+      let r;
+      try { r = await api("/api/speedtest", {}); } catch (e) { box.innerHTML = '<div class="muted">' + esc(e.message) + "</div>"; return; }
+      speedLine = r.report;
+      box.innerHTML = '<div class="card"><div class="grow"><div class="name">⏱ ' + esc(r.model) + '</div><div class="desc">' +
+        esc("Loaded in " + r.load_s + " s · first token after " + r.first_token_s + " s · reads " + Math.round(r.read_tps) +
+            " tokens/s · writes " + r.write_tps + " tokens/s") + "</div></div></div>";
+    };
     body.querySelectorAll("[data-fix]").forEach(b => b.onclick = async () => {
       const [what, arg] = items[+b.dataset.fix].fix.split(":");
       if (what === "download") { await api("/api/models/download", { id: arg }).catch(e => toast(e.message)); toast("Downloading " + arg + "…"); return; }
@@ -1280,7 +1292,7 @@
     body.querySelector("#hl-again").onclick = openHealth;
     body.querySelector("#hl-copy").onclick = () => {
       const extra = items.slice(d.checks.length).map(c => (c.ok === true ? "OK  " : c.ok === false ? "FIX " : "--  ") + c.title + ": " + (c.detail || ""));
-      const text = [d.report].concat(extra).join("\n");
+      const text = [d.report].concat(extra).concat(speedLine ? [speedLine] : []).join("\n");
       try { if (window.NewAlPhone && NewAlPhone.setClipboard) NewAlPhone.setClipboard(text); else navigator.clipboard.writeText(text); } catch (_) { /* no clipboard */ }
       toast("Copied: paste it where you ask for help");
     };

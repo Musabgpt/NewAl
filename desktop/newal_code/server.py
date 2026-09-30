@@ -349,6 +349,14 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/api/models/download":
                 svc.download(b.get("id"))
                 return self._json({"ok": True})
+            if path == "/api/speedtest":
+                # Check everything > Speed test: the model in use, measured on this device
+                from . import health
+                try:
+                    r = health.speed(b.get("model") or None)
+                except Exception as e:  # noqa: BLE001 - a model that does not load or answer: say why
+                    return self._json({"error": str(e)[:500]}, 400)
+                return self._json(dict(r, report=health.speed_report(r)))
             if path == "/api/plugins":
                 # The Extensions page's buttons: what /plugin install | remove | marketplace add | remove do.
                 from . import plugins
