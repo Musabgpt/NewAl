@@ -13,7 +13,27 @@ from . import NAME, __version__, hardware, models, settings
 from . import session as sessmod
 from .service import Service
 
-COLOR = sys.stdout.isatty() and not os.environ.get("NO_COLOR")
+def _console_colours():
+    """Whether colour codes show as colours. Windows' classic console (Windows PowerShell's and cmd's window) shows
+    them only once virtual-terminal processing is asked for (Windows Terminal has it on): asked here, and without it
+    no colour codes are written (they would print as ←[2m)."""
+    if not sys.stdout.isatty() or os.environ.get("NO_COLOR"):
+        return False
+    if os.name != "nt":
+        return True
+    try:
+        import ctypes
+        k32 = ctypes.windll.kernel32
+        handle = k32.GetStdHandle(-11)                      # standard output
+        mode = ctypes.c_uint32()
+        if not k32.GetConsoleMode(handle, ctypes.byref(mode)):
+            return False
+        return bool(mode.value & 0x0004) or bool(k32.SetConsoleMode(handle, mode.value | 0x0004))
+    except (OSError, AttributeError, ValueError):
+        return False
+
+
+COLOR = _console_colours()
 
 
 def c(code, text):
