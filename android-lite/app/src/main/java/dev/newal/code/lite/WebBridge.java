@@ -165,6 +165,33 @@ final class WebBridge {
         });
     }
 
+    /**
+     * A thread finished while the app was in the background: a notification (tap: back to the app). A task on a
+     * phone's own model takes minutes, and the user does something else meanwhile.
+     */
+    @JavascriptInterface
+    public void notifyDone(String title, String text) {
+        android.app.NotificationManager nm = act.getSystemService(android.app.NotificationManager.class);
+        nm.createNotificationChannel(new android.app.NotificationChannel("newal-done", "Finished tasks",
+                android.app.NotificationManager.IMPORTANCE_DEFAULT));
+        android.app.PendingIntent open = android.app.PendingIntent.getActivity(act, 1,
+                new Intent(act, MainActivity.class).addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP),
+                android.app.PendingIntent.FLAG_IMMUTABLE);
+        android.app.Notification n = new android.app.Notification.Builder(act, "newal-done")
+                .setSmallIcon(R.drawable.ic_stat)
+                .setContentTitle(title == null || title.isEmpty() ? "NewAl Code" : title)
+                .setContentText(text)
+                .setStyle(new android.app.Notification.BigTextStyle().bigText(text))
+                .setContentIntent(open)
+                .setAutoCancel(true)
+                .build();
+        try {
+            nm.notify(2, n);
+        } catch (SecurityException ignored) {
+            // notifications not allowed
+        }
+    }
+
     /** What another app shared ({"text", "files"}), once; "" when nothing. */
     @JavascriptInterface
     public String takeShared() {

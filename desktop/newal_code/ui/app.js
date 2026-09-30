@@ -685,7 +685,10 @@
           paintIcons(chips);
         }
         S.live = null;
-        if (!replay && document.hidden && window.Notification && Notification.permission === "granted") {
+        if (!replay && document.hidden && window.NewAlPhone && NewAlPhone.notifyDone) {
+          // the phone: Android's notification (a WebView has no Notification API); a tap brings the app back
+          NewAlPhone.notifyDone((S.meta && S.meta.title) || "NewAl Code", (ev.answer || "Done").slice(0, 300));
+        } else if (!replay && document.hidden && window.Notification && Notification.permission === "granted") {
           new Notification("NewAl Code", { body: (ev.answer || "Done").slice(0, 160), icon: "icon.svg" });
         }
         if (!replay) {

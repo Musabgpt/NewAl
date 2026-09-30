@@ -29,6 +29,8 @@ import java.net.URL;
 public class MainActivity extends Activity {
     static final int PICK_MODEL = 7;
     static final int VOICE = 8;
+    static final int FILES = 9;
+    private android.webkit.ValueCallback<Uri[]> files;
     private static final String HOME = "http://127.0.0.1:" + Setup.PORT + "/";
     private FrameLayout root;
     private WebView web;
@@ -50,7 +52,26 @@ public class MainActivity extends Activity {
         WebSettings s = web.getSettings();
         s.setJavaScriptEnabled(true);
         s.setDomStorageEnabled(true);
-        web.setWebChromeClient(new WebChromeClient());           // confirm() and alert() dialogs
+        web.setWebChromeClient(new WebChromeClient() {           // confirm() and alert() dialogs, and:
+            /** The page's file inputs ("Attach an image"): Android's picker (a WebView has none of its own). */
+            @Override
+            public boolean onShowFileChooser(WebView view, android.webkit.ValueCallback<Uri[]> callback,
+                                             FileChooserParams params) {
+                if (files != null) {
+                    files.onReceiveValue(null);
+                }
+                files = callback;
+                Intent pick = params.createIntent();
+                pick.putExtra(Intent.EXTRA_ALLOW_MULTIPLE, params.getMode() == FileChooserParams.MODE_OPEN_MULTIPLE);
+                try {
+                    startActivityForResult(Intent.createChooser(pick, "NewAl Code"), FILES);
+                    return true;
+                } catch (Exception e) {
+                    files = null;
+                    return false;
+                }
+            }
+        });
         key = new Setup(this).key();
         bridge = new WebBridge(this, web, key);
         web.addJavascriptInterface(bridge, "NewAlPhone");
@@ -208,6 +229,21 @@ public class MainActivity extends Activity {
         super.onActivityResult(request, result, data);
         if (request == PICK_MODEL && result == RESULT_OK && data != null && data.getData() != null) {
             ModelImport.start(this, web, data.getData());
+        }
+        if (request == FILES && files != null) {
+            Uri[] picked = null;
+            if (result == RESULT_OK && data != null) {
+                if (data.getClipData() != null) {
+                    picked = new Uri[data.getClipData().getItemCount()];
+                    for (int k = 0; k < picked.length; k++) {
+                        picked[k] = data.getClipData().getItemAt(k).getUri();
+                    }
+                } else if (data.getData() != null) {
+                    picked = new Uri[] {data.getData()};
+                }
+            }
+            files.onReceiveValue(picked);
+            files = null;
         }
         if (request == VOICE && result == RESULT_OK && data != null) {
             java.util.ArrayList<String> said = data.getStringArrayListExtra(RecognizerIntent.EXTRA_RESULTS);
