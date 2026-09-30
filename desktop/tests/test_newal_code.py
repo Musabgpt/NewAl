@@ -588,7 +588,8 @@ class LeftRunningTest(unittest.TestCase):
         text, meta = tools.call(c, "bash", {"command": "sleep 37 & echo started"})
         self.assertLess(time.time() - started, 15)
         self.assertIn("started", text)
-        self.assertIn("start servers and other long-running programs with background=true", text)
+        if os.name != "nt":          # (Git Bash on Windows gives a program started with & its own output: no wait)
+            self.assertIn("start servers and other long-running programs with background=true", text)
         if os.name != "nt" and shutil.which("pgrep"):
             gone = time.time() + 5                  # (a killed process can take a moment to go on a busy machine)
             while time.time() < gone and subprocess.run(["pgrep", "-f", "sleep 37"], capture_output=True).stdout:
