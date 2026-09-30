@@ -1,7 +1,7 @@
 {
   "name": "guard",
-  "version": "1.0.0",
-  "description": "Asks before edits to secrets and before destructive git commands, even with full access.",
+  "version": "1.1.0",
+  "description": "Asks before edits to secrets, destructive git commands, and commits or pushes that would publish a key; /secrets finds leaked keys.",
   "author": {
     "name": "NewAl"
   }

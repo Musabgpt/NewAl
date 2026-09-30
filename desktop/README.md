@@ -108,8 +108,12 @@
     - `arabic`: ‏`/rtl` بيحوّل الموقع من اليسار لليمين: ‏`dir="rtl"` على الصفحة، وكل left/right بالـ CSS لخصائص منطقية
       (margin-inline-start، text-align: start...) بملفات CSS وstyle وJSX، بدون ما يلمس أسماء الكلاسات. بيعرض التغييرات
       أول، و‏`/rtl --apply` بيكتبها.
+    - `starters`: ‏`/create python|web|node|flask|fastapi اسم` بيعمل مشروع جاهز بيشتغل فوراً (برنامج مش النموذج)،
+      مع README واختبار بيشغّله ليتأكد إنه ناجح. و‏`--ar` بيعمله بالعربي من اليمين لليسار.
     - `guard`: حتى مع الصلاحية الكاملة، بيسألك قبل تعديل ملفات الأسرار (‎.env والمفاتيح) وقبل force push أو hard reset
-      أو حذف فرع أو حذف قاعدة بيانات أو نشر حزمة.
+      أو حذف فرع أو حذف قاعدة بيانات أو نشر حزمة، وقبل أي commit أو push رح ينشر مفتاح أو توكن. و‏`/secrets`
+      بيدوّر على المفاتيح المسرّبة بالمشروع (GitHub وGoogle/Gemini وOpenAI/DeepSeek وAWS...).
+    - بإضافة `system` كمان: ‏`/serve` بيفتح صفحات مجلد بالمتصفح (و‏`--lan` لتفتحها من الجوال على نفس الواي فاي).
     - `format-on-edit`: بعد كل تعديل بينسّق الملف بأداة المشروع (gofmt وrustfmt وdart دايماً، وruff/black وprettier
       وclang-format إذا المشروع مجهّز إلها).
     - ومن الطرفية: `newal-code plugin list` و`newal-code plugin install system@newal`.

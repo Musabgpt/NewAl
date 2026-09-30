@@ -1611,6 +1611,71 @@ class StoreTest(unittest.TestCase):
                                               '"start" }} />;\nconst obj = { left: 1 };\n')
         self.assertIn("Nothing to change", self.run_cmd("/rtl")["reply"])
 
+    def test_secrets_are_found_and_the_guard_asks_before_committing_one(self):
+        self.install("guard")
+        git(self.root, "init", "-q", "-b", "main")
+        git(self.root, "-c", "user.name=T", "-c", "user.email=t@x", "add", "-A")
+        git(self.root, "-c", "user.name=T", "-c", "user.email=t@x", "commit", "-q", "-m", "first")
+        self.assertIn("No secrets found", self.run_cmd("/secrets")["reply"])
+        with open(os.path.join(self.root, "config.py"), "w") as f:
+            f.write('TOKEN = "ghp_%s"\npassword = "changeme-please"\n' % ("A" * 36))
+        r = self.run_cmd("/secrets")
+        self.assertEqual(r["code"], 1, r["reply"])
+        self.assertIn("config.py:1  GitHub token  ghp_…AA", r["reply"])
+        self.assertNotIn("config.py:2", r["reply"])                       # a placeholder is no secret
+        asked = []
+        run_agent([{"tools": [("bash", {"command": "git add -A && git commit -q -m wip"})]}, "done"],
+                  mode="full-auto", approve=lambda req: asked.append(req) or "deny:no", root=self.root)
+        self.assertEqual(len(asked), 1)
+        self.assertIn("would publish what looks like a secret: config.py:1 GitHub token", asked[0]["reason"])
+        os.remove(os.path.join(self.root, "config.py"))
+        asked.clear()
+        with open(os.path.join(self.root, "notes.txt"), "w") as f:
+            f.write("nothing secret\n")
+        run_agent([{"tools": [("bash", {"command": "git add -A && git -c user.name=T -c user.email=t@x commit -q "
+                                                   "-m notes"})]}, "done"],
+                  mode="full-auto", approve=lambda req: asked.append(req) or "once", root=self.root)
+        self.assertEqual(asked, [])                                          # nothing secret: no asking
+        self.assertIn("notes", git(self.root, "log", "--oneline", "-1"))
+
+    def test_serve_shows_a_folder_at_an_address_until_stopped(self):
+        self.install("system")
+        site = os.path.join(self.root, "site")
+        os.makedirs(site)
+        with open(os.path.join(site, "index.html"), "w", encoding="utf-8") as f:
+            f.write("<h1>مرحبا</h1>")
+        r = self.run_cmd("/serve site")
+        try:
+            self.assertEqual(r["code"], 0, r["reply"])
+            url = re.search(r"http://127\.0\.0\.1:\d+/", r["reply"]).group(0)
+            opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+            with opener.open(url, timeout=10) as page:
+                self.assertEqual(page.read().decode("utf-8"), "<h1>مرحبا</h1>")
+                self.assertIn("charset=utf-8", page.headers.get("Content-Type"))
+            self.assertIn("already running", self.run_cmd("/serve site")["reply"])
+            self.assertIn(url, self.run_cmd("/serve list")["reply"])
+        finally:
+            r = self.run_cmd("/serve stop")
+        self.assertIn("Stopped: :", r["reply"])
+        port = int(url.rstrip("/").rsplit(":", 1)[1])
+        with self.assertRaises(OSError):
+            socket.create_connection(("127.0.0.1", port), timeout=2).close()
+
+    def test_create_makes_projects_that_pass_their_own_tests(self):
+        self.install("starters")
+        r = self.run_cmd("/create python hello-cli")
+        self.assertEqual(r["code"], 0, r["reply"])
+        self.assertIn("Its test: ✓ passes", r["reply"])
+        self.assertTrue(os.path.isfile(os.path.join(self.root, "hello-cli", "src", "hello_cli", "__main__.py")))
+        r = self.run_cmd("/create web notes --ar")
+        self.assertIn("✓", r["reply"])
+        with open(os.path.join(self.root, "notes", "index.html"), encoding="utf-8") as f:
+            self.assertIn('<html lang="ar" dir="rtl">', f.read())
+        if shutil.which("node"):
+            self.assertIn("Its test: ✓ passes", self.run_cmd("/create node greeter")["reply"])
+        self.assertIn("already exists", self.run_cmd("/create python hello-cli")["reply"])
+        self.assertEqual(self.run_cmd("/create rust x")["code"], 2)
+
     def test_guard_asks_even_with_full_access(self):
         self.install("guard")
         asked = []

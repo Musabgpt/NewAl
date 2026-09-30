@@ -1,0 +1,8 @@
+{
+  "name": "starters",
+  "version": "1.0.0",
+  "author": {
+    "name": "NewAl"
+  },
+  "description": "/create: a project that runs at once, made by a program and checked by its own test."
+}

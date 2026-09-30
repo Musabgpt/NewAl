@@ -1,13 +1,17 @@
 """guard: asks the user first, whatever the permission mode (full access included), before
-- an edit to a file that holds secrets (.env, private keys, credential files), and
+- an edit to a file that holds secrets (.env, private keys, credential files),
 - a command that loses work or reaches outside: a force push, a hard reset, git clean, deleting a branch,
-  discarding all changes, deleting the home folder or .git, dropping a database, publishing a package.
+  discarding all changes, deleting the home folder or .git, dropping a database, publishing a package, and
+- a git commit or push that would publish a secret (a token or private key in what it adds: secretscan.py).
 Standard library only: NewAl Code's own Python runs it."""
 
 import json
 import os
 import re
 import sys
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import secretscan  # noqa: E402
 
 SECRET_NAME = re.compile(r"^(\.env(\..+)?|.+\.(pem|key|p12|pfx|jks|keystore|ppk|kdbx)|id_(rsa|dsa|ecdsa|ed25519)(\.pub)?|"
                          r"credentials(\.json)?|secrets?\.(json|ya?ml|toml)|\.npmrc|\.pypirc|\.netrc|"
@@ -39,6 +43,15 @@ def decide(data):
         for pattern, why in RISKY:
             if re.search(pattern, cmd, re.I):
                 return True, "guard: %s (%s)" % (why, cmd.strip()[:120])
+        act = re.search(r"\bgit\s+(?:-C\s+\S+\s+)?(commit|push)\b", cmd)
+        if act:
+            # what the commit or push would publish: a secret there stays in the history
+            adding = bool(re.search(r"\bgit\s+add\b", cmd) or re.search(r"\bcommit\b[^\n;&|]*\s-[a-zA-Z]*a", cmd))
+            found = secretscan.find_in_diff(data.get("cwd") or os.getcwd(), outgoing=act.group(1) == "push",
+                                            adding=adding)
+            if found:
+                return True, "guard: this %s would publish what looks like a secret: %s" % (
+                    act.group(1), "; ".join("%s:%d %s %s" % f for f in found[:3]))
         return False, ""
     names = [inp.get(k) for k in ("path", "file_path", "notebook_path") if isinstance(inp.get(k), str)]
     patch = inp.get("patch") or ""

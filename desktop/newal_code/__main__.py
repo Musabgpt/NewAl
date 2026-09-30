@@ -49,6 +49,11 @@ def main(argv=None):
     if argv[:1] == ["--newal-python"] and len(argv) > 1:   # a plugin's Python script (plugins.python_argv)
         import runpy
         utf8_output()
+        if argv[1] == "-m" and len(argv) > 2:                               # python -m module args...
+            sys.argv = argv[2:]
+            sys.path.insert(0, os.getcwd())
+            runpy.run_module(argv[2], run_name="__main__", alter_sys=True)
+            return 0
         sys.argv = argv[1:]
         sys.path.insert(0, os.path.dirname(os.path.abspath(argv[1])))      # as `python script.py` does
         runpy.run_path(argv[1], run_name="__main__")

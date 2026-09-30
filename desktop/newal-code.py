@@ -12,6 +12,11 @@ if __name__ == "__main__":
                 stream.reconfigure(encoding="utf-8", errors="replace")
             except (AttributeError, ValueError, OSError):
                 pass
+        if sys.argv[2] == "-m" and len(sys.argv) > 3:                     # python -m module args...
+            sys.argv = [sys.argv[3]] + sys.argv[4:]
+            sys.path.insert(0, os.getcwd())
+            runpy.run_module(sys.argv[0], run_name="__main__", alter_sys=True)
+            sys.exit(0)
         sys.argv = sys.argv[2:]
         sys.path.insert(0, os.path.dirname(os.path.abspath(sys.argv[0])))   # as `python script.py` does
         runpy.run_path(sys.argv[0], run_name="__main__")

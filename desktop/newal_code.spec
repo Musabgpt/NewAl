@@ -9,7 +9,8 @@ hidden = collect_submodules("newal_code")
 # The standard library that NewAl's plugins' programs use (newal_code/market), which the packaged app runs with
 # its own Python (newal-code --newal-python) although newal_code itself may not import them.
 hidden += ["platform", "heapq", "socket", "stat", "tempfile", "csv", "statistics", "zipfile", "xml.etree.ElementTree",
-           "html", "math", "ctypes", "ctypes.wintypes", "runpy"] + (["winreg"] if sys.platform == "win32" else [])
+           "html", "html.parser", "math", "ctypes", "ctypes.wintypes", "runpy", "unittest", "http.server",
+           "secrets", "urllib.request", "functools"] + (["winreg"] if sys.platform == "win32" else [])
 datas = [("newal_code/ui", "newal_code/ui"), ("newal_code/market", "newal_code/market")]
 icon = "assets/newal.ico" if sys.platform == "win32" else None
 

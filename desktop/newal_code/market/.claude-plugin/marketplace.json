@@ -12,7 +12,7 @@
       "name": "system",
       "source": "./plugins/system",
       "category": "system",
-      "description": "Your computer or phone, answered at once by a program (no model needed): /sysinfo (system, memory, storage, battery, the model sizes that fit), /disk (what takes the space), /clean (caches and old temporary files), /ports (what listens on which port), /programs (search, install, update with winget, pkg, Homebrew, apt)."
+      "description": "Your computer or phone, answered at once by a program (no model needed): /sysinfo (system, memory, storage, battery, the model sizes that fit), /disk (what takes the space), /clean (caches and old temporary files), /ports (what listens on which port), /programs (search, install, update with winget, pkg, Homebrew, apt), /serve (a folder's pages in the browser, --lan for the phone)."
     },
     {
       "name": "data",
@@ -27,10 +27,16 @@
       "description": "/rtl [file or folder] [--apply]: turns a site right-to-left for Arabic: dir=\"rtl\" (and lang=\"ar\") on the page, and CSS's left and right in their logical forms (margin-inline-start, text-align: start, float: inline-start, inset-inline, logical corner radii, 4-value margins split), in CSS files, <style> blocks, style attributes and JSX style objects. It lists the changes first; --apply writes them."
     },
     {
+      "name": "starters",
+      "source": "./plugins/starters",
+      "category": "create",
+      "description": "/create <python|web|node|flask|fastapi> <name> [--ar]: a new project made by a program, not by the model: a Python package with a command line, an offline web page (a notes app), a Node module, a Flask site or a FastAPI service, each with its README, .gitignore and a test that it then runs. --ar: in Arabic, right-to-left."
+    },
+    {
       "name": "guard",
       "source": "./plugins/guard",
       "category": "safety",
-      "description": "Safety with full access: asks before an edit to secrets (.env, keys) and before a force push, a hard reset, git clean, deleting a branch, dropping a database or publishing a package."
+      "description": "Safety with full access: asks before an edit to secrets (.env, keys), before a force push, a hard reset, git clean, deleting a branch, dropping a database or publishing a package, and before a commit or push that would publish a token or private key. /secrets [--staged|--outgoing] finds leaked keys (GitHub, AWS, Google/Gemini, OpenAI/DeepSeek, Anthropic, Hugging Face, Slack, Stripe, Telegram, private keys)."
     },
     {
       "name": "format-on-edit",
