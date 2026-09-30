@@ -8,6 +8,7 @@ import android.graphics.Insets;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
+import android.speech.RecognizerIntent;
 import android.text.Html;
 import android.view.View;
 import android.view.ViewGroup;
@@ -27,9 +28,11 @@ import java.net.URL;
 /** NewAl Code's interface (the same web app as on a computer) in a WebView, once the service has started it. */
 public class MainActivity extends Activity {
     static final int PICK_MODEL = 7;
+    static final int VOICE = 8;
     private static final String HOME = "http://127.0.0.1:" + Setup.PORT + "/";
     private FrameLayout root;
     private WebView web;
+    private WebBridge bridge;
     private String key;
 
     @Override
@@ -49,7 +52,8 @@ public class MainActivity extends Activity {
         s.setDomStorageEnabled(true);
         web.setWebChromeClient(new WebChromeClient());           // confirm() and alert() dialogs
         key = new Setup(this).key();
-        web.addJavascriptInterface(new WebBridge(this, web, key), "NewAlPhone");
+        bridge = new WebBridge(this, web, key);
+        web.addJavascriptInterface(bridge, "NewAlPhone");
         web.setWebViewClient(new WebViewClient() {
             @Override
             public boolean shouldOverrideUrlLoading(WebView view, WebResourceRequest request) {
@@ -70,6 +74,19 @@ public class MainActivity extends Activity {
         }
         startForegroundService(new Intent(this, AgentService.class));
         waitForServer();
+        Shared.from(this, getIntent(), this::tellShared);
+    }
+
+    /** Shared from another app while NewAl Code runs (the activity is single-task). */
+    @Override
+    protected void onNewIntent(Intent i) {
+        super.onNewIntent(i);
+        setIntent(i);
+        Shared.from(this, i, this::tellShared);
+    }
+
+    private void tellShared() {
+        web.evaluateJavascript("window.onPhoneShared && window.onPhoneShared()", null);
     }
 
     /**
@@ -161,12 +178,43 @@ public class MainActivity extends Activity {
         web.loadDataWithBaseURL(null, html, "text/html", "utf-8", null);
     }
 
+    @Override
+    protected void onPause() {
+        super.onPause();
+        Access.paused();
+    }
+
+    @Override
+    protected void onResume() {
+        super.onResume();
+        Access.resumed(this);
+    }
+
+    @Override
+    public void onRequestPermissionsResult(int request, String[] permissions, int[] results) {
+        super.onRequestPermissionsResult(request, permissions, results);
+        Access.answered(this, request);
+    }
+
+    /** The full-access walk is over: the page hears what is on now. */
+    void accessDone() {
+        String js = "window.onPhoneAccess && window.onPhoneAccess(" + bridge.status() + ")";
+        runOnUiThread(() -> web.evaluateJavascript(js, null));
+    }
+
     /** A GGUF file the user picked (the Models page's "Copy a GGUF into the app"): copied into the models folder. */
     @Override
     protected void onActivityResult(int request, int result, Intent data) {
         super.onActivityResult(request, result, data);
         if (request == PICK_MODEL && result == RESULT_OK && data != null && data.getData() != null) {
             ModelImport.start(this, web, data.getData());
+        }
+        if (request == VOICE && result == RESULT_OK && data != null) {
+            java.util.ArrayList<String> said = data.getStringArrayListExtra(RecognizerIntent.EXTRA_RESULTS);
+            if (said != null && !said.isEmpty()) {
+                web.evaluateJavascript("window.onPhoneVoice && window.onPhoneVoice("
+                        + org.json.JSONObject.quote(said.get(0)) + ")", null);
+            }
         }
     }
 

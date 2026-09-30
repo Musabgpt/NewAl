@@ -81,6 +81,9 @@ final class WebBridge {
             o.put("termux", t);
             o.put("phone", "http://127.0.0.1:" + PhoneServer.PORT);
             o.put("sdk", Build.VERSION.SDK_INT);
+            o.put("files", Access.files(act));
+            o.put("notifications", Build.VERSION.SDK_INT < 33 || act.checkSelfPermission(
+                    "android.permission.POST_NOTIFICATIONS") == PackageManager.PERMISSION_GRANTED);
         } catch (Exception ignored) {
         }
         return o.toString();
@@ -140,6 +143,38 @@ final class WebBridge {
         } catch (Exception e) {
             return String.valueOf(e.getMessage());
         }
+    }
+
+    /** Speech to text for the composer: Android's recognizer (lang: "" for the phone's language). */
+    @JavascriptInterface
+    public void listen(String lang) {
+        act.runOnUiThread(() -> {
+            Intent i = new Intent(android.speech.RecognizerIntent.ACTION_RECOGNIZE_SPEECH);
+            i.putExtra(android.speech.RecognizerIntent.EXTRA_LANGUAGE_MODEL,
+                    android.speech.RecognizerIntent.LANGUAGE_MODEL_FREE_FORM);
+            i.putExtra(android.speech.RecognizerIntent.EXTRA_PROMPT, "NewAl Code");
+            if (lang != null && !lang.isEmpty()) {
+                i.putExtra(android.speech.RecognizerIntent.EXTRA_LANGUAGE, lang);
+            }
+            try {
+                act.startActivityForResult(i, MainActivity.VOICE);
+            } catch (Exception e) {
+                Toast.makeText(act, "No speech recognition on this phone (Google's app or another speech service "
+                        + "adds it)", Toast.LENGTH_LONG).show();
+            }
+        });
+    }
+
+    /** What another app shared ({"text", "files"}), once; "" when nothing. */
+    @JavascriptInterface
+    public String takeShared() {
+        return Shared.take();
+    }
+
+    /** The one permission's phone part: Android's own grants, one after another (see Access). */
+    @JavascriptInterface
+    public void fullAccess() {
+        act.runOnUiThread(() -> Access.start((MainActivity) act));
     }
 
     /** The page's colour (its theme): the status and navigation bars take it. */

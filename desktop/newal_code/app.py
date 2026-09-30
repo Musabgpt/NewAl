@@ -4,6 +4,7 @@ and Linux), with the system's folder picker. Without pywebview it opens in the b
 import os
 import sys
 import threading
+import urllib.parse
 import webbrowser
 
 if __package__ in (None, ""):
@@ -13,8 +14,19 @@ if __package__ in (None, ""):
 from newal_code import NAME, runtime, server  # noqa: E402
 
 
+def folder_arg(argv=None):
+    """A folder named on the command line (Explorer's "Open with NewAl Code"): the app opens it."""
+    for a in (argv if argv is not None else sys.argv[1:]):
+        if not a.startswith("--") and os.path.isdir(os.path.expanduser(a)):
+            return os.path.abspath(os.path.expanduser(a))
+    return ""
+
+
 def main():
     httpd, url = server.serve(0 if "--any-port" in sys.argv else 0)
+    folder = folder_arg()
+    if folder:
+        url += ("&" if "?" in url else "?") + "root=" + urllib.parse.quote(folder)
     threading.Thread(target=httpd.serve_forever, daemon=True).start()
     try:
         if "--browser" not in sys.argv:

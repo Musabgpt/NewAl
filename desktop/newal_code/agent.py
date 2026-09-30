@@ -73,7 +73,8 @@ class Agent:
         self.client = client
         self.mcp = parent.mcp if parent else mcp.Manager(session.root)
         self.skills = extensions.skills(session.root)
-        self.shell = tools.shell_command()[1]
+        self.shell = tools.shell_command()[1] + (" (Git Bash); PowerShell with the powershell tool"
+                                                 if tools.has_powershell_tool() else "")
         self.step = 0
         self.last_change_step = -1
         self.last_test_ok_step = -1

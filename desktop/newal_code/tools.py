@@ -654,8 +654,25 @@ def shell_command():
         for p in (shutil.which("bash"), r"C:\Program Files\Git\bin\bash.exe"):
             if p and os.path.exists(p) and "system32" not in p.lower():
                 return [p, "-c"], "bash"
+    return powershell_argv(), "powershell"
+
+
+def powershell_argv():
+    """PowerShell for one command: PowerShell 7 (pwsh) when installed, else Windows PowerShell; no profile, no
+    prompts, scripts allowed for this process only."""
     exe = shutil.which("pwsh") or shutil.which("powershell") or "powershell"
-    return [exe, "-NoProfile", "-NonInteractive", "-Command"], "powershell"
+    return [exe, "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command"]
+
+
+# Before a PowerShell command: UTF-8 both ways (Windows PowerShell writes the console's code page into a pipe) and no
+# progress bars in the output.
+PS_PREFIX = ("[Console]::OutputEncoding=[Text.Encoding]::UTF8; $OutputEncoding=[Text.Encoding]::UTF8; "
+             "$ProgressPreference='SilentlyContinue'; ")
+
+
+def has_powershell_tool():
+    """A powershell tool beside bash: on Windows when bash is Git Bash (without it, bash already is PowerShell)."""
+    return os.name == "nt" and shell_command()[1] == "bash" and bool(shutil.which("pwsh") or shutil.which("powershell"))
 
 
 def clip(text, limit=MAX_OUTPUT):
@@ -723,11 +740,12 @@ def _kill(proc):
             pass
 
 
-def command_argv(ctx, command, sandbox=True):
-    """(argv, sandboxed): the shell running `command`, inside the sandbox for the session's mode when this system has
-    one (writes only in the project, the added folders and temp; read-only mode: only in temp). See sandbox.py."""
-    argv, _ = shell_command()
-    full = argv + [command]
+def command_argv(ctx, command, sandbox=True, shell=None):
+    """(argv, sandboxed): the shell running `command` (shell="powershell" for PowerShell, else the usual one), inside
+    the sandbox for the session's mode when this system has one (writes only in the project, the added folders and
+    temp; read-only mode: only in temp). See sandbox.py."""
+    argv, name = (powershell_argv(), "powershell") if shell == "powershell" else shell_command()
+    full = argv + [(PS_PREFIX + command) if name == "powershell" else command]
     session = getattr(ctx, "session", None)
     if not sandbox or session is None or settings.user().get("sandbox", "auto") == "off":
         return full, False
@@ -736,9 +754,9 @@ def command_argv(ctx, command, sandbox=True):
                    extra=getattr(session, "dirs", None) or ())
 
 
-def run_command(ctx, command, timeout=120, on_line=None, sandbox=True):
+def run_command(ctx, command, timeout=120, on_line=None, sandbox=True, shell=None):
     """(exit code, output). Streams lines to on_line while it runs; stops on timeout or cancel."""
-    full, ctx_sandboxed = command_argv(ctx, command, sandbox)
+    full, ctx_sandboxed = command_argv(ctx, command, sandbox, shell)
     try:
         ctx.last_sandboxed = ctx_sandboxed
     except AttributeError:
@@ -830,6 +848,28 @@ def t_bash(ctx, command, timeout=120, background=False):
     return ("exit %d\n%s" % (code, shown)).rstrip(), {"command": command, "exit": code, "output": out[-20000:],
                                                      "seconds": round(time.time() - started, 2),
                                                      "sandboxed": sandboxed}
+
+
+@tool("powershell", "Run a PowerShell command in the project folder: Windows itself (its cmdlets, the registry, "
+                    "services, processes, installed apps, winget, .NET, Windows settings). Returns the exit code and "
+                    "output. Builds, tests and git work in bash too.",
+      {"command": _s("the PowerShell command"), "timeout": _i("seconds (default 120, max 1800)")}, ["command"], "exec")
+def t_powershell(ctx, command, timeout=120):
+    command = str(command or "").strip()
+    if not command:
+        raise ToolError("empty command")
+    timeout = min(max(1, int(timeout or 120)), 1800)
+    started = time.time()
+    emit = lambda l: ctx.emit({"type": "output", "text": l})  # noqa: E731
+    code, out = run_command(ctx, command, timeout, on_line=emit, shell="powershell")
+    sandboxed = getattr(ctx, "last_sandboxed", False)
+    if sandboxed and code != 0 and SANDBOX_DENIED.search(out) and getattr(ctx, "escalate", None):
+        if ctx.escalate(command, out):
+            code, out = run_command(ctx, command, timeout, on_line=emit, sandbox=False, shell="powershell")
+            sandboxed = False
+    return ("exit %d\n%s" % (code, clip(out.strip()))).rstrip(), {
+        "command": command, "exit": code, "output": out[-20000:], "seconds": round(time.time() - started, 2),
+        "sandboxed": sandboxed, "shell": "powershell"}
 
 
 SANDBOX_DENIED = re.compile(r"Permission denied|Operation not permitted|Read-only file system|EACCES|EPERM|"
@@ -1057,6 +1097,8 @@ def default_set(model_profile=None, root=None):
         names[names.index("edit")] = "apply_patch"
     if root and has_notebooks(root):
         names.append("notebook_edit")
+    if has_powershell_tool():
+        names.insert(names.index("bash") + 1, "powershell")
     if settings.user().get("web", True):
         names += ["web_search", "web_fetch"]
     from . import phone

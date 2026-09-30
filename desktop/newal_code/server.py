@@ -59,7 +59,8 @@ class Handler(BaseHTTPRequestHandler):
             self.send_response(302)                 # the key into a cookie, and out of the address bar
             self.send_header("Set-Cookie", "newal_key=%s; Path=/; HttpOnly; SameSite=Strict; Max-Age=31536000"
                              % self.key)
-            self.send_header("Location", path)
+            rest = {k: v for k, v in q.items() if k != "key"}           # (a folder to open: ?root=...)
+            self.send_header("Location", path + ("?" + urllib.parse.urlencode(rest) if rest else ""))
             self.send_header("Content-Length", "0")
             self.end_headers()
             return False
@@ -177,7 +178,9 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json({"name": NAME, "version": __version__, "hardware": hardware.summary(),
                                    "sandbox": sandbox.kind() if cfg.get("sandbox", "auto") != "off" else "",
                                    "settings": {k: cfg.get(k) for k in ("model", "mode", "reasoning", "verify", "theme",
-                                                                        "auto_context", "speculative", "web", "roles")},
+                                                                        "auto_context", "speculative", "web", "roles",
+                                                                        "full_access", "onboarded", "lang")},
+                                   "shells": _shells(),
                                    "projects": svc.projects(), "home": os.path.expanduser("~"),
                                    "storage": os.environ.get("NEWAL_SHARED_STORAGE") or "",
                                    "busy": [sid for sid in list(svc.threads) if svc.busy(sid)],
@@ -204,6 +207,9 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/v1/models":
                 return self._json({"object": "list", "data": [{"id": "phone", "object": "model",
                                                                "owned_by": "newal-code-lite"}]})
+            if path == "/api/system":
+                from . import system
+                return self._json(system.status())
             if path == "/api/github":
                 from . import github
                 return self._json(github.account())
@@ -316,7 +322,7 @@ class Handler(BaseHTTPRequestHandler):
                     svc.warm(sid)
                     return self._json({"ok": True})
                 if action == "terminal":
-                    return self._json(_terminal(svc, s, b.get("command", "")))
+                    return self._json(_terminal(svc, s, b.get("command", ""), b.get("shell") or None))
             if path == "/api/sessions/delete":
                 svc.delete(b.get("id"))
                 return self._json({"ok": True})
@@ -349,6 +355,31 @@ class Handler(BaseHTTPRequestHandler):
                     return self._json({"error": str(e)}, 400)
                 return self._json({"error": "action (install, remove, marketplace_add, marketplace_remove) and "
                                             "source"}, 400)
+            if path == "/api/system":
+                # The one permission (full access), and NewAl Code's place in the system (PATH, Explorer, Terminal)
+                from . import system
+                act, on = b.get("action") or "", bool(b.get("on", True))
+                try:
+                    if act == "access":
+                        system.grant(on)
+                    elif act == "path":
+                        system.set_path(on)
+                    elif act == "explorer":
+                        system.set_explorer(on)
+                    elif act == "terminal":
+                        system.set_terminal(on)
+                    elif act == "install":
+                        system.install()
+                    elif act == "terminal_here":
+                        system.open_terminal(b.get("root") or "")
+                    elif act == "onboarded":
+                        settings.save({"onboarded": True})
+                    else:
+                        return self._json({"error": "action: access, path, explorer, terminal, install, "
+                                                    "terminal_here, onboarded"}, 400)
+                except (OSError, ValueError) as e:
+                    return self._json({"error": str(e)}, 400)
+                return self._json(dict(system.status(), ok=True))
             if path == "/api/mkdir":
                 try:
                     return self._json({"path": _mkdir(b.get("parent") or "", b.get("name") or "")})
@@ -368,6 +399,8 @@ class Handler(BaseHTTPRequestHandler):
                 from . import github
                 try:
                     if path.endswith("/connect"):
+                        if b.get("auto"):          # this computer's own GitHub login (gh, Git Credential Manager)
+                            return self._json(dict(github.connect_detected(), ok=True))
                         return self._json(dict(github.connect(b.get("token")), ok=True))
                     if path.endswith("/disconnect"):
                         github.disconnect()
@@ -526,8 +559,9 @@ def _commit(s, message, then=""):
     return result
 
 
-def _terminal(svc, s, command):
-    """The terminal pane: a command the user typed, run in the project with its output streamed."""
+def _terminal(svc, s, command, shell=None):
+    """The terminal pane: a command the user typed, run in the project with its output streamed (shell="powershell":
+    in PowerShell)."""
     if not command.strip():
         return {"error": "empty"}
 
@@ -539,7 +573,8 @@ def _terminal(svc, s, command):
     def run():
         svc.broadcast({"type": "terminal_start", "session": s.id, "command": command})
         code, out = tools.run_command(Ctx, command, timeout=600, on_line=lambda l: svc.broadcast(
-            {"type": "terminal_output", "session": s.id, "text": l}))
+            {"type": "terminal_output", "session": s.id, "text": l}),
+            shell="powershell" if shell == "powershell" else None)
         svc.broadcast({"type": "terminal_end", "session": s.id, "exit": code})
     threading.Thread(target=run, daemon=True).start()
     return {"ok": True}
@@ -588,6 +623,12 @@ def _browse(path, files=""):
     if files:
         out["files"] = found[:500]
     return out
+
+
+def _shells():
+    """The shells the terminal pane offers: the usual one, and PowerShell beside Git Bash on Windows."""
+    name = tools.shell_command()[1]
+    return [name] + (["powershell"] if tools.has_powershell_tool() else [])
 
 
 def _mkdir(parent, name):
@@ -701,8 +742,12 @@ def serve(port=0, open_browser=False, host="127.0.0.1"):
     return httpd, url
 
 
-def main(port=0, open_browser=True):
-    httpd, url = serve(port, open_browser)
+def main(port=0, open_browser=True, root=""):
+    httpd, url = serve(port, open_browser=False)
+    if root:
+        url += "&root=" + urllib.parse.quote(root)
+    if open_browser:
+        threading.Timer(0.5, lambda: __import__("webbrowser").open(url)).start()
     print("%s %s: %s" % (NAME, __version__, url), flush=True)
     try:
         import signal

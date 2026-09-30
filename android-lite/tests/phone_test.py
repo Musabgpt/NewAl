@@ -227,6 +227,18 @@ def features(state):
     check("phone: back", len(phone) > 4 and "pressed back" in phone[4], phone[4:5])
     shutil.rmtree(top, ignore_errors=True)
     adb("shell", "am", "start", "-n", PKG + "/.MainActivity", check=False)
+    # Share to NewAl Code: another app's text starts a new thread (it waits in the composer)
+    adb("shell", "am", "start", "-a", "android.intent.action.SEND", "-t", "text/plain", "--es",
+        "android.intent.extra.TEXT", "'shared from another app'", "-n", PKG + "/.MainActivity", check=False)
+    seen = ""
+    for _ in range(6):
+        time.sleep(4)
+        adb("shell", "uiautomator", "dump", "/sdcard/ui.xml", check=False, timeout=90)
+        seen = adb("shell", "cat", "/sdcard/ui.xml", check=False)
+        if "shared from another app" in seen:
+            break
+    check("share: another app's text reaches NewAl Code", "shared from another app" in seen,
+          re.findall(r'text="([^"]{3,80})"', seen)[:20])
 
 
 def wait_up(limit=120):

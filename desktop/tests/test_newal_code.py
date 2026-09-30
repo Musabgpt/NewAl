@@ -220,6 +220,27 @@ class ToolsTest(unittest.TestCase):
 
 
 class PermissionsTest(unittest.TestCase):
+    def test_powershell_and_cmd_commands(self):
+        c = permissions.classify_command
+        for cmd in ("Remove-Item C:\\ -Recurse -Force", "rm -r -fo ~", "Remove-Item $env:USERPROFILE -Recurse",
+                    "cmd /c rd /s /q C:\\ ", "Format-Volume -DriveLetter D", "del /s /q C:\\Windows\\",
+                    "Remove-Item C:\\Users -Recurse -Force", "Clear-Disk -Number 1"):
+            self.assertEqual(c(cmd), "catastrophic", cmd)
+        for cmd in ("Remove-Item .\\build -Recurse -Force", "ri -r C:\\Users\\me\\tmp", "Stop-Process -Name app",
+                    "Set-ExecutionPolicy Unrestricted", "winget install Git.Git", "Restart-Computer"):
+            self.assertEqual(c(cmd), "risky", cmd)
+        for cmd in ("Get-ChildItem -Recurse | Select-String TODO", "Get-Process", "Test-Path .\\x"):
+            self.assertEqual(c(cmd), "read", cmd)
+        d = permissions.decide
+        self.assertEqual(d("full-auto", "powershell", "exec", {"command": "Format-Volume -DriveLetter C"}, "", {}).action,
+                         "deny")
+        self.assertEqual(d("auto-edit", "powershell", "exec", {"command": "npm test"}, "", {}).action, "allow")
+        self.assertEqual(d("auto-edit", "powershell", "exec", {"command": "Stop-Service x"}, "", {}).action, "ask")
+        self.assertEqual(d("auto-edit", "powershell", "exec", {"command": "Stop-Service x"}, "",
+                           {"allow": ["PowerShell(Stop-Service:*)"]}).action, "allow")
+        self.assertEqual(permissions.always_rule("powershell", {"command": "winget install x"}),
+                         "PowerShell(winget install:*)")
+
     def test_commands(self):
         c = permissions.classify_command
         self.assertEqual(c("ls -la && git status"), "read")
@@ -767,6 +788,117 @@ class PhoneStorageTest(unittest.TestCase):
         models._shared.update(at=0.0)
         with mock.patch.dict(os.environ, {"NEWAL_SHARED_STORAGE": ""}):
             self.assertEqual(models.shared_ggufs(), [])
+
+
+class SystemTest(unittest.TestCase):
+    """The one permission (full access) and NewAl Code's place in the system: launchers on PATH, and on Windows the
+    user's Path, Explorer's menu and a Windows Terminal profile (the Windows parts run in the Windows check)."""
+
+    def test_full_access_is_one_grant(self):
+        from newal_code import system
+        self.addCleanup(settings.save, {"full_access": False, "mode": "auto-edit"})
+        system.grant(True)
+        self.assertTrue(system.full_access())
+        self.assertEqual(settings.user()["mode"], "full-auto")
+        root = make_project(CALC)
+        from newal_code import service
+        s = service.Service().create(root)
+        self.assertEqual(s.mode, "full-auto")                       # a new thread works with full access
+        from newal_code import sandbox
+        self.assertFalse(sandbox.active(root, s.mode))
+        system.grant(False)
+        self.assertEqual((system.full_access(), settings.user()["mode"]), (False, "auto-edit"))
+        r = subprocess.run([sys.executable, "-m", "newal_code", "access", "full"], capture_output=True, text=True,
+                           cwd=os.path.dirname(HERE), timeout=60, env=dict(os.environ, PYTHONPATH=os.path.dirname(HERE)))
+        self.assertIn("Full access: on", r.stdout, r.stderr)
+        self.assertTrue(system.full_access())
+
+    def test_launchers_and_windows_integration(self):
+        from unittest import mock
+        from newal_code import system
+        top = tempfile.mkdtemp(prefix="nc-sys-")
+        with mock.patch.object(system, "bin_dir", lambda: os.path.join(top, "bin")), \
+                mock.patch.dict(os.environ, {"LOCALAPPDATA": top}):
+            made = system.write_launchers()
+            names = sorted(os.path.basename(p) for p in made)
+            self.assertIn("newal", names)
+            if os.name == "nt":
+                self.assertIn("newal.cmd", names)
+                r = subprocess.run([os.path.join(top, "bin", "newal.cmd"), "--version"], capture_output=True, text=True,
+                                   timeout=120)
+            else:
+                r = subprocess.run([os.path.join(top, "bin", "newal"), "--version"], capture_output=True, text=True,
+                                   timeout=120)
+            self.assertIn("NewAl Code", r.stdout, r.stderr)                 # the launcher starts NewAl Code
+            if os.name != "nt":
+                return
+            import winreg
+            self.addCleanup(system.set_explorer, False)
+            self.assertTrue(system.set_explorer(True))
+            self.assertTrue(system.explorer_on())
+            with winreg.OpenKey(winreg.HKEY_CURRENT_USER, system.MENU_KEYS[0] + r"\command") as k:
+                self.assertIn("%V", winreg.QueryValueEx(k, "")[0])
+            system.set_explorer(False)
+            self.assertFalse(system.explorer_on())
+            self.assertTrue(system.set_terminal(True))
+            with open(system.terminal_fragment(), encoding="utf-8") as f:
+                self.assertEqual(json.load(f)["profiles"][0]["name"], "NewAl Code")
+            system.set_terminal(False)
+            self.assertFalse(system.terminal_on())
+            before = system._user_path()[0]
+            self.addCleanup(lambda: system.set_path(False))
+            system.set_path(True)
+            self.assertTrue(system.on_path())
+            system.set_path(False)
+            self.assertFalse(system.on_path())
+            self.assertEqual(system._user_path()[0].rstrip(";"), before.rstrip(";"))
+
+    def test_powershell_tool_on_windows(self):
+        if not tools.has_powershell_tool():
+            self.assertNotIn("powershell", tools.default_set())
+            self.skipTest("a powershell tool is offered on Windows beside Git Bash")
+        self.assertIn("powershell", tools.default_set())
+        root = make_project({"a.txt": "x"})
+        s = session.Session(root, mode="full-auto")
+        ctx = agentmod.ToolContext(agentmod.Agent(s))
+        text, meta = tools.REGISTRY["powershell"].fn(ctx, "Get-ChildItem -Name; Write-Output 'مرحبا من PowerShell'")
+        self.assertEqual(meta["exit"], 0, text)
+        self.assertIn("a.txt", text)
+        self.assertIn("مرحبا من PowerShell", text)                         # UTF-8 through the pipe
+
+    def test_the_app_opens_a_folder_from_the_command_line(self):
+        from newal_code import app
+        d = tempfile.mkdtemp()
+        self.assertEqual(app.folder_arg(["--browser", d]), os.path.abspath(d))
+        self.assertEqual(app.folder_arg(["--browser", os.path.join(d, "nope")]), "")
+
+    def test_github_login_from_this_computer(self):
+        from unittest import mock
+        from newal_code import github
+        top = tempfile.mkdtemp(prefix="nc-gh-")
+        tok = "gho_" + "k" * 36
+        if os.name == "nt":
+            with open(os.path.join(top, "gh.cmd"), "w") as f:
+                f.write("@echo %s\n" % tok)
+        else:
+            path = os.path.join(top, "gh")
+            with open(path, "w") as f:
+                f.write("#!/bin/sh\necho %s\n" % tok)
+            os.chmod(path, 0o755)
+        env = {"PATH": top + os.pathsep + os.environ.get("PATH", ""), "GH_TOKEN": "", "GITHUB_TOKEN": "",
+               "NEWAL_NO_GIT_CREDENTIAL": "1"}
+        with mock.patch.dict(os.environ, env):
+            self.assertEqual(github.detect(interactive=False), (tok, "gh"))
+        # git's credential helper (Git Credential Manager on Windows) when there is no GitHub CLI
+        if os.name != "nt":
+            home = tempfile.mkdtemp(prefix="nc-gh-home-")
+            with open(os.path.join(home, ".gitconfig"), "w") as f:
+                f.write("[credential]\n\thelper = \"!f() { echo username=x; echo password=%s; }; f\"\n" % tok)
+            with mock.patch.dict(os.environ, {"PATH": "/usr/bin:/bin", "GH_TOKEN": "", "GITHUB_TOKEN": "",
+                                              "HOME": home, "XDG_CONFIG_HOME": home,
+                                              "NEWAL_NO_GIT_CREDENTIAL": ""}):
+                if shutil.which("git"):
+                    self.assertEqual(github.detect(interactive=False), (tok, "git credential manager"))
 
 
 class GitHubTest(unittest.TestCase):
@@ -1888,6 +2020,9 @@ class ServerTest(unittest.TestCase):
         self.assertIn("newal_key=" + self.key, cookie)
         self.assertIn("HttpOnly", cookie)
         self.assertEqual(headers.get("Location"), "/")
+        # a folder to open (Explorer's "Open with NewAl Code") stays in the address
+        status, headers, _ = self.raw("/?key=" + self.key + "&root=" + urllib.request.quote("/tmp/my app"))
+        self.assertEqual((status, headers.get("Location")), (302, "/?root=%2Ftmp%2Fmy+app"))
         self.assertEqual(self.raw("/api/state", {"Cookie": "a=b; newal_key=" + self.key})[0], 200)
         self.assertEqual(self.raw("/api/state", {"X-NewAl-Key": self.key}, host="evil.example:%s"
                                   % self.url.rsplit(":", 1)[1].strip("/"))[0], 403)

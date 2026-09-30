@@ -389,3 +389,16 @@ pre.out { margin: 0; background: var(--bg-code); border: 1px solid var(--border)
 .connect-sheet p { margin: 0 0 8px; line-height: 1.5; }
 .connect-sheet input { flex: 1; min-width: 200px; }
 .form-row .good { color: var(--good, #2e7d32); }
+
+/* the one permission, the welcome */
+.foot-chip.access { color: #b3261e; border: 1px solid rgba(179, 38, 30, .35); background: transparent; cursor: pointer; }
+.term-head select { margin-inline-start: auto; font-size: 12px; padding: 1px 4px; background: var(--bg-soft); color: var(--fg);
+  border: 1px solid var(--border); border-radius: 6px; }
+.welcome .step { border: 1px solid var(--border); border-radius: 12px; padding: 12px 14px; margin: 10px 0; }
+.welcome .step h3 { margin: 0 0 6px; font-size: 15px; }
+.welcome .step p { margin: 4px 0 8px; color: var(--fg-soft); font-size: 13px; line-height: 1.5; }
+.welcome .choice { display: flex; gap: 8px; flex-wrap: wrap; }
+.welcome .done { color: var(--good, #2e7d32); font-weight: 600; }
+.welcome .lead { color: var(--fg-soft); margin: 0 0 6px; }
+#mic.listening { color: #fff; background: #b3261e; animation: pulse 1.2s infinite; }
+@keyframes pulse { 50% { opacity: .55; } }

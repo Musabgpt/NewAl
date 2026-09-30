@@ -18,18 +18,22 @@ ALLOW, ASK, DENY = "allow", "ask", "deny"
 
 TOOL_NAMES = {"bash": "Bash", "edit": "Edit", "write": "Write", "apply_patch": "Edit", "read": "Read", "glob": "Glob",
               "grep": "Grep", "web_fetch": "WebFetch", "web_search": "WebSearch", "task": "Task", "todo": "TodoWrite", "skill": "Skill",
-              "job": "BashOutput", "notebook_edit": "NotebookEdit", "phone": "Phone"}
+              "job": "BashOutput", "notebook_edit": "NotebookEdit", "phone": "Phone",
+              "powershell": "PowerShell"}
+COMMAND_TOOLS = ("bash", "powershell")
 
 # Commands that only look: fine in every mode.
 READ_ONLY_CMD = re.compile(
     r"^\s*(ls|dir|cat|type|head|tail|wc|grep|egrep|rg|find|fd|pwd|echo|which|where|tree|stat|file|du|sort|uniq|cut|"
     r"less|more|diff|cmp|sed -n|awk|jq|basename|dirname|realpath|date|uname|whoami|hostname|nproc|free|"
-    r"Get-ChildItem|Get-Content|Select-String|Get-Location|Test-Path|"
+    r"Get-[A-Za-z]+|Select-String|Select-Object|Where-Object|Sort-Object|Measure-Object|Format-(Table|List)|"
+    r"Test-Path|Resolve-Path|Split-Path|Join-Path|Out-String|Write-Output|"
     r"git (status|diff|log|show|branch|rev-parse|ls-files|blame|remote -v|describe|shortlog|tag -l)|"
     r"(python3?|py|node|npm|pip3?|go|cargo|rustc|java|javac|gcc|g\+\+|clang) (--version|-V|version))\b", re.I)
 # Destructive or outward: ask even in auto-edit.
 RISKY_CMD = re.compile(
     r"\brm\s+(-[a-zA-Z]*[rf]|--recursive|--force)|\brmdir\b|\bdel\s+/[sq]|Remove-Item\b.*-Recurse|\brd\s+/s|"
+    r"\b(ri|erase|rm|del)\b[^;|&\n]*\s-(r|recurse|fo|force)\b|"
     r"\bgit\s+(push|reset\s+--hard|clean\s+-[a-z]*f|checkout\s+--\s|restore\s+\.|rebase|filter-branch|"
     r"branch\s+-D|stash\s+(drop|clear)|commit\s+--amend|update-ref\s+-d)|"
     r"\bsudo\b|\bsu\s|\bdoas\b|\bchmod\s+-R|\bchown\b|\bmkfs|\bdd\s+if=|\bshutdown\b|\breboot\b|\bhalt\b|"
@@ -37,13 +41,23 @@ RISKY_CMD = re.compile(
     r"Invoke-Expression|\b(apt|apt-get|yum|dnf|pacman|brew|choco|winget|snap|scoop)\s+(install|remove|upgrade|"
     r"uninstall)|\bnpm\s+(i|install)\s+(-g|--global)|\bpip3?\s+install\s+(--user\s+)?--upgrade\s+pip|"
     r"\b(npm|yarn|pnpm)\s+publish|\btwine\s+upload|\bdocker\s+(rm|rmi|system\s+prune|volume\s+rm)|"
-    r"\bsetx\b|\breg\s+(add|delete)|Set-ItemProperty|>\s*/etc/|>\s*~/\.|\bcrontab\b|\bsystemctl\b|\bsc\s+(stop|delete)",
+    r"\bsetx\b|\breg\s+(add|delete)|Set-ItemProperty|>\s*/etc/|>\s*~/\.|\bcrontab\b|\bsystemctl\b|\bsc\s+(stop|delete)|"
+    r"\b(Stop-Computer|Restart-Computer|Stop-Process|Stop-Service|Remove-Service|Set-ExecutionPolicy|"
+    r"New-ItemProperty|Remove-ItemProperty|Uninstall-Package|Install-Module|Install-Package|Remove-AppxPackage|"
+    r"Disable-\w+|Set-MpPreference|Add-MpPreference|New-Service|Register-ScheduledTask)\b|Start-Process\b.*-Verb\s+RunAs",
     re.I)
+# A whole drive, the home folder or Windows' folder, as PowerShell and cmd write them.
+_PS_ROOT = (r"[\"']?([A-Za-z]:\\?|~[\\/]?|\$HOME|\$env:(USERPROFILE|SystemRoot|windir|ProgramFiles|HOMEDRIVE|SystemDrive)"
+            r"|[A-Za-z]:\\Windows\\?|[A-Za-z]:\\Users\\?)[\"']?")
 # Refused in every mode.
 CATASTROPHIC = re.compile(
     r"\brm\s+-[a-zA-Z]*r[a-zA-Z]*\s+(-[a-zA-Z]+\s+)*(/|~|\$HOME|/\*|~/\*|C:\\?)\s*($|;|&)|:\(\)\s*\{\s*:\|:&\s*\};:|"
     r"\bmkfs(\.\w+)?\s+/dev/|\bdd\s+[^|]*of=/dev/(sd|nvme|hd|disk)|\bformat\s+[a-z]:|Remove-Item\s+-Recurse\s+"
-    r"(-Force\s+)?(C:\\|~|\$HOME)\s*$", re.I)
+    r"(-Force\s+)?(C:\\|~|\$HOME)\s*$|"
+    # PowerShell and cmd: a drive, the home folder or Windows removed as a whole, disks wiped
+    r"\b(Remove-Item|ri|rm|del|erase|rd|rmdir)\b(?=[^;|&\n]*\s-(r|recurse)\b)(?=[^;|&\n]*\s" + _PS_ROOT + r"(\s|$|;))|"
+    r"\b(rd|rmdir|del)\s+/s\b[^;|&\n]*\s" + _PS_ROOT + r"(\s|$)|"
+    r"\b(Format-Volume|Clear-Disk|Remove-Partition|Initialize-Disk|diskpart)\b", re.I)
 
 
 class Decision:
@@ -77,7 +91,7 @@ def matches(rule, tool, args, root=""):
         return False
     if spec is None or spec in ("", "*"):
         return True
-    if canonical == "Bash":
+    if canonical in ("Bash", "PowerShell"):
         cmd = str(args.get("command") or "").strip()
         if spec.endswith(":*"):
             return cmd == spec[:-2] or cmd.startswith(spec[:-2] + " ") or cmd.startswith(spec[:-2])
@@ -138,7 +152,7 @@ def decide(mode, tool, kind, args, root, rules, inside_root=True, sandboxed=Fals
     for r in rules.get("deny", []):
         if matches(r, tool, args, root):
             return Decision(DENY, "denied by rule %s" % r)
-    cmd_class = classify_command(args.get("command")) if tool == "bash" else None
+    cmd_class = classify_command(args.get("command")) if tool in COMMAND_TOOLS else None
     if cmd_class == "catastrophic":
         return Decision(DENY, "this command could destroy the system or the user's files")
     for r in rules.get("ask", []):
@@ -199,9 +213,9 @@ def _phone_detail(args):
 def always_rule(tool, args):
     """The rule "allow always" adds for a call: a command's first words, a file's folder, a site, an MCP tool."""
     canonical = TOOL_NAMES.get(tool, tool)
-    if tool == "bash":
+    if tool in COMMAND_TOOLS:
         words = str(args.get("command") or "").split()
-        return "Bash(%s:*)" % " ".join(words[:2]) if words else "Bash"
+        return "%s(%s:*)" % (canonical, " ".join(words[:2])) if words else canonical
     if tool in ("edit", "write", "apply_patch", "notebook_edit"):
         return "Edit"
     if tool == "web_fetch":

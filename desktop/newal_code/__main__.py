@@ -9,6 +9,8 @@
   newal-code resume [id]         reopen a thread
   newal-code cloud "task"        run a task on GitHub Actions (list, status, show, apply, pr, delete ID)
   newal-code github install      the GitHub app: @newal in issues and pull requests (--pr: as a pull request)
+  newal-code access full|ask     the one permission: full access for new threads, or back to asking
+  newal-code install             newal in every terminal (PATH), Explorer's menu and a Windows Terminal profile
 
 Options: --model ID, --mode read-only|ask|auto-edit|full-auto, --cd DIR, --full-auto."""
 
@@ -82,8 +84,12 @@ def main(argv=None):
 
     if cmd in ("app", "serve", "web", "ui"):
         from newal_code import server
-        server.main(a.port, open_browser=not a.no_browser)
+        server.main(a.port, open_browser=not a.no_browser,
+                    root=os.path.abspath(os.path.expanduser(rest)) if rest and os.path.isdir(
+                        os.path.expanduser(rest)) else "")
         return 0
+    if cmd in ("access", "install", "uninstall"):
+        return cmd_system(cmd, rest)
     last = ""
     if a.cont:
         from newal_code import session
@@ -112,7 +118,39 @@ def main(argv=None):
     return tui.run(root, model=a.model, mode=mode, prompt=rest or None, dirs=a.add_dir)
 
 
-COMMANDS = ("app", "serve", "web", "ui", "exec", "models", "doctor", "resume", "bench", "cloud", "github")
+COMMANDS = ("app", "serve", "web", "ui", "exec", "models", "doctor", "resume", "bench", "cloud", "github", "access",
+            "install", "uninstall")
+
+
+def cmd_system(cmd, rest):
+    """access full|ask (the one permission), install (newal in every terminal, Explorer's menu, Windows Terminal),
+    uninstall."""
+    from newal_code import system
+    if cmd == "access":
+        word = rest.strip().lower()
+        if word in ("full", "on", "yes", "grant"):
+            system.grant(True)
+        elif word in ("ask", "off", "no", "revoke", "safe"):
+            system.grant(False)
+        elif word:
+            print("newal-code access full | ask")
+            return 2
+        print("Full access: %s" % ("on: new threads work without the sandbox and without asking (catastrophic "
+                                   "commands are still refused)" if system.full_access() else
+                                   "off: edits and commands in the project; NewAl Code asks before anything else"))
+        return 0
+    if cmd == "install":
+        done = system.install()
+        st = system.status()
+        print("newal in every new terminal: %s (%s)" % ("yes" if st["path"] else "no", st["bin"]))
+        if st["windows"]:
+            print("Explorer: \"Open with NewAl Code\" and \"NewAl Code terminal here\": %s" % (
+                "yes" if st["explorer"] else "no"))
+            print("Windows Terminal profile: %s" % ("yes" if st["terminal"] else "no"))
+        return 0 if done else 1
+    system.uninstall()
+    print("Removed.")
+    return 0
 
 
 def cmd_models(download=""):

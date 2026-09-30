@@ -30,6 +30,39 @@ Code: `desktop/newal_code/` (standard library only). Tests: `desktop/tests/test_
 | Speed test on this computer | `python -m newal_code bench [--model ID]` |
 | A task in the cloud (see "Cloud tasks") | `newal-code cloud "add a --json flag"`, then `status`, `show`, `apply`, `pr ID` |
 | The GitHub app in a repository (see "GitHub app") | `newal-code github install --pr` |
+| The one permission: full access for new threads, or back to asking | `newal-code access full` / `newal-code access ask` |
+| `newal` in every terminal, Explorer's menu, a Windows Terminal profile | `newal-code install` (`uninstall` removes them) |
+
+**The first start** shows a welcome, once: a model (the one this computer or phone fits, or an API in one tap), the
+one permission, GitHub, and (on a computer) the terminal. Settings > "Set up again" shows it later.
+
+**One permission for full access.** "Give full access" (the welcome, Settings > Access, `newal-code access full`) is
+a single grant, kept: new threads then work without the sandbox and without asking, on any file and with any
+command, and the phone tool acts without asking; commands that would wipe a drive, the home folder or Windows
+(`rm -rf ~`, `Remove-Item C:\ -Recurse`, `rd /s /q C:\`, `Format-Volume`, `Clear-Disk`...) are still refused. A
+"Full access" chip under the composer says it is on (a click opens Settings). On a phone the same tap then walks
+through what Android grants itself, each on its own screen, skipping what is on already: notifications, the phone's
+files (All files access), screen control (the accessibility service) and Termux's commands. "Ask me first again"
+takes it back.
+
+**The computer: PowerShell, the terminal, Explorer.** On Windows with Git Bash the agent has a `powershell` tool
+beside `bash` (PowerShell 7 when installed, else Windows PowerShell; UTF-8 both ways, no progress bars; Windows
+itself: cmdlets, the registry, services, winget), with its own rules (`PowerShell(winget install:*)`) and the same
+refusals; without Git Bash, `bash` is PowerShell. The terminal pane runs Git Bash or PowerShell (a choice in its
+header) and ⧉ opens a real terminal window there with NewAl Code (Windows Terminal, else PowerShell).
+`newal-code install` (or Settings > This computer, or the welcome) puts `newal` and `newal-code` in every new
+terminal (the user's PATH: PowerShell, cmd and Git Bash), "Open with NewAl Code" and "NewAl Code terminal here" in
+Explorer's right-click menu on folders, and a "NewAl Code" profile in Windows Terminal; no administrator rights.
+The app opens a folder it is given (`NewAlCode.exe C:\project`, `newal-code app DIR`) as a new thread there.
+
+**GitHub on a computer, without a token.** Connect GitHub uses this computer's own login first: the GitHub CLI's
+(`gh auth token`) or git's credential helper for github.com (Git Credential Manager, which Git for Windows brings
+and which signs in through the browser when it has nothing yet); a token only when neither has one.
+
+**Speaking and sharing (the phone).** The microphone beside Send types what you say (Android's speech recognition,
+in the phone's language; on a computer, the browser's where it has one). "Share" in another app → NewAl Code
+starts a new thread with the text and the files (copied into NewAl Code's `Shared` folder), waiting for what to do
+with them.
 
 **Downloads** (built and checked on each system by `.github/workflows/newal-code.yml`, see "Builds"): the
 pre-releases `newal-code-b<N>` of this repository: Windows x64 (zip: `NewAlCode.exe` and `newal-code.exe`), Linux x64
@@ -88,7 +121,9 @@ It uses NewAl desktop's `llama-server` and the models NewAl already downloaded (
 | Read / Write / Edit / Glob / Grep / LS | ✓ | via shell | ✓ `read` `write` `edit` `glob` `grep` (a folder given to `read` lists it); edits tolerate indentation and line-number mistakes |
 | apply_patch format | – | ✓ | ✓ (`apply_patch`, offered instead of `edit` to models trained on it) |
 | Jupyter notebooks | ✓ NotebookEdit | – | ✓ `read` shows the cells and their output; `notebook_edit` replaces, inserts or deletes a cell (offered in projects that have notebooks) |
-| Shell, background commands, output of a running job | ✓ Bash, BashOutput, KillShell | ✓ | ✓ `bash` (timeout, background) and `job` |
+| Shell, background commands, output of a running job | ✓ Bash, BashOutput, KillShell | ✓ | ✓ `bash` (timeout, background) and `job`; on Windows `powershell` too |
+| One permission for full access, kept | – (a flag per run) | ✓ (a setting) | ✓ "Give full access" once (welcome, Settings, `newal-code access full`); on a phone it walks through Android's grants too |
+| Terminal and OS integration | ✓ `claude` in the terminal | ✓ `codex` | ✓ `newal` in PowerShell, cmd and Git Bash, Explorer's "Open with NewAl Code", a Windows Terminal profile (`newal-code install`) |
 | Plan / checklist | ✓ TodoWrite | ✓ update_plan | ✓ `todo` (pinned above the composer) |
 | Sub-agents | ✓ Task + `.claude/agents` | ✓ | ✓ `task` + `.newal/agents`, `.claude/agents`, NewAl desktop's agents; own model, tools, mode; built-in explore, worker, reviewer |
 | Web search and fetch | ✓ | ✓ search | ✓ `web_search` (Bing RSS, DuckDuckGo, Wikipedia; no key) and `web_fetch` |

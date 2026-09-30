@@ -69,6 +69,7 @@
             </div>
             <div class="right">
               <div class="picker up-right" id="mode-picker"><button type="button" class="picker-btn"><i data-icon="shield"></i><span class="label">Agent</span><i data-icon="chevron"></i></button><div class="menu"></div></div>
+              <button type="button" id="mic" class="icon-btn round" title="Speak your request" hidden><i data-icon="mic"></i></button>
               <button type="submit" id="send" class="send-btn" title="Send (Enter)"><i data-icon="arrow-up"></i></button>
             </div>
           </div>
@@ -77,6 +78,7 @@
         <div class="composer-foot">
           <div class="picker" id="env-picker"><button type="button" class="picker-btn small" title="Where a new thread works"><i data-icon="laptop"></i><span class="label">Local</span><i data-icon="chevron"></i></button><div class="menu"></div></div>
           <span id="sandbox-chip" class="foot-chip" title="Commands can write only inside the project" hidden><i data-icon="shield"></i><span>Sandboxed</span></span>
+          <button type="button" id="access-chip" class="foot-chip access" title="Full access: NewAl Code works without the sandbox and without asking (catastrophic commands are still refused). Click to change." hidden><i data-icon="shield"></i><span>Full access</span></button>
           <span id="ctx-meter" class="foot-chip" hidden></span>
           <span id="speed" class="foot-chip" hidden></span>
           <span id="goal-chip" class="foot-chip goal" hidden></span>
@@ -84,9 +86,9 @@
       </section>
 
       <section id="terminal" hidden>
-        <div class="term-head"><span><i data-icon="terminal"></i> Terminal</span><button id="term-clear" class="mini-btn" title="Clear">⌫</button><button id="term-close" class="mini-btn" title="Close">×</button></div>
+        <div class="term-head"><span><i data-icon="terminal"></i> Terminal</span><select id="term-shell" title="The shell" hidden></select><button id="term-ext" class="mini-btn" title="Open a terminal window here, with NewAl Code">⧉</button><button id="term-clear" class="mini-btn" title="Clear">⌫</button><button id="term-close" class="mini-btn" title="Close">×</button></div>
         <pre id="term-out"></pre>
-        <form id="term-form"><span class="prompt">$</span><input id="term-input" placeholder="Run a command in the project" autocomplete="off"></form>
+        <form id="term-form"><span class="prompt" id="term-prompt">$</span><input id="term-input" placeholder="Run a command in the project" autocomplete="off"></form>
       </section>
     </div>
   </main>

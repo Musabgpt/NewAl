@@ -57,6 +57,9 @@ DEFAULTS = {
     "shell": "",                  # "" auto: bash (PowerShell on Windows without Git Bash)
     "sandbox": "auto",            # auto: commands may write only in the project (Landlock, Seatbelt, low integrity)
     "sandbox_network": True,      # False: sandboxed commands cannot connect (Linux, macOS)
+    "full_access": False,         # the one permission: new threads work with full access (no sandbox, no asking)
+    "onboarded": False,           # the welcome (model, access, GitHub) was shown
+    "lang": "",                   # the interface's language: "" (the system's), "en" or "ar"
 }
 
 _lock = threading.RLock()

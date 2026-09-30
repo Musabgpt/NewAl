@@ -6,6 +6,7 @@
   const ICONS = {
     edit: '<path d="M4 20h4l10.5-10.5a2.1 2.1 0 0 0-3-3L5 17v3z"/><path d="M13.5 6.5l3 3"/>',
     cube: '<path d="M12 3l8 4.5v9L12 21l-8-4.5v-9z"/><path d="M12 12l8-4.5M12 12v9M12 12L4 7.5"/>',
+    mic: '<rect x="9" y="3" width="6" height="11" rx="3"/><path d="M5 11a7 7 0 0 0 14 0M12 18v3"/>',
     git: '<circle cx="6" cy="6" r="2"/><circle cx="6" cy="18" r="2"/><circle cx="18" cy="8" r="2"/><path d="M6 8v8M18 10c0 4-6 3-10.5 6.5"/>',
     phone: '<rect x="7" y="2.5" width="10" height="19" rx="2"/><path d="M11 18.5h2"/>',
     spark: '<path d="M12 3v4M12 17v4M3 12h4M17 12h4M6 6l2.5 2.5M15.5 15.5L18 18M18 6l-2.5 2.5M8.5 15.5L6 18"/>',
@@ -125,6 +126,8 @@
     if (S.state.sandbox) $("#sandbox-chip").title = "Commands can write only inside the project (" +
       ({landlock: "Linux Landlock", seatbelt: "macOS Seatbelt", "low-integrity": "Windows low integrity"}[S.state.sandbox] || S.state.sandbox) + ")";
     $("#hw").textContent = hw.cores + " cores · " + hw.ram_gb + " GB RAM · " + hw.tier + " tier";
+    updateAccessChip();
+    setupTerminalShells();
     S.busy = new Set(S.state.busy || []);
     await refreshSessions();
     connectEvents();
@@ -134,9 +137,15 @@
     if (last && S.sessions.find(x => x.id === last)) await openSession(last);
     else if (lastRoot) setRoot(lastRoot);
     else if (S.state.projects.length) setRoot(S.state.projects[0]);
+    // A folder to open (Explorer's "Open with NewAl Code", `newal-code app DIR`): a new thread there.
+    const openRoot = new URLSearchParams(location.search).get("root");
+    if (openRoot) { history.replaceState(null, "", location.pathname); setRoot(openRoot); newThread(openRoot); }
     updatePickers();
     renderEmpty();
     $("#input").focus();
+    if (!S.state.settings.onboarded) openWelcome();
+    voiceInput();
+    takeShared();
   }
 
   function applyTheme(t) {
@@ -1136,6 +1145,115 @@
     render();
   }
 
+  // ------------------------------------------------------------------ the one permission
+  function fullAccess() { return !!(S.state && S.state.settings.full_access); }
+  function updateAccessChip() {
+    $("#access-chip").hidden = !fullAccess();
+    $("#sandbox-chip").hidden = !S.state.sandbox || fullAccess();
+  }
+  async function setFullAccess(on) {
+    try { await api("/api/system", { action: "access", on }); } catch (e) { toast(e.message); return false; }
+    S.state.settings.full_access = on;
+    await setOpt("mode", on ? "full-auto" : "auto-edit");
+    updateAccessChip();
+    // On the phone, Android's own permissions follow, one after another (files, screen, notifications, Termux).
+    if (on && window.NewAlPhone && NewAlPhone.fullAccess) NewAlPhone.fullAccess();
+    toast(on ? "Full access: NewAl Code works without asking (commands that would wipe a drive or your home folder are still refused)"
+      : "NewAl Code asks again before anything outside the project", 5000);
+    return true;
+  }
+  function accessSection(box) {
+    const on = fullAccess();
+    box.innerHTML = '<div class="form-row"><span class="' + (on ? "good" : "muted") + '">' + (on
+      ? "Full access: new threads work without the sandbox and without asking. Commands that would wipe a drive or your home folder are still refused."
+      : "Edits and commands in the project; NewAl Code asks before anything outside it.") + '</span><button class="btn' + (on ? "" : " primary") +
+      '" id="ac-toggle">' + (on ? "Ask me first again" : "Give full access") + "</button></div>";
+    box.querySelector("#ac-toggle").onclick = async () => { await setFullAccess(!on); accessSection(box); };
+  }
+  function setupTerminalShells() {
+    const shells = (S.state && S.state.shells) || [];
+    const sel = $("#term-shell");
+    sel.hidden = shells.length < 2;
+    sel.innerHTML = shells.map(x => '<option value="' + x + '">' + (x === "powershell" ? "PowerShell" : x === "bash" ? "Git Bash" : x) + "</option>").join("");
+    const saved = localStorage.getItem("nc.term.shell");
+    if (saved && shells.includes(saved)) sel.value = saved;
+    const prompt = () => { $("#term-prompt").textContent = (sel.hidden ? shells[0] : sel.value) === "powershell" ? "PS>" : "$"; };
+    sel.onchange = () => { localStorage.setItem("nc.term.shell", sel.value); prompt(); };
+    prompt();
+  }
+  async function systemSection(box) {
+    if (window.NewAlPhone) { box.parentNode.hidden = true; return; }
+    let st;
+    try { st = await api("/api/system"); } catch (_) { box.parentNode.hidden = true; return; }
+    const row = (key, label, on, note) => '<div class="form-row"><label>' + label + '</label><span class="' + (on ? "good" : "muted") + '">' +
+      (on ? "on" : "off") + '</span><button class="btn small" data-sys="' + key + '" data-on="' + (on ? "0" : "1") + '">' + (on ? "Remove" : "Add") +
+      "</button>" + (note ? '<span class="muted small-note">' + note + "</span>" : "") + "</div>";
+    box.innerHTML = row("path", "newal in every terminal", st.path, esc(st.bin)) +
+      (st.windows ? row("explorer", "Explorer's right-click menu", st.explorer, "Open with NewAl Code · NewAl Code terminal here") +
+        row("terminal", "Windows Terminal profile", st.terminal, "") : "") +
+      '<div class="form-row"><label>Shells</label><span class="muted">' + esc([st.git_bash ? "Git Bash" : "", st.powershell ? "PowerShell (" + base(st.powershell) + ")" : ""]
+        .filter(Boolean).join(" · ") || "sh") + '</span><button class="btn small" id="sys-term">Open a terminal here</button></div>';
+    box.querySelectorAll("[data-sys]").forEach(b => b.onclick = async () => {
+      try { await api("/api/system", { action: b.dataset.sys, on: b.dataset.on === "1" }); } catch (e) { toast(e.message); }
+      systemSection(box);
+    });
+    box.querySelector("#sys-term").onclick = () => api("/api/system", { action: "terminal_here", root: S.root || "" }).catch(e => toast(e.message));
+  }
+
+  async function openWelcome() {
+    // Set up once: a model, the one permission, GitHub, the terminal. Shown at the first start; Settings has it too.
+    const phone = !!window.NewAlPhone;
+    const windows = ((S.state && S.state.hardware.os) || "").startsWith("Windows");
+    const body = h("div", "welcome");
+    body.innerHTML = '<p class="lead">Set up once, then just ask. All of it can be changed later in Settings.</p>' +
+      '<div class="step"><h3>1 · A model</h3><p>' + (phone
+        ? "The model this phone's memory fits runs on the phone, offline. An API model (Gemini, DeepSeek…) is much faster and smarter: one tap with your key."
+        : "A local model runs on this computer, free and offline. Or an API model with your key, in one tap.") +
+      '</p><div class="card-list" id="wl-model"></div><div class="provider-row" id="wl-providers"></div></div>' +
+      '<div class="step"><h3>2 · Access</h3><p>One permission: with full access NewAl Code edits, runs commands' + (phone
+        ? ", uses the phone (apps, screen, files) and Termux" : windows ? " (bash and PowerShell) and works anywhere on this computer" : " and works anywhere on this computer") +
+      " without asking each time. Commands that would wipe a drive or your home folder are always refused." + (phone
+        ? " Android then asks for its own permissions, one after another: files, screen control, notifications and Termux." : "") +
+      '</p><div class="choice"><button class="btn primary" id="wl-full">Give full access</button><button class="btn" id="wl-ask">Ask me first</button><span id="wl-access-state"></span></div></div>' +
+      '<div class="step"><h3>3 · GitHub <span class="muted">(optional)</span></h3><div id="wl-github"></div></div>' +
+      (phone ? "" : '<div class="step"><h3>4 · Your terminal</h3><p>newal in every terminal' + (windows ? " (PowerShell, cmd, Git Bash), \"Open with NewAl Code\" in Explorer and a Windows Terminal profile" : "") +
+        '.</p><div class="choice"><button class="btn" id="wl-install">Add them</button><span id="wl-install-state"></span></div></div>') +
+      '<div class="form-row" style="justify-content:flex-end"><button class="btn primary" id="wl-start">Start</button></div>';
+    modal("Welcome to NewAl Code", body);
+    const done = () => { if (S.state) S.state.settings.onboarded = true; api("/api/system", { action: "onboarded" }).catch(() => {}); };
+    $("#modal-close").addEventListener("click", done, { once: true });
+    body.querySelector("#wl-start").onclick = () => { done(); closeModal(); $("#input").focus(); };
+    const accessState = () => { body.querySelector("#wl-access-state").innerHTML = fullAccess() ? '<span class="done">✓ Full access</span>' : '<span class="muted">NewAl Code will ask first</span>'; };
+    body.querySelector("#wl-full").onclick = async () => { await setFullAccess(true); accessState(); };
+    body.querySelector("#wl-ask").onclick = async () => { await setFullAccess(false); accessState(); };
+    const gh = body.querySelector("#wl-github");
+    const ghAgain = () => githubSection(gh, ghAgain);
+    ghAgain();
+    const ib = body.querySelector("#wl-install");
+    if (ib) ib.onclick = async () => {
+      ib.disabled = true;
+      try {
+        const st = await api("/api/system", { action: "install" });
+        body.querySelector("#wl-install-state").innerHTML = '<span class="done">✓ Added</span>' + (st.windows ? ' <span class="muted">(new terminals find newal)</span>' : "");
+      } catch (e) { toast(e.message); ib.disabled = false; }
+    };
+    providerButtons(body.querySelector("#wl-providers"));
+    const d = await loadModels();
+    const rec = d && d.models.find(m => m.id === d.recommended);
+    if (rec) {
+      const c = h("div", "card", '<div class="grow"><div class="name">' + esc(rec.name) + ' <span class="badge good">for this ' + (phone ? "phone" : "computer") +
+        '</span></div><div class="desc">' + esc(rec.about || "") + " · " + (rec.size / 1e9).toFixed(1) + " GB</div></div>" +
+        (rec.downloaded ? '<span class="badge good">ready</span>' : '<button class="btn small" data-dl="' + esc(rec.id) + '">Download</button>'));
+      c.id = "cat-" + cssId(rec.id);
+      body.querySelector("#wl-model").appendChild(c);
+      const b = c.querySelector("[data-dl]");
+      if (b) b.onclick = async () => {
+        b.disabled = true; b.textContent = "Starting…";
+        await api("/api/models/download", { id: rec.id }).catch(e => toast(e.message));
+      };
+    }
+  }
+
   // ------------------------------------------------------------------ an API in one tap
   async function readClipboard() {
     try { if (window.NewAlPhone && NewAlPhone.clipboard) return NewAlPhone.clipboard() || ""; } catch (_) { /* no bridge */ }
@@ -1310,6 +1428,61 @@
     toast("Using " + name + " (a local model)", 4000);
     if (!$("#modal").hidden && $("#modal-title") && /Models/.test($("#modal-title").textContent)) openModels();
   }
+  window.onPhoneAccess = st => {
+    // The phone's part of the one permission is done: what Android now allows, and what the user left off.
+    const t = st.termux || {};
+    const items = [["files", st.files], ["screen control", st.accessibility], ["notifications", st.notifications]]
+      .concat(t.installed ? [["Termux", t.allowed]] : []);
+    const off = items.filter(i => !i[1]).map(i => i[0]);
+    toast(off.length ? "Full access is on. Still off on the phone: " + off.join(", ") + " (This phone, in the menu)"
+      : "Full access: everything on the phone is on", 7000);
+  };
+
+  // ------------------------------------------------------------------ speaking a request
+  function voiceInput() {
+    // The phone: Android's speech recognition (NewAl Code Lite); a computer: the browser's, where it has one.
+    const Rec = window.SpeechRecognition || window.webkitSpeechRecognition;
+    const phone = window.NewAlPhone && NewAlPhone.listen;
+    $("#mic").hidden = !phone && !Rec;
+    $("#mic").onclick = () => {
+      if (phone) { NewAlPhone.listen((S.state && S.state.settings.lang) || ""); return; }    // "" : the phone's language
+      const r = new Rec();
+      r.lang = navigator.language || "en-US";
+      r.interimResults = false;
+      r.onresult = e => onVoice(e.results[0][0].transcript);
+      r.onerror = e => toast("Voice: " + (e.error || "not available"));
+      r.onend = () => $("#mic").classList.remove("listening");
+      $("#mic").classList.add("listening");
+      r.start();
+    };
+  }
+  function onVoice(text) {
+    $("#mic").classList.remove("listening");
+    if (!text) return;
+    const input = $("#input");
+    input.value = (input.value ? input.value.replace(/\s*$/, " ") : "") + text;
+    autoGrow();
+    input.focus();
+    prewarm();
+  }
+  window.onPhoneVoice = text => onVoice(text);
+
+  // ------------------------------------------------------------------ shared from another app (the phone)
+  function takeShared() {
+    let d = null;
+    try { d = window.NewAlPhone && NewAlPhone.takeShared ? JSON.parse(NewAlPhone.takeShared() || "null") : null; } catch (_) { d = null; }
+    if (!d || (!d.text && !(d.files || []).length)) return;
+    newThread();
+    const parts = [];
+    if (d.text) parts.push(d.text);
+    if ((d.files || []).length) parts.push("Files: " + d.files.join(", "));
+    $("#input").value = parts.join("\n\n") + "\n\n";
+    autoGrow();
+    $("#input").focus();
+    toast("Shared with NewAl Code: say what to do with it", 5000);
+  }
+  window.onPhoneShared = takeShared;
+
   window.onPhoneImport = ev => {
     // NewAl Code Lite copying a GGUF file the user picked into NewAl Code's models folder.
     if (ev.state === "copying") toast("Copying " + ev.name + "… " + (ev.total ? Math.round(100 * ev.done / ev.total) + "%" : Math.round(ev.done / 1e6) + " MB"), 4000);
@@ -1397,8 +1570,19 @@
       box.querySelector("#gh-off").onclick = async () => { await api("/api/github/disconnect", {}); githubSection(box); };
     } else {
       box.appendChild(h("div", "form-row", '<button class="btn primary" id="gh-on">Connect GitHub</button>' +
-        '<span class="muted">Copy a token and tap (without one, GitHub\'s page for a token opens with the scopes NewAl Code needs).</span>'));
-      box.querySelector("#gh-on").onclick = () => oneTap(GITHUB, async (p, t) => { const d = await connectGitHub(p, t); (after || openSettings)(); return d; });
+        '<span class="muted">' + (window.NewAlPhone ? "Copy a token and tap (without one, GitHub\'s page for a token opens with the scopes NewAl Code needs)."
+          : "Uses this computer\'s GitHub login (GitHub CLI or Git Credential Manager, which signs in through the browser); else a token.") + "</span>"));
+      const byToken = () => oneTap(GITHUB, async (p, t) => { const d = await connectGitHub(p, t); (after || openSettings)(); return d; });
+      box.querySelector("#gh-on").onclick = async () => {
+        if (window.NewAlPhone) return byToken();
+        const b = box.querySelector("#gh-on");
+        b.disabled = true; b.textContent = "Connecting…";
+        try {
+          const d = await api("/api/github/connect", { auto: true });
+          toast("GitHub: connected as @" + d.login + " (" + d.source + ")", 5000);
+          (after || openSettings)();
+        } catch (_) { b.disabled = false; b.textContent = "Connect GitHub"; byToken(); }
+      };
     }
   }
   async function openClone() {
@@ -1481,7 +1665,8 @@
   async function openSettings() {
     const st = await api("/api/state");
     const s = st.settings;
-    const body = h("div", "", '<div class="form-row"><label>Default permission mode</label><select id="st-mode">' + MODES.map(m => '<option value="' + m[0] + '"' + (s.mode === m[0] ? " selected" : "") + ">" + m[1] + "</option>").join("") + "</select></div>" +
+    const body = h("div", "", '<div class="section-title">Access</div><div id="st-access"></div>' +
+      '<div class="form-row"><label>Default permission mode</label><select id="st-mode">' + MODES.map(m => '<option value="' + m[0] + '"' + (s.mode === m[0] ? " selected" : "") + ">" + m[1] + "</option>").join("") + "</select></div>" +
       '<div class="form-row"><label>Reasoning</label><select id="st-reasoning">' + REASONING.map(r => '<option value="' + r[0] + '"' + (s.reasoning === r[0] ? " selected" : "") + ">" + r[1] + "</option>").join("") + "</select></div>" +
       '<div class="form-row"><label>Check changes with the tests</label><input type="checkbox" id="st-verify"' + (s.verify ? " checked" : "") + "></div>" +
       '<div class="form-row"><label>Read files the request names</label><input type="checkbox" id="st-auto"' + (s.auto_context ? " checked" : "") + "></div>" +
@@ -1490,9 +1675,14 @@
       '<div class="form-row"><label>Theme</label><select id="st-theme">' + ["system", "light", "dark"].map(v => '<option' + (s.theme === v ? " selected" : "") + ">" + v + "</option>").join("") + "</select></div>" +
       '<div class="form-row"><button class="btn primary" id="st-save">Save</button></div>' +
       '<div class="section-title">GitHub</div><div id="st-github"></div>' +
-      '<div class="section-wrap"><div class="section-title">This phone</div><div id="st-phone"></div></div>');
+      '<div class="section-wrap"><div class="section-title">This phone</div><div id="st-phone"></div></div>' +
+      '<div class="section-wrap"><div class="section-title">This computer</div><div id="st-system"></div></div>' +
+      '<div class="form-row"><button class="btn" id="st-welcome">Set up again (model, access, GitHub, terminal)</button></div>');
+    accessSection(body.querySelector("#st-access"));
     githubSection(body.querySelector("#st-github"));
     phoneSection(body.querySelector("#st-phone"));
+    systemSection(body.querySelector("#st-system"));
+    body.querySelector("#st-welcome").onclick = openWelcome;
     body.querySelector("#st-save").onclick = async () => {
       const v = {
         mode: body.querySelector("#st-mode").value, reasoning: body.querySelector("#st-reasoning").value,
@@ -1565,8 +1755,12 @@
       $("#term-input").value = "";
       let sid;
       try { sid = await ensureSession(); } catch (x) { toast(x.message); return; }
-      api("/api/sessions/" + sid + "/terminal", { command: cmd }).catch(x => toast(x.message));
+      api("/api/sessions/" + sid + "/terminal", { command: cmd, shell: $("#term-shell").hidden ? "" : $("#term-shell").value })
+        .catch(x => toast(x.message));
     };
+    $("#term-ext").hidden = !!window.NewAlPhone;
+    $("#term-ext").onclick = () => api("/api/system", { action: "terminal_here", root: S.root || "" }).catch(x => toast(x.message));
+    $("#access-chip").onclick = openSettings;
     pickerMenu("open-picker", [{ value: "code", title: "VS Code" }, { value: "cursor", title: "Cursor" },
       { value: "files", title: "File manager" }], async v => {
       if (!S.current) { toast("Open a thread first"); return; }

@@ -6,6 +6,7 @@ API (no gh needed). The token is kept in NewAl Code's settings (readable by this
 import base64
 import os
 import re
+import shutil
 import subprocess
 
 from . import settings
@@ -52,6 +53,52 @@ def connect(tok):
     cfg = settings.user()
     settings.save({"keys": dict(cfg.get("keys") or {}, github=tok), "github": profile})
     return profile
+
+
+def detect(interactive=True):
+    """(a token, where it came from) from what this computer already has, so connecting needs no token copied:
+    GH_TOKEN, the GitHub CLI's login (`gh auth token`), then git's credential helper for github.com (Git Credential
+    Manager, which Git for Windows brings: when it has nothing yet it signs in through the browser, with
+    interactive=True). ("", "") when there is none."""
+    for var in ("GH_TOKEN", "GITHUB_TOKEN"):
+        if os.environ.get(var):
+            return os.environ[var], var
+    no_window = 0x08000000 if os.name == "nt" else 0
+    gh = shutil.which("gh")
+    if gh:
+        try:
+            r = subprocess.run([gh, "auth", "token", "--hostname", "github.com"], capture_output=True, text=True,
+                               timeout=20, creationflags=no_window)
+            tok = r.stdout.strip()
+            if r.returncode == 0 and len(tok) >= 20:
+                return tok, "gh"
+        except (OSError, subprocess.SubprocessError):
+            pass
+    git = shutil.which("git")
+    if git and not os.environ.get("NEWAL_NO_GIT_CREDENTIAL"):
+        env = dict(os.environ, GIT_TERMINAL_PROMPT="0")
+        if not interactive:
+            env["GCM_INTERACTIVE"] = "never"
+        try:
+            r = subprocess.run([git, "credential", "fill"], input="protocol=https\nhost=github.com\n\n",
+                               capture_output=True, text=True, timeout=300 if interactive else 20, env=env,
+                               creationflags=no_window)
+            fields = dict(line.split("=", 1) for line in r.stdout.splitlines() if "=" in line)
+            tok = fields.get("password", "")
+            if r.returncode == 0 and len(tok) >= 20:
+                return tok, "git credential manager"
+        except (OSError, subprocess.SubprocessError, ValueError):
+            pass
+    return "", ""
+
+
+def connect_detected(interactive=True):
+    """Connects with detect()'s token; the account, with "source" (where the token came from)."""
+    tok, source = detect(interactive)
+    if not tok:
+        raise GitHubError("no GitHub login on this computer (GitHub CLI, Git Credential Manager): connect with a "
+                          "token instead")
+    return dict(connect(tok), source=source)
 
 
 def disconnect():
