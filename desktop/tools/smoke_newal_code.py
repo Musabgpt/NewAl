@@ -104,13 +104,16 @@ def main(dist, gguf):
     if r.returncode != 0 or not text:
         fail("exec with a GGUF model")
     # 4. NewAl's plugins, from the packaged app.
-    for name in ("system", "guard"):
+    for name in ("system", "guard", "starters"):
         r = run(cli + ["plugin", "install", name + "@newal"], env)
         if r.returncode != 0:
             fail("plugin install %s@newal" % name)
     r = run(cli + ["exec", "/sysinfo", "--cd", project], env)
     if r.returncode != 0 or "Memory" not in r.stdout or "Processor" not in r.stdout:
         fail("/sysinfo in the packaged app")
+    r = run(cli + ["exec", "/create python smoke-app", "--cd", project], env)       # its test: -m unittest, bundled
+    if r.returncode != 0 or "passes" not in r.stdout:
+        fail("/create in the packaged app (the new project's test with the app's own Python)")
     llm = FakeLLM([{"tools": [("write", {"path": ".env", "content": "KEY=1\n"})]}, "done"])
     with open(os.path.join(home, "config.json"), "w", encoding="utf-8") as f:
         json.dump({"models": {"scripted": {"base_url": llm.url, "model": "fake"}}, "test_after_edit": False}, f)
