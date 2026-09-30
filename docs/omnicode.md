@@ -176,7 +176,8 @@ What else a local model gets, in code rather than in words:
   files the request names (with their definitions, imports and tests) as reads already made.
 - **No reminder after the request.** `(When done, reply in one sentence.)` at the end of the message made
   Qwen2.5-Coder 1.5B (on a phone) reply at once that it had done the task, with no tool call: 0 of 12 requests
-  (a file in Arabic, opening WhatsApp) made a call with it, 12 of 12 without it.
+  (a file in Arabic, opening WhatsApp) made a call with it, 12 of 12 without it. Qwen3.5-2B's speed test did better
+  without it too: 8 of 12 tasks in 290 s, against 9 of 18 in 713 s with it (round 3 above).
 - **A claim with nothing done is caught.** A reply that says something was created, opened or fixed in a turn that
   used no tool gets "Nothing was done: no tool was used in this turn. Do it now with the tools (...)"; still only
   said, the user is told plainly: "Nothing was done in this turn: the model used no tool."
