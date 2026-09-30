@@ -24,6 +24,7 @@ import sys
 import tempfile
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 
 HERE = os.path.dirname(os.path.abspath(__file__))
@@ -241,6 +242,26 @@ def features(state):
           re.findall(r'text="([^"]{3,80})"', seen)[:20])
 
 
+def plugins(state):
+    """NewAl's own plugins on the phone: one tap installs one, and its programs run with the app's own Python."""
+    root = api("/api/mkdir", {"parent": state["home"] + "/projects", "name": "plugins"})["path"]
+    m = api("/api/extensions?root=" + urllib.parse.quote(root))["marketplaces"][0]
+    check("plugins: NewAl's store is in the app", m.get("name") == "newal" and m.get("builtin"), m.get("name"))
+    r = api("/api/plugins", {"action": "install", "source": "system@newal"})
+    check("plugins: one tap installs system", r.get("name") == "system", r)
+    sid = api("/api/sessions", {"root": root, "mode": "full-auto", "warm": False})["id"]
+    out = api("/api/sessions/%s/send" % sid, {"text": "/sysinfo"}, timeout=180)
+    text = out.get("reply", "")
+    print(text, flush=True)
+    check("plugins: /sysinfo on the phone", out.get("code") == 0 and "Android" in text and "Memory" in text,
+          text[-800:])
+    out = api("/api/sessions/%s/send" % sid, {"text": "/sysinfo", "lang": "ar"}, timeout=180)
+    check("plugins: /sysinfo in Arabic", "الذاكرة" in out.get("reply", ""), out.get("reply", "")[-300:])
+    out = api("/api/sessions/%s/send" % sid, {"text": "/disk"}, timeout=180)
+    check("plugins: /disk on the phone", out.get("code") == 0 and "Drives" in out.get("reply", ""),
+          out.get("reply", "")[-600:])
+
+
 def wait_up(limit=120):
     """The app's NewAl Code answering (after Android killed it, the app starts it again)."""
     t = time.time()
@@ -428,7 +449,8 @@ def main():
         return
     state, model = basic(label)
     if "--features" in sys.argv:
-        for part in (lambda: features(state), lambda: termux(state, model), lambda: storage(model)):
+        for part in (lambda: features(state), lambda: plugins(state), lambda: termux(state, model),
+                     lambda: storage(model)):
             try:
                 part()
             except Exception as e:  # noqa: BLE001 - one part failing does not hide the others

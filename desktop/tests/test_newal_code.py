@@ -683,6 +683,9 @@ class PhoneTest(unittest.TestCase):
                 body = json.loads(self.rfile.read(int(self.headers.get("Content-Length") or 0)) or b"{}")
                 if self.headers.get("X-NewAl-Key") != "phone-key":
                     out, code = {"error": "wrong key"}, 401
+                elif body.get("action") == "type":                   # no text field on the screen
+                    calls.append(body)
+                    out, code = {"error": "no text field to type into: tap one first"}, 400
                 else:
                     calls.append(body)
                     out, code = {"ok": True, "text": {
@@ -754,6 +757,18 @@ class PhoneTest(unittest.TestCase):
         schema = json.dumps(tools.REGISTRY["phone"].schema())
         self.assertLess(len(schema), 2000)                   # read at the start of every thread on a phone
         self.assertIn("open_app", schema)
+
+    def test_a_coding_task_typed_into_the_screen_is_pointed_to_the_file_tools(self):
+        # The 3 GB phone's model, asked for "hello.py that prints 'hello from the phone'", typed the code into the
+        # screen until it gave up: the failure now says which tools do files and programs.
+        _, ev, _, _, root = run_agent([{"tools": [("phone", {"action": "type", "text": "print('hello')"})]},
+                                       {"tools": [("write", {"path": "hello.py", "content": "print('hello')\n"})]},
+                                       "Wrote hello.py."], mode="full-auto")
+        typed = next(e for e in ev if e.get("type") == "tool_end" and e.get("name") == "phone")
+        self.assertFalse(typed["ok"])
+        self.assertIn("no text field", typed["text"])
+        self.assertIn("write the file with the write tool and run it with bash", typed["text"])
+        self.assertTrue(os.path.isfile(os.path.join(root, "hello.py")))
 
     def test_no_phone_no_tool_and_a_wrong_key_is_an_error(self):
         from unittest import mock
@@ -1393,7 +1408,227 @@ class PluginsTest(unittest.TestCase):
         with self.assertRaises(ValueError):
             plugins.install("nope@team-tools", root=root)
         plugins.marketplace_remove("team-tools")
-        self.assertEqual(plugins.marketplaces(), [])
+        self.assertEqual([x["name"] for x in plugins.marketplaces()], ["newal"])    # NewAl's own stays
+
+
+MARKET = os.path.join(os.path.dirname(HERE), "newal_code", "market", "plugins")
+
+
+class StoreTest(unittest.TestCase):
+    """NewAl's own plugins (newal_code/market): one tap installs them with nothing to download, and each does its
+    work with a program, run here for real: no model is involved."""
+
+    def setUp(self):
+        from newal_code import service
+        self.root = make_project({"app.py": "print('hi')\n", "pyproject.toml": "[project]\nname = 'x'\n"})
+        self.svc = service.Service()
+
+    def install(self, name):
+        from newal_code import plugins
+        return plugins.install(name + "@newal", root=self.root)        # this project's: no hooks leak to others
+
+    def run_cmd(self, text):
+        return self.svc.command(self.svc.create(self.root), text)
+
+    def test_listed_first_installed_offline_and_kept_up_to_date(self):
+        from newal_code import plugins
+        m = plugins.marketplaces()[0]
+        self.assertEqual((m["name"], m["builtin"]), ("newal", True))
+        listed = {p["name"]: p for p in m["plugins"]}
+        self.assertIn("commands", listed["system"]["has"])
+        self.assertIn("hooks", listed["guard"]["has"])
+        p = self.install("system")
+        cmds = extensions.custom_commands(self.root)
+        for c in ("sysinfo", "disk", "clean", "ports", "programs"):
+            self.assertTrue(cmds[c]["script"], c)
+        with self.assertRaises(ValueError):
+            plugins.marketplace_remove("newal")
+        # an older copy (as after an update of NewAl Code) is replaced by this version's
+        with open(os.path.join(p["dir"], ".claude-plugin", "plugin.json"), "w") as f:
+            json.dump({"name": "system", "version": "0.1"}, f)
+        os.remove(os.path.join(p["dir"], "scripts", "disk.py"))
+        plugins._fresh.clear()
+        plugins.dirs(self.root)
+        self.assertTrue(os.path.isfile(os.path.join(p["dir"], "scripts", "disk.py")))
+        self.assertNotEqual(plugins.info(p["dir"])["version"], "0.1")
+
+    def test_sysinfo_disk_and_ports_answer_at_once(self):
+        self.install("system")
+        r = self.run_cmd("/sysinfo")
+        self.assertEqual((r["output"], r["code"]), (True, 0), r["reply"])
+        for word in ("System", "Processor", "Memory", "GB", "python"):
+            self.assertIn(word, r["reply"])
+        with open(os.path.join(self.root, "big.bin"), "wb") as f:
+            f.write(os.urandom(3 * 1024 * 1024))
+        r = self.run_cmd("/disk")
+        self.assertEqual(r["code"], 0, r["reply"])
+        self.assertRegex(r["reply"], r"big\.bin\s+3\.0 MB")
+        srv = socket.socket()
+        srv.bind(("127.0.0.1", 0))
+        srv.listen()
+        port = srv.getsockname()[1]
+        try:
+            r = self.run_cmd("/ports %d" % port)
+        finally:
+            srv.close()
+        self.assertEqual(r["code"], 0, r["reply"])
+        self.assertRegex(r["reply"], r"%d\s+this device only" % port)
+        self.assertIn("free, nothing listens on it", self.run_cmd("/ports 1")["reply"])
+
+    def test_clean_lists_then_deletes_only_caches(self):
+        from unittest import mock
+        self.install("system")
+        home = tempfile.mkdtemp()
+        tmp = os.path.join(home, "tmp")
+        local = os.path.join(home, "AppData", "Local")
+        env = {"HOME": home, "USERPROFILE": home, "LOCALAPPDATA": local, "XDG_CACHE_HOME": os.path.join(home, ".cache"),
+               "TMPDIR": tmp, "TEMP": tmp, "TMP": tmp}
+        pip = (os.path.join(local, "pip", "Cache") if os.name == "nt" else
+               os.path.join(home, "Library", "Caches", "pip") if sys.platform == "darwin" else
+               os.path.join(home, ".cache", "pip"))
+
+        def put(path, n=20000):
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "wb") as f:
+                f.write(os.urandom(n))
+        put(os.path.join(pip, "http", "blob"))
+        old = os.path.join(tmp, "old-build")
+        put(os.path.join(old, "x.log"))
+        then = time.time() - 2 * 86400
+        os.utime(os.path.join(old, "x.log"), (then, then))
+        os.utime(old, (then, then))
+        fresh = os.path.join(tmp, "fresh.txt")
+        put(fresh)
+        pyc = os.path.join(self.root, "__pycache__")
+        put(os.path.join(pyc, "app.cpython-3.pyc"))
+        with mock.patch.dict(os.environ, env):
+            r = self.run_cmd("/clean")
+            self.assertEqual(r["code"], 0, r["reply"])
+            for part in ("pip cache", "old-build", "__pycache__", "/clean --yes"):
+                self.assertIn(part, r["reply"])
+            self.assertNotIn("fresh.txt", r["reply"])                 # touched less than a day ago
+            self.assertTrue(os.path.exists(pip))                        # listing deletes nothing
+            r = self.run_cmd("/clean --yes")
+        self.assertEqual(r["code"], 0, r["reply"])
+        self.assertIn("Deleted", r["reply"])
+        for gone in (pip, old, pyc):
+            self.assertFalse(os.path.exists(gone), gone)
+        self.assertTrue(os.path.exists(fresh))
+        self.assertTrue(os.path.exists(os.path.join(self.root, "app.py")))
+
+    def test_programs_says_how_and_searches(self):
+        self.install("system")
+        r = self.run_cmd("/programs")
+        self.assertEqual(r["code"], 2)
+        self.assertIn("/programs search", r["reply"])
+        if sys.platform.startswith("linux") and shutil.which("apt-cache"):
+            r = self.run_cmd("/programs search coreutils")
+            self.assertEqual(r["code"], 0, r["reply"])
+            self.assertIn("coreutils", r["reply"])
+
+    def test_guard_asks_even_with_full_access(self):
+        self.install("guard")
+        asked = []
+
+        def approve(req):
+            asked.append(req)
+            return "deny:not now"
+        run_agent([{"tools": [("write", {"path": ".env", "content": "TOKEN=1\n"})]},
+                   {"tools": [("bash", {"command": "git push --force origin main"})]},
+                   {"tools": [("write", {"path": "notes.txt", "content": "ok\n"})]}, "done"],
+                  mode="full-auto", approve=approve, root=self.root)
+        self.assertEqual(len(asked), 2, asked)
+        self.assertIn(".env may hold secrets", asked[0]["reason"])
+        self.assertIn("force push", asked[1]["reason"])
+        self.assertFalse(os.path.exists(os.path.join(self.root, ".env")))
+        self.assertTrue(os.path.exists(os.path.join(self.root, "notes.txt")))     # the rest: no asking
+
+    def test_guard_rules(self):
+        import runpy
+        decide = runpy.run_path(os.path.join(MARKET, "guard", "hooks", "guard.py"))["decide"]
+
+        def ask(tool, **inp):
+            return decide({"tool_name": tool, "tool_input": inp})[0]
+        for cmd in ("git push --force origin main", "git push -f", "git push origin +main", "git reset --hard HEAD~2",
+                    "git clean -fdx", "git branch -D old", "git checkout -- .", "rm -rf ~", "rm -rf .git",
+                    "npm publish", "sqlite3 db.sqlite 'DROP TABLE users'", "git push origin --delete feature"):
+            self.assertTrue(ask("Bash", command=cmd), cmd)
+        for cmd in ("git push", "git push -u origin feature", "rm -rf build/", "git reset --soft HEAD~1", "ls -la",
+                    "git checkout -b new", "rm -rf ./node_modules", "npm test"):
+            self.assertFalse(ask("Bash", command=cmd), cmd)
+        self.assertTrue(ask("Write", file_path="/p/.env"))
+        self.assertTrue(ask("edit", path="config/prod.key"))
+        self.assertFalse(ask("Write", file_path=".env.example"))
+        self.assertFalse(ask("Write", file_path="id_rsa.pub"))
+        self.assertFalse(ask("Edit", file_path="src/app.py"))
+        self.assertTrue(ask("apply_patch", patch="*** Begin Patch\n*** Add File: .env.local\n+X=1\n*** End Patch"))
+
+    @unittest.skipIf(os.name == "nt", "a shell script stands in for gofmt")
+    def test_format_on_edit_runs_the_formatter_and_says_so(self):
+        from unittest import mock
+        self.install("format-on-edit")
+        bin_dir = tempfile.mkdtemp()
+        fake = os.path.join(bin_dir, "gofmt")
+        with open(fake, "w") as f:
+            f.write("#!/bin/sh\n# stands in for gofmt -w FILE\nsed 's/  */ /g' \"$2\" > \"$2.tmp\" && mv \"$2.tmp\" \"$2\"\n")
+        os.chmod(fake, 0o755)
+        with mock.patch.dict(os.environ, {"PATH": bin_dir + os.pathsep + os.environ.get("PATH", "")}):
+            _, events, _, _, _ = run_agent([{"tools": [("write", {"path": "main.go", "content": "package  main\n"})]},
+                                            "done"], root=self.root)
+        with open(os.path.join(self.root, "main.go")) as f:
+            self.assertEqual(f.read(), "package main\n")
+        end = next(e for e in events if e.get("type") == "tool_end" and e["name"] == "write")
+        self.assertIn("format-on-edit reformatted main.go", end["text"])
+
+    def test_format_on_edit_leaves_projects_without_a_formatter_set_up(self):
+        import runpy
+        fmt = runpy.run_path(os.path.join(MARKET, "format-on-edit", "hooks", "format.py"))
+        plain = make_project({"a.py": "x=1\n", "pyproject.toml": "[project]\nname='x'\n"})
+        self.assertIsNone(fmt["formatter"](os.path.join(plain, "a.py"), plain))
+        ruffed = make_project({"a.py": "x=1\n", "pyproject.toml": "[tool.ruff]\nline-length = 100\n"})
+        cmd = fmt["formatter"](os.path.join(ruffed, "a.py"), ruffed)
+        self.assertTrue(cmd is None or cmd[1:3] == ["format", "--quiet"], cmd)      # ruff, where it is installed
+        patch_in = {"cwd": plain, "tool_input": {"patch": "*** Begin Patch\n*** Update File: a.py\n@@\n*** End Patch"}}
+        self.assertEqual(fmt["edited_files"](patch_in), [os.path.join(plain, "a.py")])
+
+    def test_packaged_app_runs_plugin_programs(self):
+        # --newal-python: how the packaged app, which has no python of its own, runs a plugin's program
+        from unittest import mock
+        from newal_code import plugins
+        d = tempfile.mkdtemp()
+        with open(os.path.join(d, "helper.py"), "w", encoding="utf-8") as f:
+            f.write("WORD = 'مرحبا'\n")
+        with open(os.path.join(d, "main.py"), "w", encoding="utf-8") as f:
+            f.write("import sys\nfrom helper import WORD\nprint(WORD, sys.argv[1:])\nsys.exit(3)\n")
+        p = subprocess.run([sys.executable, os.path.join(os.path.dirname(HERE), "newal-code.py"), "--newal-python",
+                            os.path.join(d, "main.py"), "a b"], capture_output=True, timeout=60)
+        self.assertEqual(p.returncode, 3, p.stderr)
+        self.assertEqual(p.stdout.decode("utf-8").strip(), "مرحبا ['a b']")
+        cli = os.path.join(d, "newal-code" + (".exe" if os.name == "nt" else ""))
+        open(cli, "w").close()
+        with mock.patch.object(sys, "frozen", True, create=True), \
+                mock.patch.object(sys, "executable", os.path.join(d, "NewAlCode")):
+            self.assertEqual(plugins.python_argv(), [cli, "--newal-python"])
+        self.assertEqual(plugins.python_argv(), [sys.executable])
+        self.assertEqual(plugins._expand('${NEWAL_PYTHON:-python3} "${CLAUDE_PLUGIN_ROOT}/x.py"', "/p"),
+                         '"%s" "/p/x.py"' % sys.executable.replace("\\", "/"))
+
+    def test_command_line(self):
+        env = dict(os.environ, NEWAL_CODE_HOME=tempfile.mkdtemp())
+
+        def run(*a):
+            return subprocess.run([sys.executable, "-m", "newal_code", "plugin", *a], cwd=os.path.dirname(HERE),
+                                  capture_output=True, text=True, env=env, timeout=60)
+        self.assertIn("system@newal", run("list").stdout)
+        p = run("install", "system@newal")
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertIn("Installed system", p.stdout)
+        self.assertEqual(run("marketplace", "remove", "newal").returncode, 1)
+        root = make_project({"a.txt": "x"})
+        p = subprocess.run([sys.executable, "-m", "newal_code", "exec", "/ports 1", "--cd", root],
+                           cwd=os.path.dirname(HERE), capture_output=True, text=True, env=env, timeout=120)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertIn("free, nothing listens on it", p.stdout)
 
 
 class HooksTest(unittest.TestCase):
@@ -1894,6 +2129,23 @@ class ServerTest(unittest.TestCase):
         self.assertTrue(all(c["ok"] in (True, False, None) for c in d["checks"]))
         self.assertIn("NewAl Code", d["report"])
 
+    def test_builtin_plugin_one_tap_then_its_command_runs_at_once(self):
+        root = make_project({"a.txt": "x"})
+        q = urllib.parse.quote(root)
+        m = self.call("/api/extensions?root=" + q)["marketplaces"][0]
+        self.assertEqual((m["name"], m["builtin"]), ("newal", True))
+        self.assertEqual(self.call("/api/plugins", {"action": "install", "source": "system@newal", "root": root})["name"],
+                         "system")
+        try:
+            cmds = {c["name"]: c for c in self.call("/api/commands?root=" + q)}
+            self.assertTrue(cmds["sysinfo"]["instant"])
+            sid = self.call("/api/sessions", {"root": root, "warm": False})["id"]
+            r = self.call("/api/sessions/%s/send" % sid, {"text": "/ports 1"})
+            self.assertEqual((r.get("started"), r["output"], r["code"]), (None, True, 0), r)     # no turn started
+            self.assertIn("free, nothing listens on it", r["reply"])
+        finally:
+            self.call("/api/plugins", {"action": "remove", "source": "system", "root": root})
+
     def test_new_folder_gguf_files_and_threads_listed_from_their_first_message(self):
         top = tempfile.mkdtemp()
         made = self.call("/api/mkdir", {"parent": top, "name": "my app"})["path"]
@@ -1930,7 +2182,7 @@ class ServerTest(unittest.TestCase):
             self.call("/api/plugins", {"action": "install", "source": "fmt@phone-tools"})
             ext = self.call("/api/extensions?root=" + urllib.request.quote(root))
             self.assertEqual(sorted(p["name"] for p in ext["plugins"]), ["fmt", "hello-kit"])
-            self.assertEqual([x["name"] for x in ext["marketplaces"]], ["phone-tools"])
+            self.assertEqual([x["name"] for x in ext["marketplaces"]], ["newal", "phone-tools"])
             self.assertIn("hello", [c["name"] for c in ext["commands"]])
             with self.assertRaises(urllib.error.HTTPError) as e:             # already there
                 self.call("/api/plugins", {"action": "install", "source": kit})
@@ -1939,7 +2191,7 @@ class ServerTest(unittest.TestCase):
             self.call("/api/plugins", {"action": "marketplace_remove", "source": "phone-tools"})
             ext = self.call("/api/extensions?root=" + urllib.request.quote(root))
             self.assertEqual([p["name"] for p in ext["plugins"]], ["fmt"])
-            self.assertEqual(ext["marketplaces"], [])
+            self.assertEqual([x["name"] for x in ext["marketplaces"]], ["newal"])      # NewAl's own stays
         finally:
             for name in ("fmt", "hello-kit"):
                 try:

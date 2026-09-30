@@ -298,6 +298,8 @@ def run(root, model=None, mode=None, prompt=None, resume=None, dirs=()):
                 if out.get("diff"):
                     for line in reply.splitlines():
                         print(c(GREEN, line) if line.startswith("+") else c(RED, line) if line.startswith("-") else line)
+                elif out.get("output"):
+                    print(reply)                     # what a command's program printed
                 else:
                     print(c(DIM, reply))
             if out.get("prompt") is None:
@@ -373,6 +375,24 @@ def exec_once(root, prompt, model=None, mode="auto-edit", json_out=False, full_a
                 sys.stdout.flush()
         else:
             printer.event(ev)
+    if prompt.startswith("/") and not prompt.startswith("//"):
+        # a custom command: a program runs now and prints (its exit code is exec's); a prompt goes to the agent
+        from . import extensions
+        name, _, args = prompt[1:].partition(" ")
+        cmd = extensions.custom_commands(s.root).get(name.lower())
+        if cmd and cmd.get("script"):
+            code, out = extensions.run_script(cmd, args.strip(), s.root)
+            if json_out:
+                sys.stdout.write(json.dumps({"type": "command_output", "command": name, "code": code, "text": out},
+                                            ensure_ascii=False) + "\n")
+            else:
+                print(out)
+            if output:
+                with open(output, "w", encoding="utf-8") as f:
+                    f.write(out + "\n")
+            return 0 if code == 0 else 1
+        if cmd:
+            prompt = extensions.expand_command(cmd, args.strip(), s.root)
     a = Agent(s, emit=emit, approve=None)
     if max_steps:
         a.cfg["max_steps"] = max_steps

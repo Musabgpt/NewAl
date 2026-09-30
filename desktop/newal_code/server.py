@@ -284,7 +284,8 @@ class Handler(BaseHTTPRequestHandler):
                 sid, action = m.group(1), m.group(2)
                 s = svc.get(sid)
                 if action == "send":
-                    return self._json(svc.send(sid, b.get("text", ""), images=b.get("images") or None))
+                    return self._json(svc.send(sid, b.get("text", ""), images=b.get("images") or None,
+                                               lang=str(b.get("lang") or "")))
                 if action == "interrupt":
                     svc.interrupt(sid)
                     return self._json({"ok": True})

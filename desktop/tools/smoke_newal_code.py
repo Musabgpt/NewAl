@@ -3,7 +3,9 @@
 1. the command line starts and finds its bundled llama-server;
 2. the agent, driven by a scripted model, runs a command in this system's sandbox from inside the packaged app:
    it may write in the project, not next to it;
-3. a real GGUF (a tiny one) answers through the bundled llama-server.
+3. a real GGUF (a tiny one) answers through the bundled llama-server;
+4. NewAl's own plugins work from inside the packaged app: a program (/sysinfo) and a hook (guard) run by the
+   app's own Python.
 
     python tools/smoke_newal_code.py dist/NewAlCode tiny.gguf
     python tools/smoke_newal_code.py --source tiny.gguf        (the code in this folder, with NEWAL_LLAMA_SERVER)
@@ -101,6 +103,24 @@ def main(dist, gguf):
     print("tiny model's answer: %r" % text[:200])
     if r.returncode != 0 or not text:
         fail("exec with a GGUF model")
+    # 4. NewAl's plugins, from the packaged app.
+    for name in ("system", "guard"):
+        r = run(cli + ["plugin", "install", name + "@newal"], env)
+        if r.returncode != 0:
+            fail("plugin install %s@newal" % name)
+    r = run(cli + ["exec", "/sysinfo", "--cd", project], env)
+    if r.returncode != 0 or "Memory" not in r.stdout or "Processor" not in r.stdout:
+        fail("/sysinfo in the packaged app")
+    llm = FakeLLM([{"tools": [("write", {"path": ".env", "content": "KEY=1\n"})]}, "done"])
+    with open(os.path.join(home, "config.json"), "w", encoding="utf-8") as f:
+        json.dump({"models": {"scripted": {"base_url": llm.url, "model": "fake"}}, "test_after_edit": False}, f)
+    r = run(cli + ["exec", "write the key", "--model", "scripted", "--mode", "full-auto", "--json", "--cd", project], env)
+    llm.close()
+    ends = [json.loads(l) for l in r.stdout.splitlines() if l.startswith("{") and '"tool_end"' in l]
+    print("guard in the packaged app: %s" % [(e.get("ok"), (e.get("text") or "")[:160]) for e in ends])
+    if os.path.exists(os.path.join(project, ".env")) or not any("guard:" in (e.get("text") or "") for e in ends):
+        fail("the guard hook did not stop the edit to .env")
+
     shutil.rmtree(work, ignore_errors=True)
     print("SMOKE TEST PASSED", flush=True)
 

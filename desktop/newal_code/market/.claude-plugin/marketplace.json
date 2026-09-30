@@ -1,0 +1,30 @@
+{
+  "name": "newal",
+  "owner": {
+    "name": "NewAl"
+  },
+  "metadata": {
+    "description": "Plugins that come with NewAl Code: one tap installs them, with nothing to download.",
+    "pluginRoot": "./plugins"
+  },
+  "plugins": [
+    {
+      "name": "system",
+      "source": "./plugins/system",
+      "category": "system",
+      "description": "Your computer or phone, answered at once by a program (no model needed): /sysinfo (system, memory, storage, battery, the model sizes that fit), /disk (what takes the space), /clean (caches and old temporary files), /ports (what listens on which port), /programs (search, install, update with winget, pkg, Homebrew, apt)."
+    },
+    {
+      "name": "guard",
+      "source": "./plugins/guard",
+      "category": "safety",
+      "description": "Safety with full access: asks before an edit to secrets (.env, keys) and before a force push, a hard reset, git clean, deleting a branch, dropping a database or publishing a package."
+    },
+    {
+      "name": "format-on-edit",
+      "source": "./plugins/format-on-edit",
+      "category": "quality",
+      "description": "After each edit, formats the file with its project's formatter: gofmt, rustfmt and dart always; ruff or black, prettier and clang-format where the project is set up for them. Nothing happens where none is installed."
+    }
+  ]
+}

@@ -11,6 +11,8 @@
   newal-code github install      the GitHub app: @newal in issues and pull requests (--pr: as a pull request)
   newal-code access full|ask     the one permission: full access for new threads, or back to asking
   newal-code install             newal in every terminal (PATH), Explorer's menu and a Windows Terminal profile
+  newal-code plugin              plugins: list, install NAME@newal (NewAl's own) | name@marketplace | git URL, remove,
+                                 marketplace add|remove|list (Claude Code's formats; --project: this project's)
 
 Options: --model ID, --mode read-only|ask|auto-edit|full-auto, --cd DIR, --full-auto."""
 
@@ -44,6 +46,13 @@ def main(argv=None):
     if argv and argv[0] == "--newal-sandbox":          # a packaged newal-code as the sandbox's launcher
         from newal_code import sandbox
         return sandbox.main(argv[1:])
+    if argv[:1] == ["--newal-python"] and len(argv) > 1:   # a plugin's Python script (plugins.python_argv)
+        import runpy
+        utf8_output()
+        sys.argv = argv[1:]
+        sys.path.insert(0, os.path.dirname(os.path.abspath(argv[1])))      # as `python script.py` does
+        runpy.run_path(argv[1], run_name="__main__")
+        return 0
     utf8_output()
     if argv and argv[0] == "cloud":                    # its own options (see cloud.main)
         from newal_code import cloud
@@ -54,6 +63,8 @@ def main(argv=None):
     if argv and argv[0] == "bench":
         from newal_code import benchmark
         return benchmark.main(argv[1:])
+    if argv and argv[0] in ("plugin", "plugins"):
+        return cmd_plugin(argv[1:])
     ap = argparse.ArgumentParser(prog="newal-code", description=NAME)
     ap.add_argument("words", nargs="*", help="a command (app, exec, models, doctor, bench, resume) or a prompt")
     ap.add_argument("--model", "-m", default=None)
@@ -119,7 +130,52 @@ def main(argv=None):
 
 
 COMMANDS = ("app", "serve", "web", "ui", "exec", "models", "doctor", "resume", "bench", "cloud", "github", "access",
-            "install", "uninstall")
+            "install", "uninstall", "plugin", "plugins")
+
+
+def cmd_plugin(args):
+    """newal-code plugin [list] | install SOURCE [--project] | remove NAME [--project] |
+    marketplace list | add SOURCE | remove NAME"""
+    from newal_code import plugins
+    root = os.getcwd() if "--project" in args else None
+    args = [x for x in args if x != "--project"]
+    act = args[0] if args else "list"
+    try:
+        if act in ("list", "ls"):
+            items = plugins.listing(os.getcwd())
+            for p in items:
+                print("%-18s %s%s" % (p["name"], p["description"][:90], " (%s)" % ", ".join(p["has"]) if p["has"] else ""))
+            if not items:
+                print("No plugins installed.")
+            print("\nTo install (newal-code plugin install NAME@MARKETPLACE):")
+            for m in plugins.marketplaces():
+                for p in m["plugins"]:
+                    print("  %s@%s  %s" % (p["name"], m["name"], p["description"][:80]))
+            return 0
+        if act == "install" and len(args) > 1:
+            p = plugins.install(args[1], root)
+            print("Installed %s (%s): new threads use it." % (p["name"], ", ".join(p["has"]) or "nothing"))
+            return 0
+        if act in ("remove", "uninstall") and len(args) > 1:
+            print("Removed %s." % plugins.remove(args[1], root))
+            return 0
+        if act == "marketplace":
+            sub = args[1] if len(args) > 1 else "list"
+            if sub == "add" and len(args) > 2:
+                m = plugins.marketplace_add(args[2])
+                print("Added the marketplace %s: %s" % (m["name"], ", ".join(m["plugins"])))
+                return 0
+            if sub == "remove" and len(args) > 2:
+                print("Removed %s." % plugins.marketplace_remove(args[2]))
+                return 0
+            for m in plugins.marketplaces():
+                print("%s%s: %d plugins" % (m["name"], " (built in)" if m.get("builtin") else "", len(m["plugins"])))
+            return 0
+    except (ValueError, OSError) as e:
+        print("newal-code plugin: %s" % e, file=sys.stderr)
+        return 1
+    print(cmd_plugin.__doc__.replace("\n    ", "\n  "))
+    return 2
 
 
 def cmd_system(cmd, rest):

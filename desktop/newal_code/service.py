@@ -209,15 +209,16 @@ class Service:
         if a:
             a.cancel.set()
 
-    def send(self, sid, text, images=None):
+    def send(self, sid, text, images=None, lang=""):
         """A message from the user: a slash command runs here; anything else starts a turn in the background.
-        Returns {"started": bool, "reply": text shown for a command, "session": id (a new one for /new)}."""
+        Returns {"started": bool, "reply": text shown for a command, "session": id (a new one for /new)}.
+        lang: the interface's language now (a command's program answers in it)."""
         text = (text or "").strip()
         s = self.get(sid)
         if text.startswith("#") and not text.startswith("##") and len(text) > 2 and "\n" not in text:
             return {"started": False, "reply": remember(s.root, text[1:].strip())}
         if text.startswith("/") and not text.startswith("//"):
-            out = self.command(s, text)
+            out = self.command(s, text, lang=lang)
             if out.get("prompt") is None:
                 return out
             text = out["prompt"]
@@ -277,10 +278,10 @@ class Service:
         out = [{"name": n, "args": a, "description": d, "custom": False} for n, a, d in BUILTIN_COMMANDS]
         for name, c in sorted(extensions.custom_commands(root).items()):
             out.append({"name": name, "args": c.get("hint", ""), "description": c.get("description", ""),
-                        "custom": True})
+                        "custom": True, "instant": bool(c.get("script"))})
         return out
 
-    def command(self, s, text):
+    def command(self, s, text, lang=""):
         """Runs a slash command: {"reply": text to show} or {"prompt": text to send to the agent}."""
         name, _, args = text[1:].partition(" ")
         name = ALIASES.get(name.lower(), name.lower())
@@ -478,6 +479,10 @@ class Service:
             self._hook(s, "SessionEnd", {"reason": "prompt_input_exit"}, wait=True)
             return {"reply": "bye", "exit": True}
         custom = extensions.custom_commands(s.root)
+        if name in custom and custom[name].get("script"):
+            # a command that is a program: it runs now, without the model, and shows what it printed
+            code, out = extensions.run_script(custom[name], args, s.root, lang=lang)
+            return {"reply": out, "output": True, "code": code}
         if name in custom:
             return {"prompt": extensions.expand_command(custom[name], args, s.root)}
         return {"reply": "Unknown command /%s. /help lists them." % name}

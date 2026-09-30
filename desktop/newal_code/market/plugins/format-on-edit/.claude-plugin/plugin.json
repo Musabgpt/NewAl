@@ -1,0 +1,8 @@
+{
+  "name": "format-on-edit",
+  "version": "1.0.0",
+  "description": "Formats each edited file with the formatter that is installed.",
+  "author": {
+    "name": "NewAl"
+  }
+}

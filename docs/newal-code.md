@@ -150,7 +150,7 @@ It uses NewAl desktop's `llama-server` and the models NewAl already downloaded (
 | Skills (SKILL.md, loaded on demand) | ✓ | ✓ | ✓ `.newal/skills`, `.claude/skills`, `~/.codex/skills` |
 | Hooks | ✓ PreToolUse, PostToolUse, UserPromptSubmit, Stop, SubagentStop, SessionStart, SessionEnd, PreCompact, Notification | – | ✓ same events, JSON protocol and exit code 2 |
 | MCP servers | ✓ `.mcp.json` | ✓ config.toml | ✓ stdio and HTTP; `.mcp.json`, `~/.codex/config.toml`, NewAl desktop's add-ons |
-| Plugins and marketplaces | ✓ commands, agents, skills, hooks, MCP in one folder; `/plugin marketplace add` | – | ✓ Claude Code's plugin layout (`${CLAUDE_PLUGIN_ROOT}` included) in `.newal/plugins` or `~/.newal-code/plugins`; its marketplaces too: `/plugin marketplace add <owner/repo, git URL or folder>`, `/plugin install name@marketplace` (or a git URL or folder), `/plugin remove` |
+| Plugins and marketplaces | ✓ commands, agents, skills, hooks, MCP in one folder; `/plugin marketplace add` | – | ✓ Claude Code's plugin layout (`${CLAUDE_PLUGIN_ROOT}` included) in `.newal/plugins` or `~/.newal-code/plugins`; its marketplaces too: `/plugin marketplace add <owner/repo, git URL or folder>`, `/plugin install name@marketplace` (or a git URL or folder), `/plugin remove`; a built-in marketplace whose plugins are programs (`/sysinfo`, `/disk`, `/clean`, `/ports`, `/programs`, a guard, formatting), installed offline with one tap |
 | Sessions, resume | ✓ | ✓ | ✓ threads kept as JSONL; `/resume`; the web app lists them per project |
 | Compaction | ✓ auto + `/compact` | ✓ | ✓ auto at 85% of the context + `/compact [focus]` |
 | Checkpoints / undo | ✓ /rewind | ✓ /undo | ✓ every changed file saved first; `/undo`, "Undo last turn", revert one file |
@@ -319,9 +319,27 @@ while its first message is typed, so the model loads and reads that start meanwh
 threads are listed from their first message on. With the phone tool there, the prompt tells the model it runs on an
 Android phone and uses the phone tool to act on it (an API model had "opened WhatsApp" by fetching whatsapp.com).
 
-**Plugins without typing.** Skills, agents & MCP lists the plugins with Remove, installs one from a git URL, GitHub's
+**Plugins without typing.** Plugins & skills lists the plugins with Remove, installs one from a git URL, GitHub's
 owner/repo or name@marketplace, adds a plugin marketplace (Claude Code's format) and lists its plugins with Install:
-what `/plugin` does from a thread, with buttons (on a phone, git is the app's own).
+what `/plugin` does from a thread, with buttons (on a phone, git is the app's own). `newal-code plugin list | install
+NAME@MARKETPLACE | remove NAME | marketplace add|remove|list` does it from a terminal (`--project` for this project).
+
+**NewAl's plugins (built in).** A marketplace comes with NewAl Code (`newal_code/market`, named `newal`): it is listed
+first, its plugins install with one tap and nothing to download, and an update of NewAl Code brings theirs. Each does
+its work with a program, not with instructions to a model, so it works the same with a phone's small model, an API
+model or no model at all:
+
+| Plugin | What it does |
+|---|---|
+| `system` | `/sysinfo`: the system, processor, memory, storage, graphics, battery, network, uptime, the developer tools found, and which GGUF sizes fit in the free memory now. `/disk [folder]`: the drives' free space and the biggest folders and files (disk use as `du` counts it: sparse files, hard links once). `/clean [--yes]`: pip, npm, yarn, Go, Gradle and Termux's package caches, temporary files untouched for a day, unfinished model downloads and the project's `__pycache__`-style caches, listed with their sizes; `--yes` deletes them, nothing else. `/ports [port]`: what listens on which port, reachable from the network or this device only, with its process. `/programs search\|install\|update\|remove\|list`: winget on Windows, pkg in Termux, Homebrew, apt/dnf/pacman/zypper (printing the `sudo` command where rights are missing). On Windows, macOS, Linux, the phone app and Termux; in Arabic when the app is. |
+| `guard` | With full access too: asks before an edit to a file that holds secrets (`.env`, keys, credential files) and before a force push, a hard reset, `git clean`, deleting a branch, discarding all changes, deleting the home folder or `.git`, dropping a database or publishing a package. |
+| `format-on-edit` | After each edit, formats the file: gofmt, rustfmt and `dart format` always; ruff or black, prettier and clang-format where the project is set up for them (so a project that uses none is never reformatted); it tells the model when a file changed. |
+
+A command whose front matter has `script: scripts/x.py` (relative to the plugin, or to the folder holding
+`commands/`) is such a program: it runs at once in the project folder, without the model, and what it prints is the
+reply (⚡ in the / menu; `newal-code exec "/sysinfo"` prints it too). The packaged app has no python of its own:
+`newal-code --newal-python script.py` runs a plugin's Python program with the app's, and `${NEWAL_PYTHON}` in a
+plugin's hooks is that command (`${NEWAL_PYTHON:-python3}` also works in Claude Code).
 
 **GitHub and git on the phone.** Settings > GitHub (or GitHub in the side menu) connects an account with a token (GitHub's page for one opens
 with the scopes NewAl Code needs; copied, it connects like an API key), and the ⬇ button beside Threads lists your

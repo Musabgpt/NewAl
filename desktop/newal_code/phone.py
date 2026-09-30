@@ -73,7 +73,12 @@ def call(action, timeout=90, **args):
 # Short on purpose: a phone's small model reads this description at the start of every thread.
 DOC = ("Use the Android phone this runs on: open apps and links, alarms, settings, and what is on the screen (screen "
        "lists it as numbered items; it needs NewAl Code's accessibility service). After an action that changes the "
-       "screen, call screen to see it.")
+       "screen, call screen to see it. Not for files or code: write files with write, run programs with bash.")
+
+# Added to a failed phone action: a small model that took "phone" in a request for the tool (a coding task that
+# mentions the phone) finds its way back to the file tools instead of repeating the same failure.
+WRONG_TOOL = ("If the task is a file or a program (code to save or run), the phone tool is the wrong one: write the "
+              "file with the write tool and run it with bash.")
 
 PARAMS = {
     "action": {"type": "string", "enum": list(ACTIONS), "description": (

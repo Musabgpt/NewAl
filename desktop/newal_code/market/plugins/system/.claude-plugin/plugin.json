@@ -1,0 +1,8 @@
+{
+  "name": "system",
+  "version": "1.0.0",
+  "author": {
+    "name": "NewAl"
+  },
+  "description": "This computer or phone, at once and without the model: /sysinfo, /disk, /clean, /ports, /programs."
+}

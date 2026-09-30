@@ -663,7 +663,13 @@
       }
       case "reply": {
         const X = turnBox();
-        X.turn.appendChild(ev.diff ? diffView(ev.text) : h("div", "notice", esc(ev.text)));
+        if (ev.output) {
+          // what a command's program printed (a plugin's /sysinfo, /disk...): as it printed it
+          const pre = h("pre", "out cmd-out" + (ev.code ? " failed" : ""), esc(ev.text));
+          pre.dir = "auto";
+          X.turn.appendChild(pre);
+        } else X.turn.appendChild(ev.diff ? diffView(ev.text) : h("div", "notice", esc(ev.text)));
+        renderEmpty();                       // a command's answer in an empty thread: no welcome under it
         break;
       }
       case "turn_end": {
@@ -810,9 +816,14 @@
     S.attachments = [];
     renderAttachments();
     let r;
-    try { r = await api("/api/sessions/" + sid + "/send", { text, images }); } catch (e) { toast(e.message); return; }
+    const cmd = text.match(/^\/([\w:.-]+)/);
+    const slow = cmd && (S.commands || []).some(c => c.name === cmd[1] && c.instant);
+    if (slow) toast("Running /" + cmd[1] + "…", 600000);
+    const lang = window.NCi18n && NCi18n.active() ? "ar" : "en";           // a command's program answers in it
+    try { r = await api("/api/sessions/" + sid + "/send", { text, images, lang }); } catch (e) { toast(e.message); return; }
+    finally { if (slow) $("#toast").hidden = true; }
     if (r.session && r.session !== sid) { await openSession(r.session); if (r.reply) toast(r.reply); return; }
-    if (r.reply) apply({ type: "reply", text: r.reply, diff: r.diff }, false);
+    if (r.reply) apply({ type: "reply", text: r.reply, diff: r.diff, output: r.output, code: r.code }, false);
     if (r.started) S.busy.add(sid);
     if (/^\/(model|mode|reasoning|approvals|permissions)\b/.test(text)) {
       const d = await api("/api/sessions/" + sid); S.meta = d.meta; updatePickers();
@@ -901,7 +912,7 @@
       popupKind = "slash";
       const q = slash[1].toLowerCase();
       popupItems = S.commands.filter(c => c.name.toLowerCase().startsWith(q)).slice(0, 30)
-        .map(c => ({ value: "/" + c.name + " ", title: "/" + c.name + (c.args ? " " + c.args : ""), sub: c.description }));
+        .map(c => ({ value: "/" + c.name + " ", title: "/" + c.name + (c.args ? " " + c.args : ""), sub: (c.instant ? "⚡ " : "") + c.description }));
     } else if (at && S.root) {
       popupKind = "at";
       const files = await api("/api/files?root=" + encodeURIComponent(S.root) + "&q=" + encodeURIComponent(at[1])).catch(() => []);
@@ -1577,28 +1588,35 @@
     const list = (items, f) => items.length ? items.map(f).join("") : '<div class="muted">None.</div>';
     const installed = new Set((d.plugins || []).map(p => p.name));
     const card = (name, desc, right) => '<div class="card"><div class="grow"><div class="name">' + name + '</div><div class="desc">' + desc + "</div></div>" + right + "</div>";
-    const body = h("div", "", '<div class="section-title">Plugins</div><div class="card-list">' + list(d.plugins || [], p => card(esc(p.name) +
+    const parts = has => (has || []).map(x => '<span class="badge">' + esc(x === "commands" ? "commands" : x) + "</span>").join(" ");
+    const market = m => '<div class="section-title">' + (m.builtin ? "NewAl's plugins" : "Marketplace: " + esc(m.name)) +
+        (m.builtin ? ' <span class="badge good">built in · no download</span>' : ' <button class="mini-btn" data-mk-rm="' + esc(m.name) + '" title="Remove this marketplace">' + icon("trash") + "</button>") + "</div>" +
+        '<div class="card-list">' + list(m.plugins, p => card(esc(p.name) + " " + parts(p.has), esc(p.description || ""), installed.has(p.name) ?
+          '<button class="btn small" data-pl-rm="' + esc(p.name) + '">Remove</button>' :
+          '<button class="btn small primary" data-pl-add="' + esc(p.name + "@" + m.name) + '">Install</button>')) + "</div>";
+    const builtin = (d.marketplaces || []).filter(m => m.builtin), others = (d.marketplaces || []).filter(m => !m.builtin);
+    const body = h("div", "", builtin.map(market).join("") +
+      '<div class="section-title">Installed plugins</div><div class="card-list">' + list(d.plugins || [], p => card(esc(p.name) +
         (p.version ? ' <span class="badge">' + esc(p.version) + "</span>" : ""), esc(p.description) + (p.has.length ? " · " + esc(p.has.join(", ")) : ""),
         '<button class="btn small" data-pl-rm="' + esc(p.name) + '">Remove</button>')) + "</div>" +
       '<div class="form-row"><input id="pl-src" type="text" placeholder="A plugin: git URL, owner/repo or name@marketplace" autocomplete="off" spellcheck="false"><button class="btn primary" id="pl-add">Install</button></div>' +
-      (d.marketplaces || []).map(m => '<div class="section-title">Marketplace: ' + esc(m.name) + ' <button class="mini-btn" data-mk-rm="' + esc(m.name) + '" title="Remove this marketplace">' + icon("trash") + "</button></div>" +
-        '<div class="card-list">' + list(m.plugins, p => card(esc(p.name), esc(p.description || ""), installed.has(p.name) ? '<span class="badge good">installed</span>' :
-          '<button class="btn small" data-pl-add="' + esc(p.name + "@" + m.name) + '">Install</button>')) + "</div>").join("") +
+      others.map(market).join("") +
       '<div class="form-row"><input id="mk-src" type="text" placeholder="A plugin marketplace: owner/repo or git URL" autocomplete="off" spellcheck="false"><button class="btn" id="mk-add">Add marketplace</button></div>' +
       '<div class="section-title">Instructions (AGENTS.md / CLAUDE.md)</div>' +
       list(d.instructions, p => '<div class="card"><div class="grow"><div class="name">' + esc(p) + "</div></div></div>") +
       '<div class="section-title">Skills</div><div class="card-list">' + list(d.skills, s => '<div class="card"><div class="grow"><div class="name">' + esc(s.name) + '</div><div class="desc">' + esc(s.description) + " · " + esc(s.dir) + "</div></div></div>") + "</div>" +
       '<div class="section-title">Sub-agents</div><div class="card-list">' + list(d.agents, a => '<div class="card"><div class="grow"><div class="name">' + esc(a.name) + (a.model ? ' <span class="badge">' + esc(a.model) + "</span>" : "") + (a.mode ? ' <span class="badge">' + esc(a.mode) + "</span>" : "") + '</div><div class="desc">' + esc(a.description) + "</div></div></div>") + "</div>" +
-      '<div class="section-title">Slash commands</div><div class="card-list">' + list(d.commands.filter(c => c.custom), c => '<div class="card"><div class="grow"><div class="name">/' + esc(c.name) + '</div><div class="desc">' + esc(c.description) + "</div></div></div>") + "</div>" +
+      '<div class="section-title">Slash commands</div><div class="card-list">' + list(d.commands.filter(c => c.custom), c => '<div class="card"><div class="grow"><div class="name">/' + esc(c.name) + (c.instant ? ' <span class="badge good">⚡ runs at once</span>' : "") + '</div><div class="desc">' + esc(c.description) + "</div></div></div>") + "</div>" +
       '<div class="section-title">MCP servers</div><div class="card-list">' + list(d.mcp, m => '<div class="card"><div class="grow"><div class="name">' + esc(m.name) + '</div><div class="desc">' + esc(m.url || [m.command].concat(m.args || []).join(" ")) + "</div></div></div>") + "</div>" +
       '<div class="section-title">Hooks</div>' + (Object.keys(d.hooks).length ? "<pre class=\"out\">" + esc(JSON.stringify(d.hooks, null, 1)) + "</pre>" : '<div class="muted">None.</div>') +
       '<p class="muted">Add skills in .newal/skills or .claude/skills (a folder with SKILL.md), sub-agents in .newal/agents or .claude/agents, commands in .newal/commands or .claude/commands, MCP servers in .mcp.json, hooks in .newal/settings.json or .claude/settings.json. Codex\'s ~/.codex files work too. Plugins and marketplaces use Claude Code\'s layout (a plugin brings commands, agents, skills, hooks and MCP servers); /plugin does the same from a thread.</p>');
-    modal("Skills, agents & MCP" + (root ? " · " + base(root) : ""), body);
+    modal("Plugins & skills" + (root ? " · " + base(root) : ""), body);
     const act = async (action, source, busy) => {
       if (!source) return;
       toast(busy, 60000);
       try { await api("/api/plugins", { action, source, root }); } catch (e) { toast(e.message, 9000); return; }
       toast("Done: new threads use it", 4000);
+      api("/api/commands?root=" + encodeURIComponent(root)).then(c => { S.commands = c; }).catch(() => {});
       openExtensions();
     };
     body.querySelector("#pl-add").onclick = () => act("install", body.querySelector("#pl-src").value.trim(), "Installing the plugin…");
@@ -1853,6 +1871,10 @@
       if (!$("#popup").hidden && popupItems.length) {
         if (e.key === "ArrowDown") { popupSel = (popupSel + 1) % popupItems.length; renderPopup(); e.preventDefault(); return; }
         if (e.key === "ArrowUp") { popupSel = (popupSel - 1 + popupItems.length) % popupItems.length; renderPopup(); e.preventDefault(); return; }
+        // Enter on a command typed in full runs it (as in Claude Code); otherwise Enter or Tab completes the name
+        const exact = e.key === "Enter" && !e.shiftKey && popupKind === "slash" &&
+          popupItems[popupSel] && popupItems[popupSel].value.trim() === input.value.trim();
+        if (exact) { e.preventDefault(); closePopup(); send(); return; }
         if (e.key === "Tab" || (e.key === "Enter" && !e.shiftKey)) { e.preventDefault(); pickPopup(popupSel); return; }
         if (e.key === "Escape") { closePopup(); return; }
       }

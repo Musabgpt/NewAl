@@ -1,0 +1,8 @@
+{
+  "name": "guard",
+  "version": "1.0.0",
+  "description": "Asks before edits to secrets and before destructive git commands, even with full access.",
+  "author": {
+    "name": "NewAl"
+  }
+}

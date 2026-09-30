@@ -1076,7 +1076,7 @@ def _phone_tool():
         try:
             r = phone.call(str(action), **{k: v for k, v in args.items() if v not in (None, "")})
         except phone.PhoneError as e:
-            raise ToolError(str(e))
+            raise ToolError("%s\n%s" % (e, phone.WRONG_TOOL) if action in ("type", "tap", "screen") else str(e))
         text = r.get("text") or ("done" if r.get("ok", True) else json.dumps(r, ensure_ascii=False))
         return clip(text, 8000), {"action": action, "phone": {k: v for k, v in r.items() if k not in ("text",)}}
 

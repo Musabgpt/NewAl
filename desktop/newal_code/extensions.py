@@ -148,8 +148,59 @@ def custom_commands(root):
                 first = next((l.strip("# ").strip() for l in body.splitlines() if l.strip()), "")
                 found[name] = {"name": name, "description": str(fields.get("description") or first)[:200],
                                "hint": str(fields.get("argument_hint") or ""), "body": body,
-                               "path": os.path.join(folder, f), "model": str(fields.get("model") or "")}
+                               "path": os.path.join(folder, f), "model": str(fields.get("model") or ""),
+                               "script": str(fields.get("script") or ""), "home": os.path.dirname(base)}
     return found
+
+
+def split_arguments(text):
+    """A command's arguments as a list: quotes group words, backslashes stay (Windows paths)."""
+    out, cur, quote, quoted = [], "", "", False
+    for ch in text or "":
+        if quote:
+            if ch == quote:
+                quote = ""
+            else:
+                cur += ch
+        elif ch in "\"'":
+            quote, quoted = ch, True
+        elif ch.isspace():
+            if cur or quoted:
+                out.append(cur)
+            cur, quoted = "", False
+        else:
+            cur += ch
+    if cur or quoted:
+        out.append(cur)
+    return out
+
+
+def run_script(cmd, arguments, root, timeout=900, lang=""):
+    """A command whose work is a program (front matter `script: scripts/x.py`, relative to the folder that holds
+    commands/, as a plugin's root): it runs at once, without the model, and its output is the reply. A Python
+    script runs with NewAl Code's own Python (the packaged app's too). Returns (exit code, output)."""
+    script = cmd["script"].replace("${CLAUDE_PLUGIN_ROOT}", "").lstrip("/\\")
+    path = os.path.normpath(os.path.join(cmd["home"], script))
+    if not os.path.isfile(path):
+        return 127, "/%s: its program %s is missing" % (cmd["name"], path)
+    argv = (plugins.python_argv() if path.endswith(".py") else []) + [path] + split_arguments(arguments)
+    env = dict(os.environ, NEWAL_PROJECT_DIR=root or "", CLAUDE_PROJECT_DIR=root or "",
+               CLAUDE_PLUGIN_ROOT=cmd["home"], PYTHONIOENCODING="utf-8", PYTHONUTF8="1",
+               NEWAL_LANG=lang or str(settings.user().get("lang") or ""))
+    try:
+        r = subprocess.run(argv, cwd=root if root and os.path.isdir(root) else None, capture_output=True,
+                           text=True, encoding="utf-8", errors="replace", timeout=timeout, env=env,
+                           stdin=subprocess.DEVNULL, creationflags=0x08000000 if os.name == "nt" else 0)
+    except subprocess.TimeoutExpired:
+        return 124, "/%s ran longer than %d s and was stopped." % (cmd["name"], timeout)
+    except OSError as e:
+        return 126, "/%s could not start: %s" % (cmd["name"], e)
+    out = (r.stdout or "").rstrip()
+    if (r.stderr or "").strip():
+        out = (out + "\n" + r.stderr.strip()).strip()
+    if len(out) > 60000:
+        out = out[:30000] + "\n…\n" + out[-30000:]
+    return r.returncode, out or "(no output)"
 
 
 def expand_command(cmd, arguments, root):

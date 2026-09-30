@@ -183,6 +183,8 @@ i[data-icon] svg { width: 100%; height: 100%; }
 .list-lines div { padding: 1px 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 pre.out { margin: 0; background: var(--bg-code); border: 1px solid var(--border); border-radius: 10px; padding: 9px 11px;
   font-size: 12px; line-height: 1.45; max-height: 320px; overflow: auto; white-space: pre-wrap; word-break: break-word; }
+pre.cmd-out { max-height: 60vh; margin: 6px 0; unicode-bidi: plaintext; }
+pre.cmd-out.failed { border-color: var(--del-fg); }
 .sub { border-left: 2px solid var(--border); padding-left: 12px; margin: 4px 0 6px; }
 .sub-title { font-size: 12px; color: var(--fg-faint); margin-bottom: 2px; }
 .turn-end { display: flex; align-items: center; gap: 10px; color: var(--fg-faint); font-size: 12px; margin: 14px 0 4px; }
