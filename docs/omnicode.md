@@ -44,7 +44,7 @@ flowchart LR
 | Background processes (PIDs, logs, stop) | `tools.py` `bash` with `background`, `job` | `job action=list` (ids and PIDs), `output`, `stop` by job id or PID; `/status` lists them | `OmniCodeTest.test_background_processes_by_pid_and_status` |
 | Git: branches, commits, PRs | `server.py` commit menu, `github.py`, `sync.py`, `minigit.py` | commit / push / pull request (gh, or GitHub's API without gh); `/sync`; git on the phone | `GitHubTest`, `SyncTest`, `MiniGitTest` |
 | CI self-repair (`gh run watch`) | `ci.py` | `/ci`: see [below](#github-and-ci-that-fixes-itself) | `CITest` |
-| SEARCH/REPLACE diffs | `tools.py` `edit`, `repair.py` | `edit` is a search and replace (`old` → `new`); SEARCH/REPLACE blocks written as text are run as edits | `RepairTest.test_a_search_replace_block_edits_the_file` |
+| SEARCH/REPLACE diffs | `tools.py` `edit`, `repair.py` | `edit` is a search and replace (`old` → `new`); SEARCH/REPLACE blocks a model on this device writes as text are run as edits | `RepairTest.test_a_search_replace_block_edits_the_file` |
 | Context pruning at 80% | `agent.py` `_prune_outputs`, `_maybe_compact` | old tool outputs become one line each, then a summary if still full | `PruneTest` |
 | Circuit breaker (3 same failures, 25 steps) | `circuit.py` | see [below](#the-circuit-breaker) | `CircuitTest` |
 | JSON / tool-call repair | `repair.py` | see [below](#weak-devices) | `RepairTest` |
@@ -99,7 +99,7 @@ stateDiagram-v2
 |---|---|---|
 | Closed | normal work | the tool's result |
 | Half-open | the same call failed a 2nd time with nothing changed | the result, then `(You made this exact call before and it failed the same way: change it, try another approach.)` |
-| Open | the same call failed a 3rd time | the result, then `(Stopping: this exact call failed 3 times.)`; the turn ends with `Stopped: bash failed 3 times the same way (exit 1: ...)` |
+| Open | the same call failed a 3rd time | the result, then `(Stopping: this exact call failed 3 times.)`; the turn ends with `Stopped: bash failed 3 times the same way (exit 1).` |
 | Open | the step budget is spent | the turn ends with `Stopped after 25 steps without finishing.` |
 
 - **What counts as failing:** a tool error, or a command (`bash`, `powershell`) whose exit code is not 0.
