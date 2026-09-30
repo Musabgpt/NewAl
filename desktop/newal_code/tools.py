@@ -682,7 +682,35 @@ class Job:
         self.id, self.command, self.proc, self.path, self.started = jid, command, proc, path, time.time()
 
 
+def _in_job(proc):
+    """Windows: the command's process in a job of its own, before it runs (it starts suspended), so a cancel ends
+    everything it started. taskkill /T follows parent ids and can miss a child started as it walks the tree (a
+    Python that bash was starting outlived a cancel)."""
+    import ctypes
+    from ctypes import wintypes as w
+    k32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    k32.CreateJobObjectW.restype = w.HANDLE
+    k32.CreateJobObjectW.argtypes = [ctypes.c_void_p, w.LPCWSTR]
+    k32.AssignProcessToJobObject.argtypes = [w.HANDLE, w.HANDLE]
+    job = k32.CreateJobObjectW(None, None)
+    if job and k32.AssignProcessToJobObject(job, int(proc._handle)):
+        proc._newal_job = job
+    ntdll = ctypes.WinDLL("ntdll")
+    ntdll.NtResumeProcess.argtypes = [w.HANDLE]
+    ntdll.NtResumeProcess(int(proc._handle))
+
+
 def _kill(proc):
+    job = getattr(proc, "_newal_job", None)
+    if job:
+        try:
+            import ctypes
+            from ctypes import wintypes as w
+            k32 = ctypes.WinDLL("kernel32")
+            k32.TerminateJobObject.argtypes = [w.HANDLE, w.UINT]
+            k32.TerminateJobObject(job, 1)
+        except (OSError, AttributeError):
+            pass
     try:
         if os.name == "nt":
             subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)], capture_output=True, timeout=10)
@@ -717,11 +745,17 @@ def run_command(ctx, command, timeout=120, on_line=None, sandbox=True):
         pass
     kw = {}
     if os.name == "nt":
-        kw["creationflags"] = 0x08000000 | 0x00000200
+        kw["creationflags"] = 0x08000000 | 0x00000200 | 0x00000004       # (suspended until it is in its job)
     else:
         kw["start_new_session"] = True
     proc = subprocess.Popen(full, cwd=ctx.cwd or ctx.root, stdout=subprocess.PIPE,
                             stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL, env=_env(), **kw)
+    if os.name == "nt":
+        try:
+            _in_job(proc)
+        except Exception:  # noqa: BLE001 - never leave it suspended
+            import ctypes
+            ctypes.WinDLL("ntdll").NtResumeProcess(ctypes.c_void_p(int(proc._handle)))
     chunks = []
     total = [0]
 
@@ -751,6 +785,10 @@ def run_command(ctx, command, timeout=120, on_line=None, sandbox=True):
         proc.wait(5)
     except subprocess.TimeoutExpired:
         pass
+    if getattr(proc, "_newal_job", None):
+        import ctypes
+        ctypes.WinDLL("kernel32").CloseHandle(ctypes.c_void_p(proc._newal_job))    # (closing ends nothing)
+        proc._newal_job = None
     t.join(2)
     try:
         proc.stdout.close()
