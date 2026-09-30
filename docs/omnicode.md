@@ -141,6 +141,32 @@ Rules:
 - Final reply: one short sentence saying what you changed and how you checked it; no code blocks, no lists. If the user asked a question, answer it directly. Use the user's language.
 ```
 
+### Measured
+
+On this computer's CPU (4 cores), with Qwen3.5-2B (Q4_K_M, a model for weak devices), on NewAl Code's six
+speed-test tasks (`desktop/bench`: fix a bug, add a command-line option, write a function from its docstring, rename
+a function across files, answer what code computes, fix a crash from its traceback), each checked by hidden tests.
+Each round alternated the two prompts, three runs each (18 tasks per prompt):
+
+| Round | The code | SYSTEM | LOCAL |
+|---|---|---|---|
+| 1 | the first LOCAL (long files read in parts, the edit worded as a search and replace, the breaker rule) | 10/18, 767 s | 8/18, 781 s¹ |
+| 2 | LOCAL = SYSTEM + the breaker rule | 6/18, 1653 s | 9/18, 653 s |
+| 3 | the same, with a cut-off call no longer run (below) | 8/18, 773 s | 9/18, 713 s |
+
+¹ Without a 1200 s hang of the tool runner, fixed since: the model ran the task's `server.py` to find its port, and
+the command's output stayed open.
+
+The same prompt varies from run to run (SYSTEM passed 10, 6 and 8 of 18: the model samples at temperature 0.2); on the
+same code, LOCAL was never behind SYSTEM (18/36 against 14/36 in rounds 2 and 3, in 1366 s against 2426 s). No
+version answered the question task (8000 + 80: the 2B model answers 880 without running the code) or the command-line
+option task.
+
+These runs found what the unit tests had not, all fixed: a command that left a program running made the turn wait
+forever; a call cut off at the output limit (a runaway edit of 4096 tokens) was half applied, and its arguments made
+llama.cpp refuse every later request of the thread (HTTP 500); the settings' default of 60 steps overrode the 25 of
+a model on this device - a rename that went nowhere used all 60 steps (720 s) before, and stops at 25 now.
+
 What else a local model gets, in code rather than in words:
 
 - **The tools as tool definitions**, read once with the prompt. A model under 1.5 GB (a phone's) gets only `read`,
