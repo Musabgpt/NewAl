@@ -240,8 +240,9 @@ model is the way to a large model: the phone's own model is a 0.8B-2B one.
 **Controlling the phone.** In the app the agent has a `phone` tool: open an app, a link or a settings page (Wi-Fi,
 Bluetooth, display, battery...), set an alarm or a timer, the torch, the media volume, post a notification, read or
 set the clipboard, share text, prepare a message or a call (the messages app or the dialer opens with it; the user
-sends it), and any Android intent. With NewAl Code's accessibility service on (Settings > This phone > Screen
-control opens Android's page for it), it also sees the screen, as numbered items with what they are ("[3] Network &
+sends it), and any Android intent. With NewAl Code's accessibility service on (This phone > Screen control opens
+Android's page for it; on Android 13 and up an app installed from an APK first needs App info > ⋮ > "Allow
+restricted settings", and the page says so, with a button to App info), it also sees the screen, as numbered items with what they are ("[3] Network &
 internet · tap"), and taps, types, swipes, scrolls and presses back, home or the notifications. It reads the screen
 only when the agent asks, and acts only in a thread: looking (the screen, the apps, the battery) never asks; every
 action asks first unless the thread runs in full-auto; a read-only thread only looks. What it reads goes to the

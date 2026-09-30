@@ -80,6 +80,7 @@ final class WebBridge {
             t.put("up", Termux.up());
             o.put("termux", t);
             o.put("phone", "http://127.0.0.1:" + PhoneServer.PORT);
+            o.put("sdk", Build.VERSION.SDK_INT);
         } catch (Exception ignored) {
         }
         return o.toString();
@@ -89,9 +90,21 @@ final class WebBridge {
     public void openAccessibilitySettings() {
         act.runOnUiThread(() -> {
             act.startActivity(new Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS));
-            Toast.makeText(act, "Turn on NewAl Code here (under Downloaded or Installed apps)", Toast.LENGTH_LONG)
-                    .show();
+            Toast.makeText(act, Build.VERSION.SDK_INT >= 33
+                    ? "Turn on NewAl Code here. If Android says \"Restricted setting\": App info > \u22ee > Allow "
+                    + "restricted settings, then again"
+                    : "Turn on NewAl Code here (under Downloaded or Installed apps)", Toast.LENGTH_LONG).show();
         });
+    }
+
+    /**
+     * This app's App info page: on Android 13 and up, an app installed from an APK has its accessibility switch
+     * greyed out ("Restricted setting") until "Allow restricted settings" in the menu there.
+     */
+    @JavascriptInterface
+    public void openAppInfo() {
+        act.runOnUiThread(() -> act.startActivity(new Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+                Uri.parse("package:" + act.getPackageName()))));
     }
 
     /** The one-time setup: the command goes to the clipboard, Termux opens, the user pastes it and presses Enter. */

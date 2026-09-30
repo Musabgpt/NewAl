@@ -1447,6 +1447,7 @@
       '<div class="form-row"><label>Screen control</label><span class="' + (st.accessibility ? "good" : "muted") + '">' +
       (st.accessibility ? "on: the agent can see the screen, tap and type (it asks first unless full-auto)" : "off") + "</span>" +
       (st.accessibility ? "" : '<button class="btn" id="ph-a11y">Turn on</button>') + "</div>" +
+      (!st.accessibility && st.sdk >= 33 ? '<div class="muted small-note">Android 13 and up: if the switch is greyed out ("Restricted setting"), open App info, tap ⋮ at the top, "Allow restricted settings", then turn it on. <button class="btn small" id="ph-info">App info</button></div>' : "") +
       '<div class="form-row"><label>Termux</label><span class="muted">' +
       (!t.installed ? "not installed" : t.up ? "NewAl Code runs in Termux" : "installed") + "</span>" +
       (!t.installed ? '<button class="btn" id="ph-tx-get">Get Termux</button>' :
@@ -1461,6 +1462,7 @@
     const on = (id, f) => { const b = box.querySelector(id); if (b) b.onclick = f; };
     on("#ph-files", () => { NewAlPhone.allowStorage(); setTimeout(() => phoneSection(box), 8000); });
     on("#ph-a11y", () => NewAlPhone.openAccessibilitySettings());
+    on("#ph-info", () => NewAlPhone.openAppInfo && NewAlPhone.openAppInfo());
     on("#ph-back", () => NewAlPhone.go("app"));
     on("#ph-tx-get", () => NewAlPhone.termuxSetup(""));
     on("#ph-tx-open", () => NewAlPhone.go("termux"));
