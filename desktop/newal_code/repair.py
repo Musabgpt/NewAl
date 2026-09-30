@@ -143,12 +143,15 @@ def normalize(name, args, allowed=None):
         if known is None or mapped in known or base not in known:
             base = mapped
     args = dict(args or {})
+    from . import tools
+    t = tools.REGISTRY.get(base)
+    params = set(t.params) if t else set()      # an MCP tool's (or an unknown one's) arguments stay as they came
     for good, others in ARG_ALIASES.items():
-        if good in args:
+        if good in args or good not in params:
             continue
         for o in others:
-            if o in args and not (base == "grep" and o == "name") and not (base == "bash" and o == "input" and
-                                                                           "command" in args):
+            # only a name the tool does not take itself: the phone's name and text, the skill's name stay theirs
+            if o in args and o not in params and not (base == "grep" and o == "name"):
                 args[good] = args.pop(o)
                 break
     if base == "read":

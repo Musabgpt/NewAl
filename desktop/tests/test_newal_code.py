@@ -375,6 +375,37 @@ class RepairTest(unittest.TestCase):
             self.assertIn("return a + b", f.read())
 
 
+class RepairArgsTest(unittest.TestCase):
+    def test_a_tools_own_arguments_are_never_renamed(self):
+        # (a regression: "name" became "pattern" for every tool, so the phone could not open an app or press back,
+        # and the skill tool lost its skill's name)
+        from newal_code import repair
+        allowed = ["read", "edit", "write", "bash", "grep", "glob", "phone", "skill", "job", "mcp__x__find"]
+        for name, args in (("phone", {"action": "open_app", "name": "Settings"}), ("phone", {"action": "key",
+                                                                                             "name": "back"}),
+                           ("phone", {"action": "type", "text": "hello"}), ("skill", {"name": "pdf"}),
+                           ("mcp__x__find", {"query": "a", "name": "b", "text": "c"})):
+            self.assertEqual(repair.normalize(name, args, allowed), (name, args))
+        # other agents' names still become ours, where the tool takes ours
+        self.assertEqual(repair.normalize("glob", {"name": "*.py"}, allowed), ("glob", {"pattern": "*.py"}))
+        self.assertEqual(repair.normalize("write", {"file_path": "a", "text": "x"}, allowed),
+                         ("write", {"path": "a", "content": "x"}))
+        self.assertEqual(repair.normalize("manage_background_process", {"pid": 7}, allowed), ("job", {"id": "7"}))
+        # through the loop: the phone call reaches the tool with its name
+        from unittest import mock
+        from newal_code import phone
+        seen = []
+        on = mock.patch.object(phone, "available", lambda: True)             # a phone: the tool is offered
+        on.start()
+        self.addCleanup(on.stop)
+        real = tools.REGISTRY["phone"].fn
+        tools.REGISTRY["phone"].fn = lambda ctx, action, **a: (seen.append((action, a)), ("done", {}))[1]
+        self.addCleanup(setattr, tools.REGISTRY["phone"], "fn", real)
+        run_agent([{"tools": [("phone", {"action": "open_app", "name": "Settings"})]}, "Opened."],
+                  files={"README.md": "# x\n"}, mode="full-auto")
+        self.assertEqual(seen, [("open_app", {"name": "Settings"})])
+
+
 class PruneTest(unittest.TestCase):
     def test_old_outputs_pruned_at_80_percent_then_a_summary(self):
         llm = FakeLLM(["The user fixed add; tests pass."])
@@ -1335,8 +1366,9 @@ class CITest(unittest.TestCase):
                 f.write(text)
         with open(os.path.join(self.root, "notes.txt"), "w") as f:
             f.write("mine\n")
-        for cmd in (["add", "-A"], ["commit", "-q", "-m", "add()"], ["remote", "add", "origin", self.bare],
-                    ["push", "-q", "-u", "origin", "main"]):
+        # (with / on Windows too: git takes it, and it reads as github.com/musab/newal.git as a real remote would)
+        for cmd in (["add", "-A"], ["commit", "-q", "-m", "add()"],
+                    ["remote", "add", "origin", self.bare.replace(os.sep, "/")], ["push", "-q", "-u", "origin", "main"]):
             subprocess.run(["git"] + cmd, cwd=self.root, check=True)
         self.broken = self.head()
         self.looks = {}
