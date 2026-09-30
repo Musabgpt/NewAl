@@ -38,8 +38,8 @@ flowchart LR
 | Executor | `agent.py` `_run_tools` | tool calls run in parallel when they only read, in order otherwise | `AgentLoopTest.test_parallel_reads_keep_order` |
 | Verifier | `agent.py` `_tests_after_step`, `_verify` | the project's tests run by themselves after each step that changes files; failures go back with that step's result | `AgentLoopTest.test_tests_run_with_the_step_that_changed_files` |
 | Evaluator and self-healing, goal % | `agent.py` `_goal_check`, `prompts.GOAL_CHECK` | after each answer: `DONE`, or `CONTINUE 40%: what is missing`, and the loop goes on; the % is kept in the session, shown in `/status` and the app | `OmniCodeTest.test_the_goal_has_a_percentage` |
-| Auto-Pilot (YOLO) | `permissions.py` mode `full-auto` | nothing asks; catastrophic commands (`rm -rf /`, `mkfs`, a wiped disk) are still refused | `PermissionsTest` |
-| Safe-Guard | `permissions.py` modes `ask`, `auto-edit` | `rm -rf`, `sudo`, `git push`, `git reset --hard`, package installs... ask first; the OS sandbox keeps commands inside the project | `PermissionsTest`, `SandboxTest` |
+| Auto-Pilot (YOLO) | `permissions.py` mode `full-auto` (`/mode yolo`, `/mode auto-pilot`) | nothing asks; catastrophic commands (`rm -rf /`, `mkfs`, a wiped disk) are still refused | `PermissionsTest` |
+| Safe-Guard | `permissions.py` modes `auto-edit` (`/mode safe-guard`) and `ask` | `rm -rf`, `sudo`, `git push`, `git reset --hard`, package installs... ask first; the OS sandbox keeps commands inside the project | `PermissionsTest`, `SandboxTest` |
 | Terminal: stdout, stderr, exit code | `tools.py` `bash` / `powershell` | output and exit code in each result; Ctrl+C stops everything the command started | `SandboxTest.test_cancel_stops_everything_the_command_started` |
 | Background processes (PIDs, logs, stop) | `tools.py` `bash` with `background`, `job` | `job action=list` (ids and PIDs), `output`, `stop` by job id or PID; `/status` lists them | `OmniCodeTest.test_background_processes_by_pid_and_status` |
 | Git: branches, commits, PRs | `server.py` commit menu, `github.py`, `sync.py`, `minigit.py` | commit / push / pull request (gh, or GitHub's API without gh); `/sync`; git on the phone | `GitHubTest`, `SyncTest`, `MiniGitTest` |
@@ -160,7 +160,8 @@ What else a local model gets, in code rather than in words:
 
 - **SEARCH/REPLACE diffs.** `edit` takes the few lines to change (`old`) and their replacement (`new`), never the
   whole file; an edit's result reports a syntax error or a name never imported at once. A model that writes Aider's
-  SEARCH/REPLACE blocks into its answer instead of calling a tool gets them run as edits, when the file exists:
+  SEARCH/REPLACE blocks into its answer instead of calling a tool (a model on this device) gets them run as edits,
+  when the file exists:
 
   ```text
   calc.py
@@ -178,11 +179,13 @@ What else a local model gets, in code rather than in words:
 - **Circuit breaker.** [Above](#the-circuit-breaker): 3 identical failures stop the turn; 25 steps a turn.
 - **JSON and tool-call repair.** Arguments that are not quite JSON (single quotes, trailing commas, Python's
   `True`/`False`/`None`, raw line breaks in strings, a missing closing quote or brace, a code fence) are repaired;
-  calls written into the text become calls; other agents' names become NewAl Code's (`apply_diff` → `edit`,
+  a model on this device gets the calls it wrote into its text made into calls (an API model makes its calls
+  itself, so a call it shows as an example stays text); other agents' names become NewAl Code's (`apply_diff` → `edit`,
   `execute_terminal` → `bash`, `read_file_range` → `read`, `search_codebase` → `grep`,
   `manage_background_process` → `job`, `github_cli` → `github`; `file_path` → `path`, `old_string` → `old`,
   `start_line`/`end_line` → `offset`/`limit`...). Only calls to the thread's tools are made, and a code example in
-  an answer stays text.
+  an answer stays text. An argument name is only renamed for a tool that takes the new name and not the old one
+  (the phone's `name` and `text` stay theirs).
 - **ripgrep and fd.** `grep` and file listing use them when they are installed, with the same results as the
   built-in search, which stays the fallback: `node_modules`, build output and hidden folders are skipped, `.github`
   is searched.

@@ -27,6 +27,8 @@ MODE_ALIASES = {
     "acceptedits": "auto-edit", "accept-edits": "auto-edit", "auto": "auto-edit", "workspace-write": "auto-edit",
     "agent": "auto-edit",
     "bypasspermissions": "full-auto", "bypass": "full-auto", "yolo": "full-auto", "never": "full-auto",
+    # OmniCode's names: Auto-Pilot (YOLO) runs everything; Safe-Guard asks before rm -rf, sudo, a push...
+    "auto-pilot": "full-auto", "autopilot": "full-auto", "safe-guard": "auto-edit", "safeguard": "auto-edit",
     "danger-full-access": "full-auto", "full-access": "full-auto", "full": "full-auto",
 }
 REASONING = ("off", "low", "medium", "high")

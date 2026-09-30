@@ -51,22 +51,24 @@ CALC = {
 }
 
 
-def fake_client(llm, anthropic=False):
+def fake_client(llm, anthropic=False, on_device=False):
     if anthropic:
         spec = {"id": "fake-anthropic", "name": "fake", "provider": "anthropic"}
         return models.Client(spec, providers.Anthropic("k", llm.base), "fake")
     spec = {"id": "fake", "name": "fake", "provider": "openai"}
+    if on_device:
+        spec["preset"] = "ollama"            # a model on this device (models.Client.on_device)
     return models.Client(spec, providers.OpenAICompat(llm.url), "fake")
 
 
 def run_agent(script, files=None, mode="auto-edit", approve=lambda r: "once", goal="", text="do it", root=None,
-              **kw):
+              on_device=False, **kw):
     llm = FakeLLM(script)
     root = root or make_project(files or CALC)
     s = session.Session(root, mode=mode)
     s.goal = goal
     events = []
-    ag = agentmod.Agent(s, emit=events.append, approve=approve, client=fake_client(llm), **kw)
+    ag = agentmod.Agent(s, emit=events.append, approve=approve, client=fake_client(llm, on_device=on_device), **kw)
     answer = ag.run(text)
     llm.close()
     return answer, events, s, llm, root
@@ -353,7 +355,7 @@ class RepairTest(unittest.TestCase):
 
     def test_a_call_written_as_text_runs(self):
         answer, events, _, _, _ = run_agent(['<tool_call>\n{"name": "execute_terminal", "arguments": '
-                                             '{"command": "echo repaired"}}\n</tool_call>', "done"])
+                                             '{"command": "echo repaired"}}\n</tool_call>', "done"], on_device=True)
         self.assertEqual(answer, "done")
         end = next(e for e in events if e.get("type") == "tool_end")
         self.assertEqual((end["name"], end["ok"]), ("bash", True))
@@ -361,10 +363,20 @@ class RepairTest(unittest.TestCase):
 
     def test_a_search_replace_block_edits_the_file(self):
         answer, _, _, _, root = run_agent(["calc.py\n<<<<<<< SEARCH\n    return a - b\n=======\n    return a + b\n"
-                                           ">>>>>>> REPLACE", "Fixed add."])
+                                           ">>>>>>> REPLACE", "Fixed add."], on_device=True)
         self.assertEqual(answer, "Fixed add.")
         with open(os.path.join(root, "calc.py")) as f:
             self.assertIn("return a + b", f.read())
+
+    def test_an_api_models_example_stays_text(self):
+        # An API model makes its calls itself: a call it shows in its answer (an example) is not run.
+        shown = ('A call looks like this:\n```json\n{"name": "bash", "arguments": {"command": "echo ran"}}\n```\n'
+                 "calc.py\n<<<<<<< SEARCH\n    return a - b\n=======\n    return a + b\n>>>>>>> REPLACE")
+        answer, events, _, _, root = run_agent([shown], text="how does a tool call look?")
+        self.assertEqual([e for e in events if e.get("type") == "tool_start"], [])
+        self.assertIn('"name": "bash"', answer)
+        with open(os.path.join(root, "calc.py")) as f:
+            self.assertIn("return a - b", f.read())
 
     def test_broken_arguments_and_other_agents_names_run(self):
         broken = "{'file_path': 'calc.py', 'old_string': 'return a - b', 'new_string': 'return a + b',"

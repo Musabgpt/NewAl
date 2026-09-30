@@ -302,8 +302,9 @@ class Agent:
                 self._maybe_compact()
                 comp = self._call()
                 self.step += 1
-                if not comp.tool_calls and comp.content:
-                    # calls a model wrote as text (<tool_call>, a json block, SEARCH/REPLACE...): run, not shown
+                if not comp.tool_calls and comp.content and client.on_device:
+                    # calls a model on this device wrote as text (<tool_call>, a json block, SEARCH/REPLACE...): run,
+                    # not shown. (An API model makes its calls itself: a call it shows is an example, and stays text.)
                     found, rest = repair.calls_in_text(comp.content, s.tool_names, s.root, loose=client.on_device)
                     if found:
                         comp.tool_calls, comp.content = found, rest
