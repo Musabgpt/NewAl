@@ -994,6 +994,28 @@ class GitHubTest(unittest.TestCase):
         self.addCleanup(settings.save, {"keys": {}, "github": {}, "projects_dir": ""})
         self.good = good
 
+    def test_issues_listed_then_one_becomes_the_task(self):
+        from newal_code import github
+        self.gh.reply("GET", r"/repos/musab/newal/issues\?.*", [
+            {"number": 7, "title": "Crash on empty cart", "labels": [{"name": "bug"}], "comments": 1,
+             "updated_at": "2026-09-01T10:00:00Z"},
+            {"number": 8, "title": "A pull request", "pull_request": {}, "comments": 0, "updated_at": ""}])
+        self.gh.reply("GET", r"/repos/musab/newal/issues/7", {"number": 7, "title": "Crash on empty cart",
+                                                               "body": "total() divides by zero.", "comments": 1})
+        self.gh.reply("GET", r"/repos/musab/newal/issues/7/comments.*", [{"user": {"login": "sara"},
+                                                                          "body": "Seen on the phone too."}])
+        root = make_project({"cart.py": "x = 1\n"})
+        git(root, "init", "-q", "-b", "main")
+        git(root, "remote", "add", "origin", "https://github.com/musab/newal.git")
+        r = github.issues_command(root, "")
+        self.assertIn("#7     Crash on empty cart  [bug]", r["reply"])
+        self.assertNotIn("A pull request", r["reply"])                     # pull requests are not issues
+        task = github.issues_command(root, "#7")["prompt"]
+        for part in ("issue #7 of musab/newal: Crash on empty cart", "total() divides by zero.",
+                     "- @sara: Seen on the phone too.", "Fixes #7"):
+            self.assertIn(part, task)
+        self.assertIn("not on GitHub", github.issues_command(make_project({"a": "b"}), "")["reply"])
+
     def test_connect_list_clone_and_pull_request(self):
         from newal_code import github
         with self.assertRaises(github.GitHubError):

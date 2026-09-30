@@ -156,6 +156,7 @@ It uses NewAl desktop's `llama-server` and the models NewAl already downloaded (
 | Checkpoints / undo | ✓ /rewind | ✓ /undo | ✓ every changed file saved first; `/undo`, "Undo last turn", revert one file |
 | Diff / review | /review | ✓ /diff, /review, review pane | ✓ `/diff`, `/review` (reviewer sub-agent), review pane with per-file diffs |
 | Pull and push in one step | – | – | ✓ `/sync`: pull (rebase, or a merge with the phone's git), then push, with the connected GitHub account; conflicts explained with the way out |
+| GitHub issues | – | – | ✓ `/issues` lists the repository's open issues (labels, age, comments; pull requests left out); `/issues 7` makes issue #7 (its text and comments) the task, to fix and to close with "Fixes #7" |
 | Git commit, push, pull request from the app | – | ✓ | ✓ Commit / Commit and push / Commit and create PR (a branch of its own when on main; `gh` when installed, else GitHub's API with the connected token, else GitHub's PR page) |
 | GitHub account in the app | – | ✓ (cloud) | ✓ Settings > GitHub: connect with a token, then clone any of your repositories (the ⬇ button beside Threads); cloud tasks and pull requests use it |
 | `/init` AGENTS.md | ✓ | ✓ | ✓ |

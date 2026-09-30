@@ -33,6 +33,7 @@ BUILTIN_COMMANDS = [
     ("title", "<text>", "Rename this thread"),
     ("security-review", "[focus]", "Review the changes for security problems (a reviewer sub-agent)"),
     ("sync", "", "Pull the remote's changes, then push this branch's (git, with NewAl Code's GitHub sign-in)"),
+    ("issues", "[number]", "The GitHub repository's open issues; with a number, work on that issue"),
     ("permissions", "", "Show the permission mode and the allow / ask / deny rules"),
     ("export", "", "Save this thread as Markdown in the project"),
     ("memory", "", "Show the instruction files (# <note> adds a note to AGENTS.md)"),
@@ -276,7 +277,7 @@ class Service:
     # ------------------------------------------------------------ slash commands
 
     def commands(self, root):
-        out = [{"name": n, "args": a, "description": d, "custom": False, "instant": n == "sync"}
+        out = [{"name": n, "args": a, "description": d, "custom": False, "instant": n in ("sync", "issues")}
                for n, a, d in BUILTIN_COMMANDS]
         for name, c in sorted(extensions.custom_commands(root).items()):
             out.append({"name": name, "args": c.get("hint", ""), "description": c.get("description", ""),
@@ -367,6 +368,9 @@ class Service:
             lines.append("Sandbox: %s" % ("%s (commands write only in the project%s)" % (
                 on, "" if sandbox.active(s.root, s.mode, s.dirs) else "; not in this mode") if on else "off"))
             return {"reply": "\n".join(lines)}
+        if name == "issues":
+            from . import github
+            return github.issues_command(s.root, args)
         if name == "sync":
             from . import sync
             ok, text = sync.sync(s.root)

@@ -117,6 +117,8 @@
     - `format-on-edit`: بعد كل تعديل بينسّق الملف بأداة المشروع (gofmt وrustfmt وdart دايماً، وruff/black وprettier
       وclang-format إذا المشروع مجهّز إلها).
     - ومن الطرفية: `newal-code plugin list` و`newal-code plugin install system@newal`.
+  - **`/issues`:** بيعرض الـ issues المفتوحة بمستودع GitHub تبع المشروع، و‏`/issues 7` بيخلّي NewAl يشتغل على الـ issue
+    رقم 7 (نصها وتعليقاتها) ويقترح commit بينتهي بـ "Fixes #7".
   - **`/sync`:** أمر واحد بيجيب تغييرات GitHub وبيرفع تغييراتك (pull ثم push) بحساب GitHub الموصول بـ NewAl Code، على
     الكمبيوتر وعالجوال. إذا في تعارض بيقلك بأي ملفات وكيف تكمّل أو ترجع. وgit تبع الجوال صار يعمل merge حقيقي لما يكون
     في تعديلات من الطرفين (قبل كان يفشل)، ومعه `git merge --continue` و`git merge --abort`.

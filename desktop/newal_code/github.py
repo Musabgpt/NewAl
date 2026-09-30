@@ -160,6 +160,54 @@ def clone(full_name, dest=None):
     return dest
 
 
+def _ago(stamp):
+    import datetime
+    try:
+        then = datetime.datetime.strptime(stamp[:19], "%Y-%m-%dT%H:%M:%S").replace(tzinfo=datetime.timezone.utc)
+    except (TypeError, ValueError):
+        return ""
+    days = (datetime.datetime.now(datetime.timezone.utc) - then).days
+    return "today" if days < 1 else "%d day%s ago" % (days, "" if days == 1 else "s")
+
+
+def issues_command(root, args):
+    """/issues: the GitHub repository's open issues; /issues N: that issue (text and comments) as a task for the
+    agent, to fix and to close with "Fixes #N". Public repositories answer without a sign-in too."""
+    from . import cloud
+    full = cloud.repo_of(root)
+    if not full:
+        return {"reply": "This project's origin is not on GitHub (git remote get-url origin)."}
+    arg = args.strip().lstrip("#")
+    try:
+        if not arg:
+            items = [i for i in (_api("GET", "/repos/%s/issues?state=open&per_page=30&sort=updated" % full) or [])
+                     if "pull_request" not in i]
+            if not items:
+                return {"reply": "No open issues in %s." % full, "output": True, "code": 0}
+            lines = ["Open issues in %s:" % full]
+            for i in items:
+                labels = ", ".join(l.get("name", "") for l in i.get("labels") or [])
+                lines.append("  #%-5s %s%s  (%s%s)" % (i["number"], i.get("title", ""), "  [%s]" % labels if labels
+                                                         else "", _ago(i.get("updated_at", "")),
+                                                         ", %d comments" % i["comments"] if i.get("comments") else ""))
+            lines.append("\nWork on one: /issues <number>")
+            return {"reply": "\n".join(lines), "output": True, "code": 0}
+        if not arg.isdigit():
+            return {"reply": "Usage: /issues [number]"}
+        issue = _api("GET", "/repos/%s/issues/%s" % (full, arg))
+        comments = _api("GET", "/repos/%s/issues/%s/comments?per_page=30" % (full, arg)) if issue.get("comments") \
+            else []
+    except GitHubError as e:
+        return {"reply": "GitHub: %s" % e}
+    talk = "\n".join("- @%s: %s" % ((c.get("user") or {}).get("login", "?"), (c.get("body") or "").strip()[:2000])
+                     for c in comments or [])
+    prompt = ("Work on GitHub issue #%s of %s: %s\n\n%s%s\n\nFind the cause in the code, fix it, and check the fix "
+              "(run the tests if the project has them). Then say what you changed, and give a commit message whose "
+              "last line is \"Fixes #%s\"." % (arg, full, issue.get("title", ""), (issue.get("body") or "").strip()[:8000],
+                                               "\n\nComments:\n" + talk if talk else "", arg))
+    return {"prompt": prompt}
+
+
 def pull_request(root, title, body=""):
     """Opens a pull request from the checkout's branch into the repository's default branch; returns its address."""
     from . import cloud, util
