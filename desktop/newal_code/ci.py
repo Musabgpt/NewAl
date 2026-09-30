@@ -276,7 +276,14 @@ def heal(agent, tries=TRIES, say=None, poll=None, appear=None):
     top, full, branch, sha = repo(s.root)
     dirty_before = set(_status(top))
     code, up = _git(top, "rev-parse", "@{u}")
-    if code or up.strip() != sha:
+    up = up.strip() if code == 0 and re.fullmatch(r"[0-9a-f]{40}", up.strip()) else ""
+    if s.mode == "read-only" and up != sha:
+        # read-only: nothing is pushed; what GitHub has of this branch is watched
+        if not up:
+            return False, "%s is not on GitHub yet, and read-only mode pushes nothing." % branch
+        say("watching", "HEAD is not pushed (read-only mode): watching %s, the branch as GitHub has it." % up[:7])
+        sha = up
+    elif up != sha:
         say("push", "Pushing %s so that GitHub Actions can test it..." % branch)
         ok, text = sync.sync(top)
         if not ok:
@@ -307,7 +314,7 @@ def heal(agent, tries=TRIES, say=None, poll=None, appear=None):
         answer = agent.run(fix_prompt(full, branch, sha, fails))
         if cancel.is_set():
             raise Stopped()
-        if answer.startswith(("Model error", "Stopped")):
+        if answer.startswith("Model error: ") or agent.breaker.open:
             return False, "%s\nThe fix did not finish: %s" % (line, answer)       # nothing half-done is pushed
         what = ", ".join(sorted({"%s / %s" % (f["run"], f["job"]) for f in fails}))
         message = "Fix CI: %s\n\n%s" % (what[:150], re.sub(r"\s+", " ", answer).strip()[:600])

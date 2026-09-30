@@ -1495,6 +1495,11 @@ class CITest(unittest.TestCase):
         self.assertIn("E       assert -1 == 5", text)
         self.assertIn("(read-only mode: nothing is fixed.)", text)
         self.assertEqual(llm.requests, [])
+        # read-only pushes nothing: a commit not on GitHub yet is not pushed, the branch as GitHub has it is watched
+        subprocess.run(["git", "commit", "-q", "--allow-empty", "-m", "local only"], cwd=self.root, check=True)
+        ok, text = ci.heal(ag, say=lambda st, t: None, poll=0.01)
+        self.assertEqual(self.remote_log()[0], "add()")
+        self.assertIn("CI for %s" % self.broken[:7], text)
 
     def test_the_command_runs_in_the_background_and_says_how_it_ended(self):
         from unittest import mock
