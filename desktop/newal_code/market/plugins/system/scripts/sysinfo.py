@@ -130,18 +130,17 @@ def memory():
 def storage():
     rows, seen = [], set()
 
-    def add(label, path):
+    def add(label, path, quiet=True):
         try:
-            if not os.path.isdir(path):
-                return
             dev = os.stat(path).st_dev
             if dev in seen:
                 return
             seen.add(dev)
             u = shutil.disk_usage(path)
             rows.append("%s %s %s %s %s" % (label, size(u.free), t("free"), t("of"), size(u.total)))
-        except OSError:
-            pass
+        except OSError as e:
+            if not quiet:
+                rows.append("%s %s" % (label, e.strerror or e))
     if WINDOWS:
         import ctypes
         mask = ctypes.windll.kernel32.GetLogicalDrives()
@@ -150,11 +149,12 @@ def storage():
                 d = "%s:\\" % chr(65 + i)
                 if ctypes.windll.kernel32.GetDriveTypeW(ctypes.c_wchar_p(d)) == 3:     # fixed disks
                     add(d[:2], d)
+    elif ANDROID:              # "/" is Android's read-only system: the app's own storage and the shared one count
+        add(t("App") + ":", os.environ.get("HOME") or os.getcwd(), quiet=False)
+        add(t("Phone storage") + ":", "/storage/emulated/0", quiet=False)
     else:
         add("/", "/")
         add("~", os.path.expanduser("~"))
-        if ANDROID:
-            add(t("Device") + ":", "/storage/emulated/0")
     add(os.getcwd(), os.getcwd())
     return rows
 

@@ -22,7 +22,7 @@ AR_WORDS = {
     "Graphics": "الرسوميات", "Battery": "البطارية", "Network": "الشبكة", "Uptime": "يعمل منذ", "Tools": "الأدوات",
     "free": "متاح", "of": "من", "threads": "خيوط", "charging": "يشحن", "on battery": "على البطارية",
     "plugged in": "على الشاحن", "full": "ممتلئة", "offline": "غير متصل", "not found": "غير موجود",
-    "Local models": "النماذج المحلية",
+    "Local models": "النماذج المحلية", "App": "التطبيق", "Phone storage": "ذاكرة الجوال",
     "GGUF (Q4) models that fit in the free memory now": "نماذج GGUF (Q4) تتسع لها الذاكرة المتاحة الآن",
     "Folder": "المجلد", "Biggest in the folder": "الأكبر في المجلد", "partial": "نتيجة جزئية", "Biggest files": "أكبر الملفات", "Total": "المجموع",
     "files": "ملفات", "Drives": "الأقراص", "stopped after": "توقف بعد", "seconds": "ثانية",

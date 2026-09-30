@@ -35,6 +35,7 @@
     list: '<path d="M9 6h11M9 12h11M9 18h11M4.5 6h.01M4.5 12h.01M4.5 18h.01"/>',
     trash: '<path d="M4 7h16M10 11v6M14 11v6M6 7l1 13h10l1-13M9 7V4h6v3"/>',
     undo: '<path d="M9 14L4 9l5-5"/><path d="M4 9h10a6 6 0 0 1 0 12h-3"/>',
+    sync: '<path d="M7 20V4"/><path d="M3 8l4-4 4 4"/><path d="M17 4v16"/><path d="M13 16l4 4 4-4"/>',
     cloud: '<path d="M7 18a4.5 4.5 0 0 1-.6-8.96A6 6 0 0 1 18 9.5a4.25 4.25 0 0 1-.5 8.5z"/>',
   };
   function icon(name) {
@@ -250,6 +251,7 @@
     $("#project-chip").textContent = base(root);
     $("#project-chip").title = root;
     api("/api/commands?root=" + encodeURIComponent(root)).then(c => { S.commands = c; }).catch(() => {});
+    if (root && !S.current) api("/api/git?root=" + encodeURIComponent(root)).then(d => { if (!S.current) $("#btn-sync").hidden = !d.git; }).catch(() => {});
     renderEmpty();
     renderSidebar();
   }
@@ -340,6 +342,7 @@
     $("#branch-chip").hidden = !git;
     if (git) $("#branch-chip").textContent = "⎇ " + git.branch;
     $("#btn-commit").hidden = !git;
+    $("#btn-sync").hidden = !git;
   }
 
   function renderEmpty() {
@@ -1814,6 +1817,7 @@
       refreshChanges();
     };
     $("#btn-commit").onclick = () => { openReview(); setTimeout(() => $("#commit-msg").focus(), 50); };
+    $("#btn-sync").onclick = () => send("/sync");            // pull, then push: its report shows in the thread
     $("#review-apply").onclick = async () => {
       const r = await api("/api/sessions/" + S.current + "/apply", {}).catch(e => toast(e.message, 6000));
       if (r && r.ok) toast("Applied to the project: " + r.applied.join(", "), 5000);

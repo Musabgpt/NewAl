@@ -278,8 +278,10 @@ def plugins(state):
     out = api("/api/sessions/%s/send" % sid, {"text": "/sysinfo", "lang": "ar"}, timeout=180)
     check("plugins: /sysinfo in Arabic", "الذاكرة" in out.get("reply", ""), out.get("reply", "")[-300:])
     out = api("/api/sessions/%s/send" % sid, {"text": "/disk"}, timeout=180)
+    print(out.get("reply", ""), flush=True)
     check("plugins: /disk on the phone", out.get("code") == 0 and "Drives" in out.get("reply", ""),
           out.get("reply", "")[-600:])
+    check("plugins: the app's storage in /sysinfo", re.search(r"App: [\d.]+ [KMGT]?B free", text), text)
 
 
 def wait_up(limit=120):

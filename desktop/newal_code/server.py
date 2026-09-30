@@ -229,6 +229,12 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/api/clipboard":
                 from . import connect
                 return self._json({"text": connect.clipboard()})
+            if path == "/api/git":
+                # a project's branch before any thread (the Sync button); null outside a repository
+                root = q.get("root") or ""
+                if not root or not util.git_root(root):
+                    return self._json({"git": None})
+                return self._json({"git": {"branch": _branch(root)}})
             if path == "/api/commands":
                 return self._json(svc.commands(q.get("root") or ""))
             if path == "/api/extensions":
@@ -466,12 +472,21 @@ def _changes_summary(s):
     return [{k: c[k] for k in ("path", "status", "plus", "minus")} for c in s.changes()]
 
 
+def _branch(root):
+    """The checked-out branch: also in a repository with no commit yet (where rev-parse fails), "HEAD" when
+    detached, "" when git cannot tell."""
+    code, out = util.git(root, "symbolic-ref", "--short", "-q", "HEAD")
+    if code == 0 and out.strip() and "\n" not in out.strip():
+        return out.strip()
+    code, out = util.git(root, "rev-parse", "--abbrev-ref", "HEAD")        # the phone's git has no symbolic-ref
+    return out.strip() if code == 0 and "\n" not in out.strip() else ""
+
+
 def _git_info(root):
     if not util.git_root(root):
         return None
-    _, branch = util.git(root, "rev-parse", "--abbrev-ref", "HEAD")
     _, status = util.git(root, "status", "--short")
-    return {"branch": branch.strip(), "status": status.strip().splitlines()[:200]}
+    return {"branch": _branch(root), "status": status.strip().splitlines()[:200]}
 
 
 def _revert_file(s, rel):
@@ -532,7 +547,8 @@ def _commit(s, message, then=""):
     out += o
     if code or not then:
         return {"ok": code == 0, "output": out[-2000:]}
-    code, o = util.git(s.root, "push", "-u", "origin", "HEAD", timeout=120)
+    from . import sync
+    code, o = util.git(s.root, *sync._auth(s.root, "origin"), "push", "-u", "origin", "HEAD", timeout=120)
     out += o
     if code:
         return {"ok": False, "committed": True, "output": out[-2000:]}

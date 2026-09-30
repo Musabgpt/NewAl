@@ -20,8 +20,10 @@ def drives():
         mask = ctypes.windll.kernel32.GetLogicalDrives()
         paths = ["%s:\\" % chr(65 + i) for i in range(26) if mask & (1 << i) and
                  ctypes.windll.kernel32.GetDriveTypeW(ctypes.c_wchar_p("%s:\\" % chr(65 + i))) == 3]
+    elif ANDROID:              # "/" is Android's read-only system: the app's own storage and the shared one count
+        paths = [os.environ.get("HOME") or os.getcwd(), "/storage/emulated/0"]
     else:
-        paths = ["/", os.path.expanduser("~")] + (["/storage/emulated/0"] if ANDROID else [])
+        paths = ["/", os.path.expanduser("~")]
     for p in paths:
         try:
             dev = os.stat(p).st_dev
@@ -31,8 +33,9 @@ def drives():
             u = shutil.disk_usage(p)
             rows.append((p, size(u.free) + " " + t("free"), t("of") + " " + size(u.total),
                          "%d%%" % round(100 * u.used / u.total) if u.total else ""))
-        except OSError:
-            pass
+        except OSError as e:
+            if ANDROID:
+                rows.append((p, e.strerror or str(e), "", ""))
     return rows
 
 

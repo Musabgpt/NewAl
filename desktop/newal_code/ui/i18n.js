@@ -10,6 +10,8 @@
     "Models": "النماذج",
     "Skills, agents & MCP": "المهارات والوكلاء وMCP",
     "Plugins & skills": "الإضافات والمهارات",
+    "Sync": "مزامنة",
+    "Pull the remote's changes, then push this branch's": "اجلب تغييرات المستودع البعيد ثم ارفع تغييرات هذا الفرع",
     "NewAl's plugins": "إضافات NewAl",
     "built in · no download": "مدمجة · بلا تنزيل",
     "Installed plugins": "الإضافات المثبّتة",

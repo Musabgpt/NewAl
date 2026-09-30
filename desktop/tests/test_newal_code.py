@@ -2370,6 +2370,12 @@ class ServerTest(unittest.TestCase):
         self.assertTrue(all(c["ok"] in (True, False, None) for c in d["checks"]))
         self.assertIn("NewAl Code", d["report"])
 
+    def test_a_projects_branch_before_any_thread(self):
+        root = make_project(CALC)
+        self.assertIsNone(self.call("/api/git?root=" + urllib.parse.quote(root))["git"])
+        git(root, "init", "-q", "-b", "trunk")
+        self.assertEqual(self.call("/api/git?root=" + urllib.parse.quote(root))["git"], {"branch": "trunk"})
+
     def test_builtin_plugin_one_tap_then_its_command_runs_at_once(self):
         root = make_project({"a.txt": "x"})
         q = urllib.parse.quote(root)
