@@ -66,6 +66,12 @@ never what the model or the user wrote, code, commands or their output. Each mes
 own text, in either language, and code, diffs and the terminal stay left to right. The agent answers in the user's
 language already.
 
+**The phone, more.** Long-press NewAl Code Lite's icon: "New thread" or "Speak a request" (a new thread and the
+microphone at once). A thread that ends while the app is in the background posts a notification (a tap brings the
+app back). "+" attaches images from the phone (Android's picker). NewAl Code in Termux, once linked, starts with the
+app when the app may start it. The app's own texts (its notification, screen control's description, the
+shortcuts) are in Arabic on a phone set to Arabic.
+
 **Speaking and sharing (the phone).** The microphone beside Send types what you say (Android's speech recognition,
 in the phone's language; on a computer, the browser's where it has one). "Share" in another app → NewAl Code
 starts a new thread with the text and the files (copied into NewAl Code's `Shared` folder), waiting for what to do

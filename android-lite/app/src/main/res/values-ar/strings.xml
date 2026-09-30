@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="running">وكيل البرمجة ونموذجه يعملان على هذا الهاتف</string>
+    <string name="a11y_label">NewAl Code: التحكم بالهاتف</string>
+    <string name="a11y_description">يتيح لوكيل NewAl Code قراءة ما على الشاشة، والنقر والكتابة والتمرير، حين تطلب منه استخدام هاتفك. لا يقرأ الشاشة إلا حين يطلب الوكيل ذلك، ولا يتصرف إلا بطلبك (ويسألك أولاً ما لم تكن المحادثة بوصول كامل). ما يقرؤه يذهب إلى النموذج الذي اخترته في NewAl Code: الذي على هذا الهاتف، أو الـ API الذي ربطته.</string>
+    <string name="shortcut_new">محادثة جديدة</string>
+    <string name="shortcut_voice">اطلب بصوتك</string>
+</resources>

@@ -4,4 +4,6 @@
     <string name="running">The coding agent and its model run on this phone</string>
     <string name="a11y_label">NewAl Code: phone control</string>
     <string name="a11y_description">Lets NewAl Code\'s agent read what is on the screen, and tap, type and swipe, when you ask it to use your phone. It reads the screen only when the agent asks, and acts only on your request (it asks you first unless the thread runs in full-auto). What it reads goes to the model you chose in NewAl Code: the one on this phone, or the API you connected.</string>
+    <string name="shortcut_new">New thread</string>
+    <string name="shortcut_voice">Speak a request</string>
 </resources>

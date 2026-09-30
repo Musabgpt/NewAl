@@ -27,6 +27,27 @@ final class Shared {
     private Shared() {
     }
 
+    private static volatile String action = "";
+
+    /** A shortcut's action ("new", "voice"), once; "" when none. */
+    static String takeAction() {
+        String a = action;
+        action = "";
+        return a;
+    }
+
+    /** The icon's shortcuts: a new thread, or a spoken request. */
+    static boolean shortcut(Intent i, Runnable tell) {
+        String a = i == null ? null : i.getAction();
+        if ("dev.newal.code.lite.NEW".equals(a) || "dev.newal.code.lite.VOICE".equals(a)) {
+            action = a.endsWith("VOICE") ? "voice" : "new";
+            i.setAction(Intent.ACTION_MAIN);
+            tell.run();
+            return true;
+        }
+        return false;
+    }
+
     static String take() {
         String s = pending;
         pending = "";

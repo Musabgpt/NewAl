@@ -96,6 +96,7 @@ public class MainActivity extends Activity {
         startForegroundService(new Intent(this, AgentService.class));
         waitForServer();
         Shared.from(this, getIntent(), this::tellShared);
+        Shared.shortcut(getIntent(), this::tellShared);
     }
 
     /** Shared from another app while NewAl Code runs (the activity is single-task). */
@@ -104,6 +105,7 @@ public class MainActivity extends Activity {
         super.onNewIntent(i);
         setIntent(i);
         Shared.from(this, i, this::tellShared);
+        Shared.shortcut(i, this::tellShared);
     }
 
     private void tellShared() {

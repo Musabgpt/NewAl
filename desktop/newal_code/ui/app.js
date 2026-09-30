@@ -147,6 +147,8 @@
     if (!S.state.settings.onboarded) openWelcome();
     voiceInput();
     takeShared();
+    takeAction();
+    termuxAutoStart();
   }
 
   function applyTheme(t) {
@@ -1486,7 +1488,23 @@
     $("#input").focus();
     toast("Shared with NewAl Code: say what to do with it", 5000);
   }
-  window.onPhoneShared = takeShared;
+  function takeAction() {
+    // A shortcut on the app's icon: a new thread, or one started by voice.
+    let a = "";
+    try { a = window.NewAlPhone && NewAlPhone.takeAction ? NewAlPhone.takeAction() : ""; } catch (_) { a = ""; }
+    if (!a) return;
+    newThread();
+    if (a === "voice" && NewAlPhone.listen) setTimeout(() => NewAlPhone.listen((S.state && S.state.settings.lang) || ""), 400);
+  }
+  window.onPhoneShared = () => { takeShared(); takeAction(); };
+  function termuxAutoStart() {
+    // NewAl Code in Termux, once linked, starts with the app (Termux's RUN_COMMAND, when the app may use it).
+    const st = phoneStatus();
+    const t = st && st.termux;
+    if (!t) return;
+    if (t.up) { localStorage.setItem("nc.termux.linked", "1"); return; }
+    if (t.installed && t.allowed && localStorage.getItem("nc.termux.linked") && NewAlPhone.termuxStart) NewAlPhone.termuxStart();
+  }
 
   window.onPhoneImport = ev => {
     // NewAl Code Lite copying a GGUF file the user picked into NewAl Code's models folder.
@@ -1661,7 +1679,7 @@
       try {
         const d = await api("/api/termux/link", {});
         NewAlPhone.termuxSetup(d.command);
-        const wait = setInterval(() => { const s2 = phoneStatus(); if (s2 && s2.termux && s2.termux.up) { clearInterval(wait); phoneSection(box); toast("NewAl Code runs in Termux"); } }, 3000);
+        const wait = setInterval(() => { const s2 = phoneStatus(); if (s2 && s2.termux && s2.termux.up) { clearInterval(wait); localStorage.setItem("nc.termux.linked", "1"); phoneSection(box); toast("NewAl Code runs in Termux"); } }, 3000);
         setTimeout(() => clearInterval(wait), 600000);
       } catch (e) { toast(e.message); }
     });

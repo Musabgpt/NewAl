@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Long-press NewAl Code Lite's icon: a new thread, or a request spoken at once. -->
+<shortcuts xmlns:android="http://schemas.android.com/apk/res/android">
+    <shortcut
+        android:enabled="true"
+        android:icon="@drawable/ic_launcher"
+        android:shortcutId="new"
+        android:shortcutShortLabel="@string/shortcut_new">
+        <intent
+            android:action="dev.newal.code.lite.NEW"
+            android:targetClass="dev.newal.code.lite.MainActivity"
+            android:targetPackage="dev.newal.code.lite" />
+    </shortcut>
+    <shortcut
+        android:enabled="true"
+        android:icon="@drawable/ic_launcher"
+        android:shortcutId="voice"
+        android:shortcutShortLabel="@string/shortcut_voice">
+        <intent
+            android:action="dev.newal.code.lite.VOICE"
+            android:targetClass="dev.newal.code.lite.MainActivity"
+            android:targetPackage="dev.newal.code.lite" />
+    </shortcut>
+</shortcuts>

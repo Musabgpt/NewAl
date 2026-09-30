@@ -192,6 +192,12 @@ final class WebBridge {
         }
     }
 
+    /** The icon shortcut that opened the app ("new", "voice"), once; "" when none. */
+    @JavascriptInterface
+    public String takeAction() {
+        return Shared.takeAction();
+    }
+
     /** What another app shared ({"text", "files"}), once; "" when nothing. */
     @JavascriptInterface
     public String takeShared() {
