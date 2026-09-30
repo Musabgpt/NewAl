@@ -76,9 +76,16 @@ echo "NewAl Code: setting up in Termux..."
 need=""
 command -v python > /dev/null 2>&1 || need="$need python"
 command -v git > /dev/null 2>&1 || need="$need git"
+install_need() { yes | pkg install -y $need >> "$HOME/.newal-code-install.log" 2>&1; }
 if [ -n "$need" ]; then
   echo "Installing$need (Termux's packages)..."
-  yes | pkg install -y $need > "$HOME/.newal-code-install.log" 2>&1 || { pkg update -y > /dev/null 2>&1 || true; yes | pkg install -y $need; }
+  install_need || { yes | pkg update -y >> "$HOME/.newal-code-install.log" 2>&1; install_need; } || {
+    # A package mirror in the middle of its sync ("File has unexpected size"): Termux's own repository instead.
+    echo "A package mirror did not answer well: using Termux's main repository."
+    echo "deb https://packages-cf.termux.dev/apt/termux-main stable main" > "$PREFIX/etc/apt/sources.list"
+    rm -f "$PREFIX/etc/termux/chosen_mirrors"
+    apt-get update >> "$HOME/.newal-code-install.log" 2>&1
+    DEBIAN_FRONTEND=noninteractive apt-get install -y -o Dpkg::Options::=--force-confnew $need; }
 fi
 mkdir -p "$H" "$HOME/projects"
 chmod 700 "$HOME/.newal-code" "$H"

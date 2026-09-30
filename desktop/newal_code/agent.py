@@ -253,7 +253,7 @@ class Agent:
         self.fail_streak = 0
         # A question gets a short think before its answer: nothing will run to check it (a task is checked by running
         # it instead, so it starts straight away).
-        self.think_next = looks_like_question(text)
+        self.think_next = question = looks_like_question(text)
         self.last_error = ""
         self.emit({"type": "turn_start", "turn": s.turn, "text": text, "model": client.id, "mode": s.mode})
         cfg = self.cfg
@@ -286,6 +286,7 @@ class Agent:
         repeats = {}
         self._stuck = None
         error = ""
+        acted = nudged = False
         try:
             while True:
                 if self.cancel.is_set():
@@ -299,6 +300,7 @@ class Agent:
                 msg = comp.message()
                 s.add(msg)
                 if comp.tool_calls:
+                    acted = True
                     self._run_tools(ctx, comp.tool_calls, repeats)
                     if self._stuck:
                         answer = ("Stopped: %s kept failing the same way (%s)." % self._stuck)
@@ -307,6 +309,14 @@ class Agent:
                 answer = shown(comp.content)
                 if not answer and comp.finish == "length":
                     s.add({"role": "user", "content": "Your reply was cut off. Continue."})
+                    continue
+                # A small model sometimes says what it will do and stops there ("I will create hello.py and run
+                # it."): nothing done yet in this turn and a reply that only announces is told, once, to do it.
+                if not acted and not nudged and not question and s.mode != "read-only" and \
+                        not re.search(r"\b(plan|explain|describe|how would|what would)\b|خطة|اشرح", text, re.I) and \
+                        announces(answer):
+                    nudged = True
+                    s.add({"role": "user", "content": "Do it now with the tools; don't describe it."})
                     continue
                 # The computer checks the work: the project's tests, when this turn changed files.
                 if verify and ctx.changed and verify_rounds < MAX_VERIFY and self.depth == 0:
@@ -872,6 +882,17 @@ def error_signature(output):
         if re.search(r"(Error|Exception|error:|FAILED|failed|not found|No such file)", l):
             return re.sub(r"(/[\w.\-]+)+|\d+", "#", l)[:200]
     return ""
+
+
+ANNOUNCES = re.compile(
+    r"^\W*(ok(ay)?[,.!]?\s+|sure[,.!]?\s+|alright[,.!]?\s+|first[,]?\s+)?(i will|i'll|i am going to|i'm going to|"
+    r"let me|i need to|i can now|now i will|سأ|سوف|راح|رح|خليني|دعني)", re.I)
+
+
+def announces(text):
+    """Whether a final reply only says what will be done (and asks nothing)."""
+    t = (text or "").strip()
+    return bool(t) and len(t) < 400 and "?" not in t and "؟" not in t and bool(ANNOUNCES.match(t))
 
 
 def shown(text):

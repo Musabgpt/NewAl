@@ -226,6 +226,27 @@ class ToolsTest(unittest.TestCase):
             patch.parse("no patch here")
 
 
+class AnnounceTest(unittest.TestCase):
+    def test_a_reply_that_only_announces_is_told_to_act(self):
+        # the 0.8B on a phone once answered "I will create hello.py and run it." and stopped: told once, it acts
+        answer, events, s, llm, root = run_agent(
+            ["I will create hello.py and run it with python3.",
+             {"tools": [("write", {"path": "hello.py", "content": "print('hi')\n"})]}, "Created hello.py."],
+            files={"README.md": "# x\n"}, text="Create hello.py that prints hi")
+        self.assertTrue(os.path.exists(os.path.join(root, "hello.py")))
+        self.assertEqual(answer, "Created hello.py.")
+        self.assertIn("Do it now", json.dumps(s.messages))
+        # a question, a plan, or an answer that asks something: left as they are
+        for text, reply in (("What does calc.py do?", "I will explain: it adds."),
+                            ("Plan how to add a CLI", "I will add argparse, then a main()."),
+                            ("Fix it", "I will need the file name. Which one?")):
+            answer, _, s, _, _ = run_agent([reply], files={"README.md": "# x\n"}, text=text)
+            self.assertNotIn("Do it now", json.dumps(s.messages), text)
+        from newal_code.agent import announces
+        self.assertTrue(announces("سأنشئ الملف الآن."))
+        self.assertFalse(announces("Created hello.py and ran it."))
+
+
 class ClipTest(unittest.TestCase):
     def test_windows_line_ends_and_progress_bars(self):
         self.assertEqual(tools.clip("a.txt\r\nb.txt\r\nlast\r\n").strip(), "a.txt\nb.txt\nlast")
