@@ -592,12 +592,13 @@ class LeftRunningTest(unittest.TestCase):
             self.assertIn("start servers and other long-running programs with background=true", text)
         if os.name != "nt" and shutil.which("pgrep"):
             gone = time.time() + 5                  # (a killed process can take a moment to go on a busy machine)
-            while time.time() < gone and subprocess.run(["pgrep", "-f", "sleep 37"], capture_output=True).stdout:
+            left = ["pgrep", "-f", "^sleep 37$"]          # (anchored: not a shell whose command line names it)
+            while time.time() < gone and subprocess.run(left, capture_output=True).stdout:
                 time.sleep(0.2)
-            self.assertEqual(subprocess.run(["pgrep", "-f", "sleep 37"], capture_output=True).stdout, b"")
+            self.assertEqual(subprocess.run(left, capture_output=True).stdout, b"")
         text, _ = tools.call(c, "bash", {"command": "sleep 38 > /dev/null 2>&1 & echo fine"})     # output elsewhere:
         self.assertNotIn("background=true", text)                                              # nothing to stop
-        subprocess.run(["pkill", "-f", "sleep 38"], capture_output=True) if os.name != "nt" else None
+        subprocess.run(["pkill", "-f", "^sleep 38$"], capture_output=True) if os.name != "nt" else None
 
 
 class ClipTest(unittest.TestCase):
