@@ -1,6 +1,7 @@
 """A scripted model behind an OpenAI-compatible (and an Anthropic-compatible) streaming endpoint, for tests of the agent
 loop without a real model. Each request takes the next scripted reply: a string (text), or a dict with "tools":
-[(name, {args})] and optional "text"; a callable gets the request body and returns one of those."""
+[(name, {args})] and optional "text", or {"status": 500, "error": "message"} (the server's error, as llama.cpp
+sends it); a callable gets the request body and returns one of those."""
 
 import json
 import threading
@@ -34,6 +35,15 @@ class FakeLLM:
                     reply = outer.script.pop(0) if outer.script else "done"
                 if callable(reply):
                     reply = reply(body)
+                if isinstance(reply, dict) and reply.get("status"):
+                    data = json.dumps({"error": {"code": reply["status"], "message": reply.get("error", ""),
+                                                 "type": "server_error"}}).encode()
+                    self.send_response(reply["status"])
+                    self.send_header("Content-Type", "application/json")
+                    self.send_header("Content-Length", str(len(data)))
+                    self.end_headers()
+                    self.wfile.write(data)
+                    return
                 if self.path.endswith("/v1/messages"):
                     return outer._anthropic(self, reply)
                 return outer._openai(self, reply)

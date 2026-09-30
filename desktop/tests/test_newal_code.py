@@ -418,6 +418,36 @@ class RepairArgsTest(unittest.TestCase):
         self.assertEqual(seen, [("open_app", {"name": "Settings"})])
 
 
+class SlipsTest(unittest.TestCase):
+    """A small model's slips that no longer end its turn (seen with a 2B model in the speed test)."""
+
+    UNREADABLE = {"status": 500, "error": "Failed to parse tool call arguments as JSON: [json.exception.parse_error"
+                                          ".101] parse error at line 1, column 14717: syntax error"}
+
+    def test_a_tool_call_the_server_could_not_read_is_asked_again_once(self):
+        fix = {"tools": [("edit", {"path": "calc.py", "old": "return a - b", "new": "return a + b"})]}
+        answer, events, _, llm, root = run_agent([self.UNREADABLE, fix, "Fixed add."], on_device=True)
+        self.assertEqual(answer, "Fixed add.")
+        self.assertIn("the model's tool call could not be read: asking again",
+                      [e.get("text") for e in events if e.get("type") == "status"])
+        with open(os.path.join(root, "calc.py")) as f:
+            self.assertIn("return a + b", f.read())
+        self.assertEqual(llm.requests[0]["messages"], llm.requests[1]["messages"])     # the same request again
+        answer, _, _, _, _ = run_agent([self.UNREADABLE, self.UNREADABLE, "never"], on_device=True)
+        self.assertTrue(answer.startswith("Model error: HTTP 500: Failed to parse tool call"), answer)    # once only
+        answer, _, _, llm, _ = run_agent([{"status": 500, "error": "out of memory"}, "never"], on_device=True)
+        self.assertTrue(answer.startswith("Model error"), answer)                  # other errors: as before
+        self.assertEqual(len(llm.requests), 1)
+
+    def test_an_empty_reply_is_asked_for_its_answer_once(self):
+        answer, _, _, llm, _ = run_agent(["<think>it is 8000 + 80</think>", "8080"], files={"README.md": "# x\n"},
+                                         text="Which port does it use? Answer with the number.")
+        self.assertEqual(answer, "8080")
+        self.assertEqual(llm.requests[1]["messages"][-1]["content"], "Reply to the user now, in one short sentence.")
+        answer, _, _, llm, _ = run_agent(["", ""], files={"README.md": "# x\n"}, text="Which port?")
+        self.assertEqual((answer, len(llm.requests)), ("", 2))                     # no loop
+
+
 class PruneTest(unittest.TestCase):
     def test_old_outputs_pruned_at_80_percent_then_a_summary(self):
         llm = FakeLLM(["The user fixed add; tests pass."])
@@ -537,6 +567,27 @@ class AnnounceTest(unittest.TestCase):
         from newal_code.agent import announces
         self.assertTrue(announces("سأنشئ الملف الآن."))
         self.assertFalse(announces("Created hello.py and ran it."))
+
+
+class LeftRunningTest(unittest.TestCase):
+    def test_a_command_that_leaves_a_program_running_returns(self):
+        # (a regression: `python server.py &` kept the command's output open, and the turn waited for it forever)
+        root = make_project({})
+        ag = agentmod.Agent(session.Session(root), client=fake_client(FakeLLM([])))
+        c = agentmod.ToolContext(ag)
+        started = time.time()
+        text, meta = tools.call(c, "bash", {"command": "sleep 37 & echo started"})
+        self.assertLess(time.time() - started, 15)
+        self.assertIn("started", text)
+        self.assertIn("start servers and other long-running programs with background=true", text)
+        if os.name != "nt" and shutil.which("pgrep"):
+            gone = time.time() + 5                  # (a killed process can take a moment to go on a busy machine)
+            while time.time() < gone and subprocess.run(["pgrep", "-f", "sleep 37"], capture_output=True).stdout:
+                time.sleep(0.2)
+            self.assertEqual(subprocess.run(["pgrep", "-f", "sleep 37"], capture_output=True).stdout, b"")
+        text, _ = tools.call(c, "bash", {"command": "sleep 38 > /dev/null 2>&1 & echo fine"})     # output elsewhere:
+        self.assertNotIn("background=true", text)                                              # nothing to stop
+        subprocess.run(["pkill", "-f", "sleep 38"], capture_output=True) if os.name != "nt" else None
 
 
 class ClipTest(unittest.TestCase):
@@ -1542,7 +1593,6 @@ class CITest(unittest.TestCase):
         self.assertIn("not a git repository", svc.command(not_git, "/ci")["reply"])
 
     def test_the_github_tool(self):
-        from newal_code import ci
         self.gh.reply("GET", r"/repos/musab/newal/actions/runs\?branch=main&per_page=15", {"workflow_runs": [
             {"id": 101, "name": "Tests", "status": "completed", "conclusion": "failure", "head_sha": self.broken,
              "created_at": "2026-09-30T10:00:00Z"}]})

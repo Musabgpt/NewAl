@@ -900,23 +900,39 @@ def run_command(ctx, command, timeout=120, on_line=None, sandbox=True, shell=Non
         proc.wait(5)
     except subprocess.TimeoutExpired:
         pass
+    t.join(3)
+    left = ""
+    if t.is_alive():
+        # The command ended, but a program it left running in the background (`python server.py &`) still holds its
+        # output open: reading on would wait for that program to end - for a server, forever (seen: a 2B model ran
+        # the benchmark's server to find its port, and the turn never ended). The command's process group (its job
+        # on Windows) is stopped; a server belongs in bash's background=true.
+        _kill(proc)
+        t.join(3)
+        left = ("\n[stopped what this command left running in the background, which kept its output open: start "
+                "servers and other long-running programs with background=true]" if not t.is_alive() else
+                "\n[a program this command started still holds its output open and keeps running: its later output "
+                "is not shown]")
     if getattr(proc, "_newal_job", None):
         import ctypes
         ctypes.WinDLL("kernel32").CloseHandle(ctypes.c_void_p(proc._newal_job))    # (closing ends nothing)
         proc._newal_job = None
-    t.join(2)
-    try:
-        proc.stdout.close()
-    except OSError:
-        pass
+    if not t.is_alive():
+        try:
+            proc.stdout.close()
+        except OSError:
+            pass
+    # (else it stays open: closing it would wait for the reader blocked in it, and the turn with it)
     out = "".join(chunks)
     code = proc.returncode if proc.returncode is not None else -1
     if timed_out:
         out += "\n[stopped after %d s: timeout]" % timeout
         code = 124
-    if cancelled:
+    elif cancelled:
         out += "\n[stopped: interrupted by the user]"
         code = 130
+    elif left:
+        out += left
     return code, out
 
 

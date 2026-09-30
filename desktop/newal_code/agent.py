@@ -18,6 +18,7 @@ from . import context as ctxmod
 from . import circuit, extensions, hooks, mcp, models, permissions, prompts, providers, repair, settings, tools
 from .session import Session
 
+UNREADABLE_CALL = re.compile(r"pars\w* tool call|tool call arguments|json\.exception\.parse_error", re.I)
 MAX_DEPTH = 2              # the main agent may start sub-agents, which may not start their own
 MAX_VERIFY = 2             # rounds of "the tests fail after your change"
 MAX_GOAL_ROUNDS = 6
@@ -291,7 +292,7 @@ class Agent:
         max_steps = circuit.step_budget(cfg, self.agent_def, local=client.on_device)
         self.breaker = circuit.Breaker()
         error = ""
-        acted = nudged = False
+        acted = nudged = asked_empty = retried_call = False
         try:
             while True:
                 if self.cancel.is_set():
@@ -300,7 +301,17 @@ class Agent:
                     answer = answer or "Stopped after %d steps without finishing." % max_steps
                     break
                 self._maybe_compact()
-                comp = self._call()
+                try:
+                    comp = self._call()
+                except providers.ProviderError as e:
+                    # llama.cpp could not read the tool call the model wrote (seen: a 2B model running away inside an
+                    # edit's arguments for 4096 tokens): the same request once more - its sampling differs
+                    if retried_call or not UNREADABLE_CALL.search(str(e)):
+                        raise
+                    retried_call = True
+                    self.step += 1
+                    self.emit({"type": "status", "text": "the model's tool call could not be read: asking again"})
+                    continue
                 self.step += 1
                 if not comp.tool_calls and comp.content and client.on_device:
                     # calls a model on this device wrote as text (<tool_call>, a json block, SEARCH/REPLACE...): run,
@@ -323,6 +334,11 @@ class Agent:
                 answer = shown(comp.content)
                 if not answer and comp.finish == "length":
                     s.add({"role": "user", "content": "Your reply was cut off. Continue."})
+                    continue
+                if not answer and not asked_empty:
+                    # a small model sometimes ends with nothing to show (or only its thinking): asked once
+                    asked_empty = True
+                    s.add({"role": "user", "content": "Reply to the user now, in one short sentence."})
                     continue
                 # A small model sometimes says what it will do and stops there ("I will create hello.py and run
                 # it."): nothing done yet in this turn and a reply that only announces is told, once, to do it.

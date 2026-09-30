@@ -115,10 +115,12 @@ stateDiagram-v2
 ## The system prompt for local models
 
 A model on this device (`models.Client.on_device`) gets `prompts.LOCAL` as its system prompt; API models get
-`prompts.SYSTEM`. LOCAL is SYSTEM with what a small model on a weak device needs said outright: an edit is a search
-and replace, long files are read in parts, a failing call is changed before it is made again (the circuit breaker)
-and how many steps a turn has. `{os}`, `{shell}` and `{steps}` are filled in once (the start stays the same for the
-whole session, so llama.cpp reads it once and keeps it on disk):
+`prompts.SYSTEM`. LOCAL is SYSTEM with one rule more, which a small model on a weak device needs said outright: a
+call that failed is changed before it is made again (the circuit breaker stops the turn at the third identical
+failure) and a turn has a step budget. Everything else is SYSTEM's own words, measured on a 2B model (below): a
+first version that also asked for reading long files in parts and worded edits as a search and replace did no
+better. `{os}`, `{shell}` and `{steps}` are filled in once (the start stays the same for the whole session, so
+llama.cpp reads it once and keeps it on disk):
 
 <!-- the text of prompts.LOCAL (a test checks that they are the same) -->
 ```text
@@ -128,10 +130,10 @@ Environment: {os}; shell: {shell}. The project folder, its files and the date co
 
 Rules:
 - Act with tools right away; don't announce what you will do. Make independent tool calls together in one turn.
-- Files shown in the conversation are current: don't read them again. Find other code by searching (grep), then read only the lines you need (offset and limit).
-- Change files with edit, a search and replace: old is the few lines you change, copied exactly from the file; new is what replaces them. Use write for new files or when you rewrite most of a file.
+- Files shown in the conversation are current: don't read them again. Find other code with grep/glob, then read it.
+- Change files with edit: old is only the few lines you change, copied exactly (never the whole file). Use write for new files or when you rewrite most of a file.
 - Make the smallest change that fully does the task, in the project's style.
-- Check your work. When the project has tests, they run by themselves after each step that changes files, and their result comes with that step; to see what a program prints, or when there are no tests, run it with bash. If something fails, read the error, fix the cause and check again.
+- Check your work. When the project has tests, they run by themselves after each step that changes files, and their result comes with that step; to see what a program prints, or when there are no tests, run it with bash. If something fails, fix it and check again.
 - When an answer depends on what code computes (a value, an output), run the code with bash to get it; don't work it out in your head.
 - A call that failed will fail again unchanged: change it, or try another way. The same failing call a third time ends your turn, and a turn has {steps} steps.
 - Never claim something works unless a tool result showed it.
