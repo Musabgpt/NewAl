@@ -13,6 +13,7 @@ models, so several models can share one task (a local model codes, an API model 
 import json
 import os
 import re
+import time
 
 from . import catalog, gguf, hardware, providers, runtime, settings
 from . import connect as onetap
@@ -66,27 +67,84 @@ def registry():
                 "about": m.get("about", ""), "context": m.get("context", 32768)}
         out[m["id"]] = spec
     known_files = {os.path.abspath(s["file"]) for s in out.values() if s.get("file")}
-    for d in settings.MODEL_DIRS:
-        if not os.path.isdir(d):
-            continue
-        for f in sorted(os.listdir(d)):
-            p = os.path.abspath(os.path.join(d, f))
-            if f.lower().endswith(".gguf") and p not in known_files and gguf.is_gguf(p) and not _helper_file(f):
-                s = local_spec(p)
-                out.setdefault(s["id"], dict(s, downloaded=True))
-                known_files.add(p)
+    found = [os.path.join(d, f) for d in settings.MODEL_DIRS if os.path.isdir(d) for f in sorted(os.listdir(d))]
+    for p in found + shared_ggufs():
+        p, f = os.path.abspath(p), os.path.basename(p)
+        if f.lower().endswith(".gguf") and p not in known_files and not _helper_file(f) and gguf.is_gguf(p):
+            s = local_spec(p)
+            out.setdefault(s["id"], dict(s, downloaded=True, fits=_fits_file(s)))
+            known_files.add(p)
     out.update(onetap.registered())                  # Gemini, DeepSeek... connected in one tap
-    for mid, spec in (settings.user().get("models") or {}).items():
+    users = settings.user().get("models") or {}
+    for mid, spec in users.items():
         s = dict(spec, id=mid)
         s.setdefault("name", mid)
         s.setdefault("provider", "openai" if s.get("base_url") else "local")
         if s["provider"] == "local" and s.get("file"):
             s = local_spec(s["file"], mid, **{k: v for k, v in s.items() if k not in ("file", "id")})
             s["downloaded"] = os.path.isfile(s["file"])
+            s.setdefault("fits", _fits_file(s))
         out[mid] = s
+    # A file the user added (picked in Models) is listed once, under the name it was added with.
+    added = {os.path.abspath(s["file"]) for mid, s in out.items() if mid in users and s.get("file")}
+    for mid in [m for m, s in out.items() if m not in users and not s.get("catalog") and s.get("file")
+                and os.path.abspath(s["file"]) in added]:
+        del out[mid]
     for s in _desktop_models():
         out.setdefault(s["id"], s)
     return out
+
+
+# The phone's shared storage (Download, Documents, a Telegram download...): GGUF files the user already has there are
+# models too, once NewAl Code Lite may read it (Android's "All files access"). Looked for a few folders deep, not in
+# photos, videos or music; the list is kept half a minute (the registry is read often, and that storage is slow).
+SHARED_SKIP = {"android", "dcim", "pictures", "movies", "music", "ringtones", "alarms", "notifications", "podcasts",
+               "audiobooks", "recordings", "screenshots", "lost.dir", "whatsapp"}
+_shared = {"at": 0.0, "root": None, "files": []}
+
+
+def shared_storage():
+    """The phone's shared storage (NewAl Code Lite passes it), when NewAl Code may read it."""
+    root = os.environ.get("NEWAL_SHARED_STORAGE") or ""
+    return root if root and os.path.isdir(root) and os.access(root, os.R_OK | os.X_OK) else ""
+
+
+def shared_ggufs(depth=3, limit=5000):
+    root = shared_storage()
+    if not root:
+        return []
+    if _shared["root"] == root and time.time() - _shared["at"] < 30:
+        return list(_shared["files"])
+    files, seen = [], 0
+    stack = [(root, 0, True), (os.path.join(root, "Android", "media"), -1, False)]
+    while stack and seen < limit:
+        d, level, top = stack.pop()
+        try:
+            entries = list(os.scandir(d))
+        except OSError:
+            continue
+        for e in entries:
+            seen += 1
+            if e.name.startswith("."):
+                continue
+            try:
+                if e.is_dir(follow_symlinks=False):
+                    if level < depth and not (top and e.name.lower() in SHARED_SKIP):
+                        stack.append((e.path, level + 1, False))
+                elif e.name.lower().endswith(".gguf") and not _helper_file(e.name):
+                    files.append(e.path)
+            except OSError:
+                pass
+    _shared.update(at=time.time(), root=root, files=sorted(files))
+    return list(files)
+
+
+def _fits_file(spec):
+    """Whether a GGUF file's weights fit the memory models may use here (with a little room for its cache)."""
+    try:
+        return int(spec.get("size") or 0) + 200 * 1024 ** 2 <= hardware.budget()
+    except Exception:  # noqa: BLE001 - unknown: let the user try
+        return True
 
 
 def _helper_file(name):

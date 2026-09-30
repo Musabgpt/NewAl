@@ -70,36 +70,34 @@ def call(action, timeout=90, **args):
         raise PhoneError("the phone app does not answer (%s): is NewAl Code Lite open?" % e)
 
 
-DOC = ("Use the Android phone this runs on. action is one of: "
-       "screen (what is on the screen now: numbered items; needs NewAl Code's accessibility service), "
-       "tap (item: a number from the last screen, or text: words on it, or x and y), "
-       "type (text into the focused field, or into item), swipe or scroll (direction: up, down, left, right), "
-       "key (name: back, home, recents, notifications, quick_settings, lock, screenshot), "
-       "open_app (name), open_url (url), apps (the installed apps), "
-       "alarm (hour, minute, label), timer (seconds, label), torch (on: true/false), volume (level 0-100), "
-       "battery, device, clipboard (text sets it; without text, reads it), notify (title, text), share (text), "
-       "sms (number, text: the message opens ready, the user sends it), call (number: the dialer opens), "
-       "settings (page: wifi, bluetooth, internet, display, sound, battery, apps, location, accessibility, "
-       "notifications, storage, date), intent (intent: {action, data, type, package, extras}), "
-       "wait (seconds: let the screen settle). After an action that changes the screen, call screen to see it.")
+# Short on purpose: a phone's small model reads this description at the start of every thread.
+DOC = ("Use the Android phone this runs on: open apps and links, alarms, settings, and what is on the screen (screen "
+       "lists it as numbered items; it needs NewAl Code's accessibility service). After an action that changes the "
+       "screen, call screen to see it.")
 
 PARAMS = {
-    "action": {"type": "string", "enum": list(ACTIONS), "description": "what to do"},
-    "item": {"type": "integer", "description": "tap/type: an item number from the last screen"},
-    "text": {"type": "string", "description": "tap: words on the screen; type, clipboard, notify, share, sms: the text"},
-    "x": {"type": "integer", "description": "tap: x in pixels"},
-    "y": {"type": "integer", "description": "tap: y in pixels"},
-    "direction": {"type": "string", "description": "swipe/scroll: up, down, left or right"},
-    "name": {"type": "string", "description": "open_app: the app's name or package; key: which key"},
-    "url": {"type": "string", "description": "open_url: the address"},
-    "hour": {"type": "integer", "description": "alarm: 0-23"},
-    "minute": {"type": "integer", "description": "alarm: 0-59"},
-    "seconds": {"type": "integer", "description": "timer, wait: how long"},
-    "label": {"type": "string", "description": "alarm, timer: its label"},
-    "on": {"type": "boolean", "description": "torch: on or off"},
-    "level": {"type": "integer", "description": "volume: 0-100"},
-    "number": {"type": "string", "description": "sms, call: the phone number"},
-    "title": {"type": "string", "description": "notify: the title"},
-    "page": {"type": "string", "description": "settings: which page"},
-    "intent": {"type": "object", "description": "intent: {action, data, type, package, extras}"},
+    "action": {"type": "string", "enum": list(ACTIONS), "description": (
+        "tap (item from the last screen, text on it, or x,y); type (text); swipe, scroll (direction); key (name: back, "
+        "home, recents, notifications, quick_settings, lock, screenshot); open_app (name); open_url (url); alarm "
+        "(hour, minute, label); timer (seconds); torch (on); volume (level 0-100); clipboard (text sets it); notify "
+        "(title, text); share (text); sms, call (number, text: the user sends); settings (page: wifi, bluetooth, "
+        "internet, display, sound, battery, apps, location, accessibility, notifications, storage, date); intent "
+        "({action, data, type, package, extras}); wait (seconds)")},
+    "item": {"type": "integer"},
+    "text": {"type": "string"},
+    "x": {"type": "integer"},
+    "y": {"type": "integer"},
+    "direction": {"type": "string", "enum": ["up", "down", "left", "right"]},
+    "name": {"type": "string"},
+    "url": {"type": "string"},
+    "hour": {"type": "integer"},
+    "minute": {"type": "integer"},
+    "seconds": {"type": "integer"},
+    "label": {"type": "string"},
+    "on": {"type": "boolean"},
+    "level": {"type": "integer"},
+    "number": {"type": "string"},
+    "title": {"type": "string"},
+    "page": {"type": "string"},
+    "intent": {"type": "object"},
 }

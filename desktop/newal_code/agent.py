@@ -118,6 +118,9 @@ class Agent:
             names = [t for t in self.agent_def["tools"] if t in tools.REGISTRY]
         else:
             names = tools.default_set(spec, self.session.root)
+            if self._tiny():
+                # A phone's small model: the few tools it uses well, and a shorter start to read for every thread.
+                names = [n for n in names if n in tools.SMALL_SET]
         if self.skills and "skill" not in names and not (self.agent_def and self.agent_def.get("tools")):
             names.append("skill")
         if self.depth >= MAX_DEPTH and "task" in names:
@@ -144,7 +147,8 @@ class Agent:
             if self.agent_def:
                 self.session.system = prompts.subagent(self.shell, self.agent_def.get("body", ""))
             else:
-                self.session.system = prompts.system(self.shell)
+                from . import phone
+                self.session.system = prompts.system(self.shell, phone=phone.available())
         return self.session.system
 
     def request_messages(self):
@@ -269,6 +273,8 @@ class Agent:
             content = [{"type": "text", "text": content}] + [{"type": "image_url", "image_url": {"url": u}}
                                                                for u in images]
         s.add({"role": "user", "content": content})
+        if s.turn == 1 and self.depth == 0:
+            s.save_meta()                # the thread is listed from its first message on
         if prefetch:
             self._prefetched(prefetch)
         ctx = self.last_ctx = ToolContext(self)

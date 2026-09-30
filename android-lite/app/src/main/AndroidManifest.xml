@@ -1,5 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
-<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
 
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
@@ -8,6 +9,17 @@
     <!-- The agent's phone tool: alarms and timers; NewAl Code in Termux (the Termux link). -->
     <uses-permission android:name="com.android.alarm.permission.SET_ALARM" />
     <uses-permission android:name="com.termux.permission.RUN_COMMAND" />
+    <!-- GGUF files the user already has (Download, Documents...): Android 11 and up ask for "All files access",
+         older Android for the storage permission. Only when the user turns it on from the Models page. -->
+    <uses-permission
+        android:name="android.permission.MANAGE_EXTERNAL_STORAGE"
+        tools:ignore="ScopedStorage" />
+    <uses-permission
+        android:name="android.permission.READ_EXTERNAL_STORAGE"
+        android:maxSdkVersion="32" />
+    <uses-permission
+        android:name="android.permission.WRITE_EXTERNAL_STORAGE"
+        android:maxSdkVersion="29" />
 
     <queries>
         <!-- open_app and apps: the apps a user can open; Termux, when it is installed. -->
@@ -24,7 +36,8 @@
         android:roundIcon="@drawable/ic_launcher"
         android:usesCleartextTraffic="true"
         android:allowBackup="false"
-        android:theme="@android:style/Theme.DeviceDefault.DayNight">
+        android:requestLegacyExternalStorage="true"
+        android:theme="@style/NewAl">
 
         <activity
             android:name=".MainActivity"

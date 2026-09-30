@@ -305,6 +305,7 @@ class Service:
                                  "openrouter/..., anthropic/..." % (s.model, ", ".join(names))}
             models.resolve(args)                     # raises when unknown
             s.model = args
+            s.tool_names = []
             a.client = None
             a._schemas = None
             s.save_meta()
@@ -490,10 +491,12 @@ class Service:
             out.append({"id": mid, "name": spec.get("name", mid), "provider": spec.get("provider"),
                         "downloaded": bool(spec.get("downloaded")) if spec.get("provider") == "local" else True,
                         "catalog": bool(spec.get("catalog")), "size": spec.get("size", 0),
-                        "fits": spec.get("fits", True), "about": spec.get("about", ""), "mtp": spec.get("mtp", False)})
+                        "fits": spec.get("fits", True), "about": spec.get("about", ""), "mtp": spec.get("mtp", False),
+                        "file": spec.get("file", "") if spec.get("provider") == "local" else ""})
         rec = catalog.recommended()
         return {"models": out, "recommended": rec["id"], "hardware": hardware.summary(),
-                "downloads": catalog.progress(), "discovered": models.discover()}
+                "downloads": catalog.progress(), "discovered": models.discover(),
+                "storage": models.shared_storage(), "models_dir": settings.MODEL_DIRS[0] if settings.MODEL_DIRS else ""}
 
     def download(self, mid):
         def run():

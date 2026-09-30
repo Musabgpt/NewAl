@@ -69,9 +69,11 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # The 3 GB phone also checks the phone features: git, screen control, Termux (see phone_test.py).
-          - { ram: 3072, label: "3 GB phone", extra: "--features" }
-          - { ram: 2048, label: "2 GB phone", extra: "" }
+          # The 3 GB phone also checks the phone features: git, screen control, Termux, a GGUF from the phone's
+          # storage (see phone_test.py). Android 15 draws apps under the system bars: its check is the layout.
+          - { ram: 3072, label: "3 GB phone", extra: "--features", api: 30 }
+          - { ram: 2048, label: "2 GB phone", extra: "", api: 30 }
+          - { ram: 4096, label: "Android 15 layout", extra: "--layout-only", api: 35 }
     name: ${{ matrix.label }}
     steps:
       - uses: actions/checkout@v4
@@ -88,16 +90,18 @@ jobs:
 
       - name: NewAl Code Lite on a ${{ matrix.label }}
         uses: reactivecircus/android-emulator-runner@v2
+        timeout-minutes: 80
         env:
           GH_TOKEN: ${{ github.token }}
+          ANDROID_EMULATOR_WAIT_TIME_BEFORE_KILL: 10
         with:
-          api-level: 30
+          api-level: ${{ matrix.api }}
           arch: x86_64
           target: google_apis
           ram-size: ${{ matrix.ram }}M
           disk-size: 6000M
           cores: 4
-          emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none
+          emulator-options: -no-window -no-snapshot-save -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none
           disable-animations: true
           script: python3 android-lite/tests/phone_test.py NewAlCodeLite.apk "${{ matrix.label }}" ${{ matrix.extra }}
 

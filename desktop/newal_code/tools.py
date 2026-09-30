@@ -1007,6 +1007,10 @@ _phone_tool()
 READ_ONLY = {"read", "glob", "grep", "todo", "job", "skill", "task"}
 
 
+# What a small local model (a phone's) is offered: it uses these well, and bash does what glob, grep or a job would.
+SMALL_SET = ("read", "edit", "apply_patch", "write", "bash", "notebook_edit", "phone")
+
+
 def default_set(model_profile=None, root=None):
     """The tools offered to a model. apply_patch replaces edit for models trained on Codex's format; notebook_edit
     comes with projects that have notebooks (a tool nobody uses would only cost every request its description)."""

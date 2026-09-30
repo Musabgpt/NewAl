@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- No action bar: NewAl Code's page has its own top bar. MainActivity keeps the page between the status bar and
+         the navigation bar (or the keyboard), which Android 15 draws apps under. -->
+    <style name="NewAl" parent="@android:style/Theme.DeviceDefault.Light.NoActionBar">
+        <item name="android:windowBackground">#ffffff</item>
+    </style>
+</resources>

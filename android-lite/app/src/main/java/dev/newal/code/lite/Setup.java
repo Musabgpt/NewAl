@@ -137,6 +137,8 @@ final class Setup {
         env.put("NEWAL_PHONE_URL", "http://127.0.0.1:" + PhoneServer.PORT);
         env.put("NEWAL_PHONE_KEY", key());
         env.put("NEWAL_TERMUX_PORT", String.valueOf(Termux.PORT));
+        // The phone's shared storage: its GGUF files are models once the user lets the app read it.
+        env.put("NEWAL_SHARED_STORAGE", android.os.Environment.getExternalStorageDirectory().getPath());
         String path = System.getenv("PATH");
         env.put("PATH", bin.getPath() + ":" + (path != null ? path : "/system/bin"));
         home.mkdirs();

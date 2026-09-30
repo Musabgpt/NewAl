@@ -9,10 +9,12 @@ reaches it at 10.0.2.2), so the checks do not depend on what a small model does:
   phone    screen control through the accessibility service: device, open Settings, read the screen, back
   termux   Termux installed, set up with the app's one command, NewAl Code running in it, a task done there with the
            phone's own model (the app's /v1)
+  storage  a GGUF file in the phone's Download folder: a model once the app may read the phone's files, and it runs
 
     python3 android-lite/tests/phone_test.py app.apk [label] [--features]   (adb on PATH, one emulator attached)
 Prints JSON summaries; exits non-zero when something was not done."""
 
+import atexit
 import json
 import os
 import re
@@ -163,8 +165,11 @@ def git_server():
     for cmd in (["git", "init", "-q", "-b", "main"], ["git", "add", "-A"], ["git", "commit", "-q", "-m", "start"]):
         subprocess.run(cmd, cwd=src, env=env, check=True)
     subprocess.run(["git", "clone", "-q", "--bare", src, os.path.join(top, "shared.git")], check=True)
+    # Its own session and no share in this script's output: a daemon left behind must not keep the CI step open.
     d = subprocess.Popen(["git", "daemon", "--export-all", "--enable=receive-pack", "--reuseaddr",
-                          "--base-path=" + top, "--port=9418", top])
+                          "--base-path=" + top, "--port=9418", top], stdin=subprocess.DEVNULL,
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+    atexit.register(lambda: d.poll() is None and d.kill())
     time.sleep(1)
     return top, d
 
@@ -196,10 +201,14 @@ def features(state):
     port = llm.url.rsplit(":", 1)[1].split("/")[0]
     api("/api/models/add", {"id": "scripted", "provider": "openai", "base_url": "http://10.0.2.2:%s/v1" % port,
                             "model": "fake", "name": "scripted"})
-    root = home + "/projects/features"
-    sid = api("/api/sessions", {"root": root, "model": "scripted", "mode": "full-auto", "warm": False})["id"]
-    d, seconds, _ = run_turn(sid, "go", limit=900)
-    llm.close()
+    root = api("/api/mkdir", {"parent": home + "/projects", "name": "features"})["path"]
+    check("a new project folder", root.endswith("/projects/features"), root)
+    try:
+        sid = api("/api/sessions", {"root": root, "model": "scripted", "mode": "full-auto", "warm": False})["id"]
+        d, seconds, _ = run_turn(sid, "go", limit=900)
+    finally:
+        llm.close()
+        daemon.kill()
     bash = [str((e.get("meta") or {}).get("output", "")) + e.get("text", "") for e in tool_ends(d, "bash")]
     phone = [e.get("text", "") for e in tool_ends(d, "phone")]
     print("tools: %s" % json.dumps([(e.get("name"), e.get("ok"), e.get("text", "")[:300]) for e in tool_ends(d)],
@@ -216,7 +225,6 @@ def features(state):
     check("phone: open Settings", len(phone) > 1 and "opened Settings" in phone[1], phone[1:2])
     check("phone: read the screen", len(phone) > 3 and "com.android.settings" in phone[3], phone[3:4])
     check("phone: back", len(phone) > 4 and "pressed back" in phone[4], phone[4:5])
-    daemon.terminate()
     shutil.rmtree(top, ignore_errors=True)
     adb("shell", "am", "start", "-n", PKG + "/.MainActivity", check=False)
 
@@ -276,6 +284,67 @@ def termux(state, model):
           [json.dumps(e)[:300] for e in (d.get("events") or [])[-12:]])
 
 
+def layout():
+    """The page sits between the status bar and the navigation bar, the way the user sees it: Android 15 draws apps
+    under those bars (the page's top bar, with the threads and settings buttons, was hidden under them)."""
+    time.sleep(8)                              # the page loads once the server answers
+    bounds, xml = None, ""
+    for _ in range(6):
+        adb("shell", "uiautomator", "dump", "/sdcard/ui.xml", check=False, timeout=90)
+        xml = adb("shell", "cat", "/sdcard/ui.xml", check=False)
+        m = re.search(r'class="android\.webkit\.WebView"[^>]*?bounds="\[(\d+),(\d+)\]\[(\d+),(\d+)\]"', xml)
+        if m:
+            bounds = [int(x) for x in m.groups()]
+            break
+        time.sleep(5)
+    size = re.findall(r"(\d+)x(\d+)", adb("shell", "wm", "size"))
+    width, height = (int(size[-1][0]), int(size[-1][1])) if size else (0, 0)
+    sdk = adb("shell", "getprop", "ro.build.version.sdk").strip()
+    print("layout: Android API %s, screen %dx%d, page %s" % (sdk, width, height, bounds), flush=True)
+    check("layout: the page is below the status bar and above the navigation bar",
+          bool(bounds) and bounds[1] > 0 and 0 < bounds[3] < height, (bounds, xml[-600:] if not bounds else ""))
+    page = xml[xml.find('class="android.webkit.WebView"'):] if bounds else ""      # the page's own items
+    texts = re.findall(r'text="([^"]+)"[^>]*?bounds="\[\d+,(-?\d+)\]', page)
+    top = [(t, int(y)) for t, y in texts if int(y) < bounds[1]]
+    check("layout: nothing of the page under the status bar", not top, top[:5])
+
+
+def storage(model):
+    """A GGUF file the user already has in the phone's Download folder: listed in Models once the app may read the
+    phone's files (All files access, given here with appops as the user gives it in Settings), and it runs."""
+    listing = api("/api/models")
+    mine = next(m for m in listing["models"] if m["id"] == model)
+    src = mine.get("file") or ""
+    check("storage: the downloaded model's file is known", src.endswith(".gguf"), src)
+    adb("shell", "mkdir", "-p", "/sdcard/Download")
+    adb("shell", "cp", src, "/sdcard/Download/My-Phone-Model.gguf", timeout=600)
+    adb("shell", "appops", "set", "--uid", PKG, "MANAGE_EXTERNAL_STORAGE", "allow")
+    found = None
+    for _ in range(30):                        # (the app may be restarted by Android when the access changes)
+        try:
+            found = next((m for m in api("/api/models", timeout=20)["models"]
+                          if (m.get("file") or "").endswith("/Download/My-Phone-Model.gguf")), None)
+        except Exception:  # noqa: BLE001 - not up again yet
+            found = None
+        if found:
+            break
+        time.sleep(3)
+    check("storage: a GGUF in Download is a model", bool(found), found)
+    if not found:
+        return
+    b = api("/api/browse?files=gguf&path=" + urllib.request.quote("/storage/emulated/0/Download"))
+    check("storage: the file picker shows it", any(f["name"] == "My-Phone-Model.gguf" for f in b.get("files") or []),
+          b.get("files"))
+    root = api("/api/mkdir", {"parent": api("/api/state")["home"] + "/projects", "name": "storage"})["path"]
+    sid = api("/api/sessions", {"root": root, "model": found["id"], "mode": "read-only", "warm": False})["id"]
+    d, seconds, _ = run_turn(sid, "Reply with one word: ready", limit=600)
+    end = next((e for e in reversed(d.get("events") or []) if e.get("type") == "turn_end"), {})
+    print(json.dumps({"storage_model": found["id"], "seconds": round(seconds), "answer": end.get("answer"),
+                      "error": end.get("error")}, indent=1), flush=True)
+    check("storage: it runs from the phone's storage", bool(end.get("answer")) and not end.get("error"), end)
+    adb("shell", "rm", "-f", "/sdcard/Download/My-Phone-Model.gguf", check=False)
+
+
 def main():
     global KEY
     args = [a for a in sys.argv[1:] if not a.startswith("--")]
@@ -302,9 +371,14 @@ def main():
         check("the server refuses a request without the key", False)
     except urllib.error.HTTPError as e:
         check("the server refuses a request without the key", e.code == 401)
+    layout()
+    if "--layout-only" in sys.argv:
+        if FAILED:
+            raise SystemExit("not done: " + ", ".join(FAILED))
+        return
     state, model = basic(label)
     if "--features" in sys.argv:
-        for part in (lambda: features(state), lambda: termux(state, model)):
+        for part in (lambda: features(state), lambda: termux(state, model), lambda: storage(model)):
             try:
                 part()
             except Exception as e:  # noqa: BLE001 - one part failing does not hide the others

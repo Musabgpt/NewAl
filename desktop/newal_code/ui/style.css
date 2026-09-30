@@ -369,6 +369,8 @@ pre.out { margin: 0; background: var(--bg-code); border: 1px solid var(--border)
 /* phones (NewAl Code Lite) */
 @media (max-width: 700px) {
   #sidebar { width: min(86vw, 320px); }
+  .side-item kbd { display: none; }
+  .form-row label { width: 100%; }
   .composer-bar { flex-wrap: wrap; }
   .composer-bar .left { flex-wrap: wrap; }
   .composer-foot { flex-wrap: wrap; }

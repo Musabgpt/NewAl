@@ -4,7 +4,11 @@ import android.app.Activity;
 import android.content.ClipData;
 import android.content.ClipboardManager;
 import android.content.Intent;
+import android.content.pm.PackageManager;
+import android.graphics.Color;
 import android.net.Uri;
+import android.os.Build;
+import android.os.Environment;
 import android.provider.Settings;
 import android.webkit.JavascriptInterface;
 import android.webkit.WebView;
@@ -123,6 +127,77 @@ final class WebBridge {
         } catch (Exception e) {
             return String.valueOf(e.getMessage());
         }
+    }
+
+    /** The page's colour (its theme): the status and navigation bars take it. */
+    @JavascriptInterface
+    public void theme(String color, boolean dark) {
+        try {
+            int c = Color.parseColor(color.trim());
+            act.runOnUiThread(() -> ((MainActivity) act).bars(c, dark));
+        } catch (Exception ignored) {
+        }
+    }
+
+    /** {"root": the phone's shared storage, "granted": NewAl Code may read its files (the GGUF files there)}. */
+    @JavascriptInterface
+    public String storage() {
+        JSONObject o = new JSONObject();
+        try {
+            o.put("root", Environment.getExternalStorageDirectory().getPath());
+            o.put("granted", storageGranted());
+            o.put("all_files", Build.VERSION.SDK_INT >= 30);
+        } catch (Exception ignored) {
+        }
+        return o.toString();
+    }
+
+    private boolean storageGranted() {
+        if (Build.VERSION.SDK_INT >= 30) {
+            return Environment.isExternalStorageManager();
+        }
+        return act.checkSelfPermission("android.permission.READ_EXTERNAL_STORAGE") == PackageManager.PERMISSION_GRANTED;
+    }
+
+    /** Asks for the phone's files: Android's "All files access" page for this app (11 and up), else the permission. */
+    @JavascriptInterface
+    public void allowStorage() {
+        act.runOnUiThread(() -> {
+            if (Build.VERSION.SDK_INT >= 30) {
+                try {
+                    act.startActivity(new Intent(Settings.ACTION_MANAGE_APP_ALL_FILES_ACCESS_PERMISSION,
+                            Uri.parse("package:" + act.getPackageName())));
+                } catch (Exception e) {
+                    try {
+                        act.startActivity(new Intent(Settings.ACTION_MANAGE_ALL_FILES_ACCESS_PERMISSION));
+                    } catch (Exception e2) {
+                        Toast.makeText(act, "This phone does not let apps read all files: use \"Copy a GGUF into the "
+                                + "app\" instead", Toast.LENGTH_LONG).show();
+                        return;
+                    }
+                }
+                Toast.makeText(act, "Turn on \"Allow access to manage all files\", then come back",
+                        Toast.LENGTH_LONG).show();
+            } else {
+                act.requestPermissions(new String[] {"android.permission.READ_EXTERNAL_STORAGE",
+                        "android.permission.WRITE_EXTERNAL_STORAGE"}, 3);
+            }
+        });
+    }
+
+    /** Android's file picker for a GGUF file, which is then copied into NewAl Code's models folder (ModelImport). */
+    @JavascriptInterface
+    public void importModel() {
+        act.runOnUiThread(() -> {
+            Intent i = new Intent(Intent.ACTION_OPEN_DOCUMENT);
+            i.addCategory(Intent.CATEGORY_OPENABLE);
+            i.setType("*/*");
+            try {
+                act.startActivityForResult(i, MainActivity.PICK_MODEL);
+            } catch (Exception e) {
+                Toast.makeText(act, "No file picker on this phone", Toast.LENGTH_LONG).show();
+            }
+        });
     }
 
     /** Shows NewAl Code in Termux (where = "termux") or in the app (anything else) in this window. */

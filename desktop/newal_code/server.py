@@ -179,6 +179,7 @@ class Handler(BaseHTTPRequestHandler):
                                    "settings": {k: cfg.get(k) for k in ("model", "mode", "reasoning", "verify", "theme",
                                                                         "auto_context", "speculative", "web", "roles")},
                                    "projects": svc.projects(), "home": os.path.expanduser("~"),
+                                   "storage": os.environ.get("NEWAL_SHARED_STORAGE") or "",
                                    "busy": [sid for sid in list(svc.threads) if svc.busy(sid)],
                                    "approvals": svc.pending()})
             if path == "/api/sessions":
@@ -244,7 +245,7 @@ class Handler(BaseHTTPRequestHandler):
                     rec = dict(cloud.load(m.group(1)), status_error=str(e))
                 return self._json({"task": rec, "changes": cloud.changes(m.group(1)) if rec.get("fetched") else []})
             if path == "/api/browse":
-                return self._json(_browse(q.get("path") or os.path.expanduser("~")))
+                return self._json(_browse(q.get("path") or os.path.expanduser("~"), q.get("files") or ""))
             if path == "/api/files":
                 return self._json(_files(q.get("root") or "", q.get("q") or ""))
             if path == "/api/file":
@@ -285,6 +286,7 @@ class Handler(BaseHTTPRequestHandler):
                                 v = settings.normal_mode(v)
                             if k == "model":
                                 models.resolve(v)
+                                s.tool_names = []        # the new model's own set (a phone's small one has fewer)
                                 a = svc.agents.get(sid)
                                 if a:
                                     a.client = None
@@ -330,6 +332,11 @@ class Handler(BaseHTTPRequestHandler):
             if path == "/api/models/download":
                 svc.download(b.get("id"))
                 return self._json({"ok": True})
+            if path == "/api/mkdir":
+                try:
+                    return self._json({"path": _mkdir(b.get("parent") or "", b.get("name") or "")})
+                except (ValueError, OSError) as e:
+                    return self._json({"error": str(e)}, 400)
             if path == "/api/models/add":
                 mid = b.pop("id", "") or b.get("model", "")
                 if not mid:
@@ -540,19 +547,41 @@ def _open_in(root, app):
         return {"error": str(e)}
 
 
-def _browse(path):
+def _browse(path, files=""):
+    """A folder's subfolders (and, with files="gguf", its GGUF files: a model to add from a phone's storage)."""
     path = os.path.abspath(os.path.expanduser(path))
     if not os.path.isdir(path):
         path = os.path.dirname(path)
-    dirs = []
+    dirs, found = [], []
     try:
         for n in sorted(os.listdir(path), key=str.lower):
-            if not n.startswith(".") and os.path.isdir(os.path.join(path, n)):
+            full = os.path.join(path, n)
+            if n.startswith("."):
+                continue
+            if os.path.isdir(full):
                 dirs.append(n)
+            elif files == "gguf" and n.lower().endswith(".gguf"):
+                try:
+                    found.append({"name": n, "size": os.path.getsize(full)})
+                except OSError:
+                    pass
     except OSError:
         pass
-    return {"path": path, "parent": os.path.dirname(path), "dirs": dirs[:500],
-            "is_git": bool(util.git_root(path))}
+    out = {"path": path, "parent": os.path.dirname(path), "dirs": dirs[:500], "is_git": bool(util.git_root(path))}
+    if files:
+        out["files"] = found[:500]
+    return out
+
+
+def _mkdir(parent, name):
+    """A new folder (a project) in parent: one plain name, made if missing."""
+    name = (name or "").strip()
+    if not name or name in (".", "..") or "/" in name or "\\" in name or "\0" in name:
+        raise ValueError("a folder name, without / or \\")
+    parent = os.path.abspath(os.path.expanduser(parent or os.path.join(os.path.expanduser("~"), "projects")))
+    path = os.path.join(parent, name)
+    os.makedirs(path, exist_ok=True)
+    return path
 
 
 def _files(root, query):

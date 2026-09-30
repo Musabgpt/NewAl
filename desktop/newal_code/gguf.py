@@ -75,10 +75,24 @@ def metadata(path, keep_template=False):
     return out
 
 
+_infos = {}
+
+
 def info(path):
     """What planning needs: {arch, name, context, layers, attention_layers, kv_bytes_per_token (f16 cache),
     draft_kv_bytes_per_token (MTP heads), state_bytes (fixed-size state of one conversation), experts,
-    active_experts, nextn, size}."""
+    active_experts, nextn, size}. Kept while the file is unchanged: reading a header means skipping the whole
+    vocabulary, slow on a phone's shared storage."""
+    st = os.stat(path)
+    key = (os.path.abspath(path), st.st_size, st.st_mtime)
+    if key not in _infos:
+        if len(_infos) > 256:
+            _infos.clear()
+        _infos[key] = _info(path)
+    return dict(_infos[key])
+
+
+def _info(path):
     md = metadata(path)
     arch = md.get("general.architecture", "")
 

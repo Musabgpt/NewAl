@@ -60,8 +60,14 @@ def environment(root, shell):
             "date": datetime.date.today().isoformat()}
 
 
-def system(shell, instructions="", skills_index="", extra=""):
+PHONE = ("This runs on the user's Android phone. To act on the phone itself (open an app, a link or a settings page, "
+         "set an alarm, read or tap what is on the screen...), use the phone tool; web_fetch only reads a web page.")
+
+
+def system(shell, instructions="", skills_index="", extra="", phone=False):
     text = SYSTEM.format(**environment("", shell))
+    if phone:
+        text = text.replace("on their computer", "on their phone") + "\n\n" + PHONE
     if instructions:
         text += "\n\nProject instructions (follow them):\n" + instructions
     if skills_index:

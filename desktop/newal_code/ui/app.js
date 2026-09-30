@@ -6,6 +6,8 @@
   const ICONS = {
     edit: '<path d="M4 20h4l10.5-10.5a2.1 2.1 0 0 0-3-3L5 17v3z"/><path d="M13.5 6.5l3 3"/>',
     cube: '<path d="M12 3l8 4.5v9L12 21l-8-4.5v-9z"/><path d="M12 12l8-4.5M12 12v9M12 12L4 7.5"/>',
+    git: '<circle cx="6" cy="6" r="2"/><circle cx="6" cy="18" r="2"/><circle cx="18" cy="8" r="2"/><path d="M6 8v8M18 10c0 4-6 3-10.5 6.5"/>',
+    phone: '<rect x="7" y="2.5" width="10" height="19" rx="2"/><path d="M11 18.5h2"/>',
     spark: '<path d="M12 3v4M12 17v4M3 12h4M17 12h4M6 6l2.5 2.5M15.5 15.5L18 18M18 6l-2.5 2.5M8.5 15.5L6 18"/>',
     gear: '<circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.8l.1.1a2 2 0 1 1-2.8 2.8l-.1-.1a1.7 1.7 0 0 0-1.8-.3 1.7 1.7 0 0 0-1 1.5V21a2 2 0 1 1-4 0v-.1a1.7 1.7 0 0 0-1.1-1.5 1.7 1.7 0 0 0-1.8.3l-.1.1a2 2 0 1 1-2.8-2.8l.1-.1a1.7 1.7 0 0 0 .3-1.8 1.7 1.7 0 0 0-1.5-1H3a2 2 0 1 1 0-4h.1a1.7 1.7 0 0 0 1.5-1.1 1.7 1.7 0 0 0-.3-1.8l-.1-.1a2 2 0 1 1 2.8-2.8l.1.1a1.7 1.7 0 0 0 1.8.3H9a1.7 1.7 0 0 0 1-1.5V3a2 2 0 1 1 4 0v.1a1.7 1.7 0 0 0 1 1.5 1.7 1.7 0 0 0 1.8-.3l.1-.1a2 2 0 1 1 2.8 2.8l-.1.1a1.7 1.7 0 0 0-.3 1.8V9a1.7 1.7 0 0 0 1.5 1H21a2 2 0 1 1 0 4h-.1a1.7 1.7 0 0 0-1.5 1z"/>',
     "folder-plus": '<path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/><path d="M12 11v5M9.5 13.5h5"/>',
@@ -140,7 +142,18 @@
   function applyTheme(t) {
     if (t === "dark" || t === "light") document.documentElement.dataset.theme = t;
     else delete document.documentElement.dataset.theme;
+    phoneBars();
   }
+  function phoneBars() {
+    // NewAl Code Lite paints the phone's status and navigation bars in the page's colour, with icons that show on it.
+    try {
+      if (!(window.NewAlPhone && NewAlPhone.theme)) return;
+      const root = document.documentElement;
+      const dark = root.dataset.theme === "dark" || (root.dataset.theme !== "light" && matchMedia("(prefers-color-scheme: dark)").matches);
+      NewAlPhone.theme(getComputedStyle(root).getPropertyValue("--bg").trim() || (dark ? "#1e1e20" : "#ffffff"), dark);
+    } catch (_) { /* an older app */ }
+  }
+  try { matchMedia("(prefers-color-scheme: dark)").addEventListener("change", phoneBars); } catch (_) { /* old browser */ }
 
   // ------------------------------------------------------------------ events
   function connectEvents() {
@@ -155,7 +168,7 @@
 
   function onEvent(ev) {
     const sid = ev.session;
-    if (ev.type === "turn_start" && !ev.sub) S.busy.add(sid);
+    if (ev.type === "turn_start" && !ev.sub) { S.busy.add(sid); if (!S.sessions.some(x => x.id === sid)) refreshSessions(); }
     if (ev.type === "turn_end" && !ev.sub) { S.busy.delete(sid); refreshSessions(); }
     if (ev.type === "session_created") refreshSessions();
     if (ev.type === "download") return onDownload(ev);
@@ -250,6 +263,7 @@
   async function newThread(root) {
     root = root || S.root;
     if (!root) return pickFolder(r => newThread(r));
+    hideSidebarOnPhone();
     S.current = null;
     localStorage.removeItem("nc.session");
     setRoot(root);
@@ -257,23 +271,37 @@
     $("#input").focus();
   }
 
+  let creating = null;
   async function ensureSession() {
     if (S.current) return S.current;
     if (!S.root) { await new Promise(res => pickFolder(r => { setRoot(r); res(); })); }
-    const d = await api("/api/sessions", { root: S.root, model: pref("model"), mode: pref("mode"), worktree: pref("env") === "worktree" });
-    S.current = d.id;
-    S.meta = d.meta;
-    localStorage.setItem("nc.session", d.id);
-    if (pref("reasoning") && pref("reasoning") !== "auto")
-      await api("/api/sessions/" + d.id + "/settings", { reasoning: pref("reasoning") }).catch(() => {});
-    refreshSessions();
-    return d.id;
+    if (S.current) return S.current;
+    if (creating) return creating;             // (already being made: while the first message was typed)
+    creating = (async () => {
+      const d = await api("/api/sessions", { root: S.root, model: pref("model"), mode: pref("mode"), worktree: pref("env") === "worktree" });
+      S.current = d.id;
+      S.meta = d.meta;
+      localStorage.setItem("nc.session", d.id);
+      if (pref("reasoning") && pref("reasoning") !== "auto")
+        await api("/api/sessions/" + d.id + "/settings", { reasoning: pref("reasoning") }).catch(() => {});
+      refreshSessions();
+      return d.id;
+    })();
+    try { return await creating; } finally { creating = null; }
+  }
+  function prewarm() {
+    // The thread opens while its first message is typed: a local model loads and reads its fixed start meanwhile, so
+    // the message is answered sooner (on a phone, most of the wait).
+    if (S.current || creating || !S.root || pref("env") === "cloud" || pref("env") === "worktree") return;
+    if (!$("#input").value.trim() || $("#input").value.trim().startsWith("/")) return;
+    ensureSession().catch(() => {});
   }
   function pref(k) { return localStorage.getItem("nc.pref." + k) || (S.state && S.state.settings[k]) || ""; }
 
   async function openSession(id) {
     let d;
     try { d = await api("/api/sessions/" + id); } catch (e) { toast(e.message); return; }
+    hideSidebarOnPhone();
     S.current = id;
     S.meta = d.meta;
     localStorage.setItem("nc.session", id);
@@ -1064,25 +1092,47 @@
   }
   function closeModal() { $("#modal").hidden = true; }
 
-  async function pickFolder(done) {
-    let cur = S.root || (S.state && S.state.home) || "/";
+  async function pickFolder(done, opts) {
+    // A folder for a project (with a new one made in it), or with opts.gguf a GGUF file (a model on this device).
+    opts = opts || {};
+    const gguf = !!opts.gguf;
+    // (the folder around the current project: its neighbours, and where a new project goes)
+    let cur = opts.start || (S.root && S.root.replace(/[\\/][^\\/]+[\\/]?$/, "").replace(/^([A-Za-z]:)$/, "$1\\")) ||
+      (S.state && S.state.home) || "/";
     const body = h("div");
+    const places = [["Home", S.state && S.state.home]];
+    if (S.state && S.state.storage) places.push(["Phone storage", S.state.storage], ["Download", S.state.storage + "/Download"]);
+    const join = (a, b) => a.replace(/[\\/]$/, "") + "/" + b;
     const render = async () => {
       let d;
-      try { d = await api("/api/browse?path=" + encodeURIComponent(cur)); } catch (e) { toast(e.message); return; }
+      try { d = await api("/api/browse?path=" + encodeURIComponent(cur) + (gguf ? "&files=gguf" : "")); } catch (e) { toast(e.message); return; }
       cur = d.path;
+      const files = (d.files || []).map(f => '<div class="file" data-f="' + esc(join(d.path, f.name)) + '">🧠 ' + esc(f.name) +
+        ' <span class="muted">' + (f.size / 1e9).toFixed(2) + " GB</span></div>").join("");
       body.innerHTML = '<div class="form-row"><input type="text" id="fp-path" value="' + esc(d.path) + '"><button class="btn" id="fp-go">Go</button></div>' +
-        '<div class="browse-list"><div data-p="' + esc(d.parent) + '">⬆ ..</div>' + d.dirs.map(n => '<div data-p="' + esc(d.path.replace(/[\\/]$/, "") + "/" + n) + '">📁 ' + esc(n) + "</div>").join("") + "</div>" +
-        '<div class="section-title">Recent</div><div class="browse-list recent">' + ((S.state && S.state.projects) || []).map(p => '<div data-p="' + esc(p) + '">' + esc(p) + "</div>").join("") + "</div>" +
-        '<div class="form-row" style="justify-content:flex-end"><button class="btn primary" id="fp-open">Open ' + esc(base(d.path)) + (d.is_git ? " (git)" : "") + "</button></div>";
-      body.querySelectorAll(".browse-list div").forEach(x => x.onclick = () => {
+        '<div class="form-row places">' + places.filter(p => p[1]).map(p => '<button class="btn small" data-p="' + esc(p[1]) + '">' + esc(p[0]) + "</button>").join("") + "</div>" +
+        '<div class="browse-list"><div data-p="' + esc(d.parent) + '">⬆ ..</div>' + d.dirs.map(n => '<div data-p="' + esc(join(d.path, n)) + '">📁 ' + esc(n) + "</div>").join("") + files + "</div>" +
+        (gguf ? (files ? "" : '<div class="muted">No GGUF file in this folder' + (S.state && S.state.storage && d.path.startsWith(S.state.storage) ? " (or NewAl Code may not read the phone's files yet)" : "") + ".</div>") :
+          '<div class="section-title">Recent</div><div class="browse-list recent">' + ((S.state && S.state.projects) || []).map(p => '<div data-p="' + esc(p) + '">' + esc(p) + "</div>").join("") + "</div>" +
+          '<div class="form-row"><input type="text" id="fp-new" placeholder="New folder in ' + esc(base(d.path)) + '"><button class="btn" id="fp-mk">Make it</button></div>' +
+          '<div class="form-row" style="justify-content:flex-end"><button class="btn primary" id="fp-open">Open ' + esc(base(d.path)) + (d.is_git ? " (git)" : "") + "</button></div>");
+      body.querySelectorAll(".browse-list div[data-p], .places [data-p]").forEach(x => x.onclick = () => {
         if (x.parentElement.classList.contains("recent")) { closeModal(); done(x.dataset.p); return; }
         cur = x.dataset.p; render();
       });
+      body.querySelectorAll("[data-f]").forEach(x => x.onclick = () => { closeModal(); done(x.dataset.f); });
       body.querySelector("#fp-go").onclick = () => { cur = body.querySelector("#fp-path").value; render(); };
+      if (gguf) return;
+      body.querySelector("#fp-mk").onclick = async () => {
+        const name = body.querySelector("#fp-new").value.trim();
+        if (!name) { body.querySelector("#fp-new").focus(); return; }
+        try { cur = (await api("/api/mkdir", { parent: d.path, name })).path; } catch (e) { toast(e.message); return; }
+        closeModal(); done(cur);
+      };
+      body.querySelector("#fp-new").onkeydown = e => { if (e.key === "Enter") body.querySelector("#fp-mk").click(); };
       body.querySelector("#fp-open").onclick = () => { closeModal(); done(cur); };
     };
-    modal("Open a project folder", body);
+    modal(gguf ? "Pick a GGUF file" : "Open a project folder", body);
     render();
   }
 
@@ -1158,10 +1208,13 @@
     const hw = d.hardware;
     const body = h("div");
     const local = d.models.filter(m => m.catalog);
-    const other = d.models.filter(m => !m.catalog);
+    const own = d.models.filter(m => !m.catalog && m.provider === "local" && m.file);
+    const other = d.models.filter(m => !m.catalog && !own.includes(m));
+    const phone = !!(window.NewAlPhone && NewAlPhone.storage);
     body.innerHTML = '<div class="section-title">An API in one tap</div><div class="provider-row" id="providers"></div>' +
       '<div class="muted small-note">Copy your key (Gemini, DeepSeek…) and tap its name; without a key copied, its key page opens and NewAl Code connects when you come back with it.</div>' +
-      '<div class="section-title">This computer</div><div class="card"><div class="grow"><div class="name">' + esc(hw.cpu) +
+      '<div class="section-title">Your GGUF files</div><div class="card-list" id="mine"></div><div class="form-row wrap" id="gguf-actions"></div>' +
+      '<div class="section-title">This ' + (phone ? "phone" : "computer") + '</div><div class="card"><div class="grow"><div class="name">' + esc(hw.cpu) +
       '</div><div class="desc">' + hw.cores + " cores · " + hw.ram_gb + " GB RAM (" + hw.free_gb + " GB free) · " + esc(hw.tier) +
       " tier · models may use " + hw.budget_gb + " GB · " + esc((hw.features || []).join(", ")) + '</div></div></div>' +
       '<div class="section-title">Local models (llama.cpp, free, offline)</div><div class="card-list" id="cat"></div>' +
@@ -1174,6 +1227,15 @@
       '<input id="am-key" placeholder="API key environment variable, e.g. OPENROUTER_API_KEY"><input id="am-ctx" placeholder="context tokens (optional)"></div>' +
       '<div class="form-row"><button class="btn primary" id="am-add">Add model</button><span class="muted">Or type any provider/model in /model, e.g. ollama/qwen3-coder:30b, openrouter/qwen/qwen3-coder, anthropic/claude-sonnet-4-5.</span></div>';
     providerButtons(body.querySelector("#providers"));
+    const mine = body.querySelector("#mine");
+    own.forEach(m => mine.appendChild(h("div", "card", '<div class="grow"><div class="name">' + esc(m.name) +
+      (m.id === pref("model") ? ' <span class="badge good">in use</span>' : "") + '</div><div class="desc">' + esc(m.file) +
+      " · " + (m.size / 1e9).toFixed(2) + " GB</div></div>" + (m.fits === false ? '<span class="badge warn">needs more RAM</span>' : "") +
+      '<button class="btn small" data-use="' + esc(m.id) + '">Use</button>')));
+    if (!own.length) mine.appendChild(h("div", "muted", phone
+      ? "None found yet. Once NewAl Code may read the phone's files, the GGUF files in Download, Documents (and other folders) appear here; or pick one, or copy one into the app."
+      : "None yet: GGUF files in " + esc(d.models_dir || "the models folder") + " appear here, or pick one anywhere."));
+    ggufActions(body.querySelector("#gguf-actions"), d);
     const cat = body.querySelector("#cat");
     local.forEach(m => {
       const prog = d.downloads[m.id];
@@ -1224,6 +1286,37 @@
     modal("Models", body);
   }
 
+  function phoneStorage() {
+    try { return window.NewAlPhone && NewAlPhone.storage ? JSON.parse(NewAlPhone.storage()) : null; } catch (_) { return null; }
+  }
+  function ggufActions(box, d) {
+    const st = phoneStorage();
+    const add = (label, fn, primary) => { const b = h("button", "btn" + (primary ? " primary" : ""), label); b.onclick = fn; box.appendChild(b); };
+    if (st && !st.granted) add("Let NewAl Code read the phone's files", () => {
+      // Android's "All files access" page opens; coming back, the list is made again with what is now readable.
+      NewAlPhone.allowStorage();
+      const back = () => { if (document.hidden) return; document.removeEventListener("visibilitychange", back); setTimeout(openModels, 600); };
+      document.addEventListener("visibilitychange", back);
+    }, true);
+    add("Pick a GGUF file…", () => pickFolder(addGguf, { gguf: true, start: d.storage ? d.storage + "/Download" : (d.models_dir || "") }));
+    if (st && NewAlPhone.importModel) add("Copy a GGUF into the app…", () => NewAlPhone.importModel());
+  }
+  async function addGguf(file) {
+    const name = base(file).replace(/\.gguf$/i, "");
+    const id = name.toLowerCase().replace(/[^a-z0-9._-]+/g, "-").replace(/^-+|-+$/g, "") || "my-model";
+    try { await api("/api/models/add", { id, provider: "local", file, name }); } catch (e) { toast(e.message); return; }
+    await loadModels();
+    await setOpt("model", id);
+    toast("Using " + name + " (a local model)", 4000);
+    if (!$("#modal").hidden && $("#modal-title") && /Models/.test($("#modal-title").textContent)) openModels();
+  }
+  window.onPhoneImport = ev => {
+    // NewAl Code Lite copying a GGUF file the user picked into NewAl Code's models folder.
+    if (ev.state === "copying") toast("Copying " + ev.name + "… " + (ev.total ? Math.round(100 * ev.done / ev.total) + "%" : Math.round(ev.done / 1e6) + " MB"), 4000);
+    else if (ev.state === "done") addGguf(ev.path);
+    else if (ev.state === "error") toast("Not copied: " + ev.error, 9000);
+  };
+
   function onDownload(ev) {
     const card = document.getElementById("cat-" + cssId(ev.model));
     if (card) {
@@ -1262,7 +1355,17 @@
     toast("GitHub: connected as @" + d.login, 4000);
     return d;
   }
-  async function githubSection(box) {
+  async function openGitHub() {
+    const body = h("div", "", '<div id="gh-box"></div><p class="muted small-note">Connected, NewAl Code lists your repositories to clone as projects, pushes with git (on a phone too) and opens pull requests from Commit.</p>');
+    modal("GitHub", body);
+    githubSection(body.querySelector("#gh-box"), openGitHub);
+  }
+  function openPhone() {
+    const body = h("div", "", '<div class="section-wrap"><div id="ph-box"></div></div>');
+    modal("This phone", body);
+    phoneSection(body.querySelector("#ph-box"));
+  }
+  async function githubSection(box, after) {
     let a = {};
     try { a = await api("/api/github"); } catch (_) { /* offline */ }
     GITHUB.page = a.token_page;
@@ -1275,7 +1378,7 @@
     } else {
       box.appendChild(h("div", "form-row", '<button class="btn primary" id="gh-on">Connect GitHub</button>' +
         '<span class="muted">Copy a token and tap (without one, GitHub\'s page for a token opens with the scopes NewAl Code needs).</span>'));
-      box.querySelector("#gh-on").onclick = () => oneTap(GITHUB, async (p, t) => { const d = await connectGitHub(p, t); openSettings(); return d; });
+      box.querySelector("#gh-on").onclick = () => oneTap(GITHUB, async (p, t) => { const d = await connectGitHub(p, t); (after || openSettings)(); return d; });
     }
   }
   async function openClone() {
@@ -1331,7 +1434,12 @@
         (t.allowed ? (t.up ? "" : '<button class="btn" id="ph-tx-start">Start in Termux</button>') : '<button class="btn" id="ph-tx-allow">Let this app start it</button>')) +
       "</div>" +
       '<div class="muted small-note">Connected, NewAl Code also runs inside Termux: its whole Linux (git, compilers, packages), your projects there, this phone\'s model and screen control. The first time, paste one command in Termux.</div>';
+    const files = phoneStorage();
+    if (files) box.insertAdjacentHTML("beforeend", '<div class="form-row"><label>The phone\'s files</label><span class="' +
+      (files.granted ? "good" : "muted") + '">' + (files.granted ? "readable: GGUF files in Download, Documents… are models (see Models)" : "not readable") +
+      "</span>" + (files.granted ? "" : '<button class="btn" id="ph-files">Allow</button>') + "</div>");
     const on = (id, f) => { const b = box.querySelector(id); if (b) b.onclick = f; };
+    on("#ph-files", () => { NewAlPhone.allowStorage(); setTimeout(() => phoneSection(box), 8000); });
     on("#ph-a11y", () => NewAlPhone.openAccessibilitySettings());
     on("#ph-back", () => NewAlPhone.go("app"));
     on("#ph-tx-get", () => NewAlPhone.termuxSetup(""));
@@ -1387,6 +1495,9 @@
     if ($("#clone-repo")) $("#clone-repo").onclick = () => openClone();
     $("#open-models").onclick = openModels;
     $("#open-cloud").onclick = () => openCloud();
+    $("#open-github").onclick = openGitHub;
+    $("#open-phone").onclick = openPhone;
+    $("#open-phone").hidden = !window.NewAlPhone;
     $("#open-extensions").onclick = openExtensions;
     $("#open-settings").onclick = openSettings;
     $("#modal-close").onclick = closeModal;
@@ -1449,7 +1560,7 @@
     });
     document.addEventListener("click", e => { if (!e.target.closest(".picker")) document.querySelectorAll(".picker.open").forEach(x => x.classList.remove("open")); });
     const input = $("#input");
-    input.addEventListener("input", () => { autoGrow(); updatePopup(); });
+    input.addEventListener("input", () => { autoGrow(); updatePopup(); prewarm(); });
     input.addEventListener("keydown", e => {
       if (!$("#popup").hidden && popupItems.length) {
         if (e.key === "ArrowDown") { popupSel = (popupSel + 1) % popupItems.length; renderPopup(); e.preventDefault(); return; }
@@ -1483,11 +1594,17 @@
   // Phones (NewAl Code Lite) and narrow windows: the sidebar is a drawer, closed until asked for, and it closes
   // again once something in it is chosen.
   function narrow() { return window.innerWidth < 700; }
+  function hideSidebarOnPhone() { if (narrow()) document.getElementById("app").classList.add("no-sidebar"); }
   function phoneLayout() {
-    if (narrow()) document.getElementById("app").classList.add("no-sidebar");
+    hideSidebarOnPhone();
     $("#sidebar").addEventListener("click", e => {
-      if (narrow() && e.target.closest(".side-item, .session, .sess, [data-id], a") && !e.target.closest("#open-folder"))
-        setTimeout(() => document.getElementById("app").classList.add("no-sidebar"), 0);
+      if (narrow() && e.target.closest(".side-item, .thread-item, .project-head .add, [data-id], a") && !e.target.closest(".del"))
+        setTimeout(hideSidebarOnPhone, 0);
+    });
+    // A tap beside the open sidebar (on the page it covers) closes it, as in a phone's drawer.
+    $("#main").addEventListener("click", e => {
+      if (narrow() && !e.target.closest("#toggle-sidebar") && !document.getElementById("app").classList.contains("no-sidebar"))
+        hideSidebarOnPhone();
     });
   }
 

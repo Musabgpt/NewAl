@@ -267,6 +267,8 @@ def listing(root=None, limit=200):
         meta = _last_meta(os.path.join(settings.SESSIONS, f))
         if not meta:
             continue
+        if not meta.get("turn") and not meta.get("title"):
+            continue            # a thread opened ahead of its first message (warming up): listed once it has one
         origin = meta.get("origin") or meta.get("root", "")
         if root and os.path.normcase(os.path.abspath(origin)) != os.path.normcase(os.path.abspath(root)):
             continue

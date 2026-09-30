@@ -15,6 +15,7 @@ import threading
 import time
 import unittest
 import urllib.error
+import urllib.request
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 if os.environ.get("NEWAL_TEST_WATCHDOG"):            # CI: where a hung test is, then stop
@@ -676,6 +677,22 @@ class PhoneTest(unittest.TestCase):
         self.assertIn("Network & internet", ends[0]["text"])
         self.assertTrue(ends[1]["ok"])
 
+    def test_the_prompt_names_the_phone_and_small_models_get_few_tools(self):
+        llm = FakeLLM([])
+        self.addCleanup(llm.close)
+        ag = agentmod.Agent(session.Session(make_project(CALC)), client=fake_client(llm))
+        self.assertIn("Android phone", ag.system_prompt())
+        self.assertIn("use the phone tool", ag.system_prompt())
+        self.assertTrue({"phone", "grep", "web_fetch", "todo"} <= set(ag.tool_names()))
+        # a phone's small local model (under 1.5 GB): the tools it uses well, and a shorter start to read
+        tiny = models.Client({"id": "tiny", "name": "tiny", "provider": "local", "size": 500 * 1024 ** 2},
+                             providers.OpenAICompat(llm.url), "tiny")
+        names = agentmod.Agent(session.Session(make_project(CALC)), client=tiny).tool_names()
+        self.assertEqual(set(names) - {"skill"}, {"read", "edit", "write", "bash", "phone"})
+        schema = json.dumps(tools.REGISTRY["phone"].schema())
+        self.assertLess(len(schema), 2000)                   # read at the start of every thread on a phone
+        self.assertIn("open_app", schema)
+
     def test_no_phone_no_tool_and_a_wrong_key_is_an_error(self):
         from unittest import mock
         from newal_code import phone
@@ -687,6 +704,63 @@ class PhoneTest(unittest.TestCase):
             with mock.patch.object(settings, "HOME", tempfile.mkdtemp()):
                 self.assertFalse(phone.available())
                 self.assertNotIn("phone", tools.default_set())
+                s = session.Session(make_project(CALC))
+                self.assertNotIn("phone", agentmod.Agent(s, client=fake_client(FakeLLM([]))).system_prompt())
+
+
+class PhoneStorageTest(unittest.TestCase):
+    """GGUF files the user already has on a phone: found in its shared storage (Download, Documents, a Telegram
+    download; not among the photos), and listed as models with their files."""
+
+    def test_ggufs_in_the_phones_storage_are_models(self):
+        from unittest import mock
+        from newal_code import service
+        top = tempfile.mkdtemp()
+
+        def put(rel, real=True):
+            p = os.path.join(top, *rel.split("/"))
+            os.makedirs(os.path.dirname(p), exist_ok=True)
+            if real:
+                RamTest().fake_gguf(p, size_mb=1)
+            else:
+                with open(p, "w") as f:
+                    f.write("not a model")
+            return p
+
+        want = [put("Download/Qwen-Tiny-Q4.gguf"), put("Documents/models/old/Llama-Small.gguf"),
+                put("Android/media/org.telegram.messenger/Telegram/Telegram Documents/From-A-Friend.gguf")]
+        put("DCIM/Camera/odd.gguf")
+        put("Download/mmproj-vision.gguf")
+        put("Download/broken.gguf", real=False)
+        with mock.patch.dict(os.environ, {"NEWAL_SHARED_STORAGE": top}):
+            models._shared.update(at=0.0)
+            found = models.shared_ggufs()
+            self.assertEqual(sorted(os.path.basename(p) for p in found),
+                             ["From-A-Friend.gguf", "Llama-Small.gguf", "Qwen-Tiny-Q4.gguf", "broken.gguf"])
+            reg = models.registry()
+            files = {os.path.abspath(s.get("file") or "") for s in reg.values()}
+            for p in want:
+                self.assertIn(os.path.abspath(p), files)
+            self.assertNotIn(os.path.abspath(os.path.join(top, "Download", "broken.gguf")), files)
+            spec = reg["qwen-tiny-q4"]
+            self.assertEqual((spec["provider"], spec["downloaded"]), ("local", True))
+            listing = service.Service().model_listing()
+            self.assertEqual(listing["storage"], top)
+            row = next(m for m in listing["models"] if m["id"] == "qwen-tiny-q4")
+            self.assertEqual(row["file"], os.path.abspath(want[0]))
+            # picked in Models (added by name): listed once, under that name
+            before = settings.user().get("models") or {}
+            settings.save({"models": dict(before, **{"qwen-tiny": {"provider": "local", "file": want[0]}})})
+            try:
+                reg = models.registry()
+                self.assertIn("qwen-tiny", reg)
+                self.assertNotIn("qwen-tiny-q4", reg)
+                self.assertEqual(reg["qwen-tiny"]["file"], want[0])
+            finally:
+                settings.save({"models": before})
+        models._shared.update(at=0.0)
+        with mock.patch.dict(os.environ, {"NEWAL_SHARED_STORAGE": ""}):
+            self.assertEqual(models.shared_ggufs(), [])
 
 
 class GitHubTest(unittest.TestCase):
@@ -1636,6 +1710,25 @@ class ServerTest(unittest.TestCase):
         out = (r.status, dict(r.getheaders()), r.read())
         c.close()
         return out
+
+    def test_new_folder_gguf_files_and_threads_listed_from_their_first_message(self):
+        top = tempfile.mkdtemp()
+        made = self.call("/api/mkdir", {"parent": top, "name": "my app"})["path"]
+        self.assertTrue(os.path.isdir(made))
+        self.assertEqual(made, os.path.join(top, "my app"))
+        for bad in ("../x", "a/b", "", ".."):
+            with self.assertRaises(urllib.error.HTTPError) as e:
+                self.call("/api/mkdir", {"parent": top, "name": bad})
+            self.assertEqual(e.exception.code, 400)
+        RamTest().fake_gguf(os.path.join(top, "Phone-Model.gguf"), size_mb=1)
+        b = self.call("/api/browse?files=gguf&path=" + urllib.request.quote(top))
+        self.assertEqual(b["dirs"], ["my app"])
+        self.assertEqual([(f["name"], f["size"]) for f in b["files"]], [("Phone-Model.gguf", 1024 * 1024)])
+        self.assertNotIn("files", self.call("/api/browse?path=" + urllib.request.quote(top)))
+        # a thread opened while its first message is typed (the app warms the model meanwhile) is not listed yet
+        sid = self.call("/api/sessions", {"root": made, "warm": False})["id"]
+        self.assertNotIn(sid, [x["id"] for x in self.call("/api/sessions")])
+        self.assertEqual(self.call("/api/sessions/" + sid)["meta"]["id"], sid)
 
     def test_termux_link_command_works_once(self):
         cmd = self.call("/api/termux/link", {})["command"]

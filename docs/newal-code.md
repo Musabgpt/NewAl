@@ -215,8 +215,8 @@ is `python3` for the agent's commands), llama-server built for phones (an ARMv8 
 dot-product build picked on CPUs that have it), and NewAl Code itself. Commands run in Android's `sh` with its tools
 and `python3`; there is no git on the phone, and Android's app sandbox confines what commands can touch.
 `.github/workflows/newal-code-android.yml` builds the APK and runs it in Android emulators the size of a 3 GB and a
-2 GB phone, where the app downloads the model its RAM gets and the agent does the task above
-(`android-lite/tests/phone_test.py`):
+2 GB phone, where the app downloads the model its RAM gets and the agent does the task above, and on Android 15,
+where it checks that the page is laid out between the system bars (`android-lite/tests/phone_test.py`):
 
 | Emulated phone | Model | Task | llama-server (peak) | NewAl Code's Python | The app | Least free RAM |
 |---|---|---|---|---|---|---|
@@ -248,7 +248,29 @@ action asks first unless the thread runs in full-auto; a read-only thread only l
 thread's model: the phone's own, or the API the user connected. The app does all this in a small server on
 127.0.0.1:8793 that answers only requests with the app's key.
 
-**GitHub and git on the phone.** Settings > GitHub connects an account with a token (GitHub's page for one opens
+**Your own GGUF files.** Models > "Your GGUF files" lists the GGUF files NewAl Code finds, with a Use button: on a
+computer the ones in its models folder, and on a phone the ones already in the phone's storage (Download, Documents
+and the folders in them, a Telegram download; not among the photos, videos or music), once the app may read the
+phone's files: "Let NewAl Code read the phone's files" opens Android's "All files access" page for the app (Android
+8-10 ask for the storage permission instead). The model runs from where it is, not copied. "Pick a GGUF file…"
+browses to any file, and "Copy a GGUF into the app…" takes one through Android's file picker (Download, Drive, a USB
+stick) and copies it into the app, for phones that cannot give "All files access" (Android Go). A file larger than
+the RAM models may use here is marked "needs more RAM" but can still be tried.
+
+**The layout on a phone.** Android 15 draws apps under the status bar and the navigation bar; the app keeps NewAl
+Code's page between them (and above the keyboard), in the page's own colours. On a phone the side menu is a drawer
+(the button at the top left): New thread, Models, Skills/agents/MCP, Cloud tasks, GitHub, This phone (Termux, screen
+control, the phone's files) and Settings; it closes once something in it is chosen. The folder picker opens beside
+the current project and makes a new folder there.
+
+**Small models on a phone.** A local model under 1.5 GB (the phone's) is offered only read, edit, write, bash and the
+phone tool (bash lists and searches files well enough), and the phone tool's description is short: what a thread
+starts with is about half as long, so there is half as much to read before the first answer. And a new thread opens
+while its first message is typed, so the model loads and reads that start meanwhile (on a phone, most of the wait);
+threads are listed from their first message on. With the phone tool there, the prompt tells the model it runs on an
+Android phone and uses the phone tool to act on it (an API model had "opened WhatsApp" by fetching whatsapp.com).
+
+**GitHub and git on the phone.** Settings > GitHub (or GitHub in the side menu) connects an account with a token (GitHub's page for one opens
 with the scopes NewAl Code needs; copied, it connects like an API key), and the ⬇ button beside Threads lists your
 repositories to clone one as a project. The phone has no git, so NewAl Code Lite brings its own: `git` in the
 agent's commands and in the review panel's Commit, Push and Create PR is NewAl Code's `minigit`, git's commands and
@@ -257,8 +279,8 @@ with (init, status, add, commit, log, diff, branch, checkout, remote, push, show
 prints and makes the same commits, hash for hash; pushes to and clones from github.com use the connected token.
 Pull requests go through GitHub's API.
 
-**Termux.** Termux has a whole Linux: git, compilers, Node, any package, and your projects in its home. Settings > This
-phone > Connect Termux copies one command and opens Termux: pasted there, it installs Python and git from Termux's
+**Termux.** Termux has a whole Linux: git, compilers, Node, any package, and your projects in its home. This phone (in
+the side menu, or in Settings) > Connect Termux copies one command and opens Termux: pasted there, it installs Python and git from Termux's
 packages when they are missing, puts NewAl Code in Termux, keeps the app's key in Termux's own files, adds "The
 phone's model" (the GGUF the app runs, through the app's OpenAI-compatible `/v1`), allows the app to start it later
 (Termux's `allow-external-apps`), and starts NewAl Code in Termux on 127.0.0.1:8791. The app then shows it ("Open the
