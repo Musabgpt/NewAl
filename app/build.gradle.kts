@@ -29,6 +29,9 @@ android {
     buildTypes {
         release {
             isMinifyEnabled = false
+            // CI uses the release variant for an optimized native llama.cpp build,
+            // while retaining the debug key so the generated APK is directly installable.
+            signingConfig = signingConfigs.getByName("debug")
         }
     }
 
@@ -45,4 +48,5 @@ dependencies {
     implementation("androidx.appcompat:appcompat:1.7.1")
     implementation("com.google.android.material:material:1.13.0")
     implementation("androidx.recyclerview:recyclerview:1.4.0")
+    testImplementation("junit:junit:4.13.2")
 }

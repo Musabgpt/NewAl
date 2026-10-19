@@ -1,6 +1,5 @@
 package com.musab.aragpt2;
 
-import java.util.ArrayList;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
@@ -10,9 +9,10 @@ import java.util.regex.Pattern;
 
 /** Deterministic local memory; durable facts require an explicit remember request. */
 public final class MemoryManager {
-    private static final int MAX_CONTEXT_CHARS = 4200;
-    private static final int MAX_MEMORY_CHARS = 1200;
-    private static final int MAX_SUMMARY_CHARS = 1000;
+    // Keep the Java-side prompt conservative; the native bridge also enforces the real token limit.
+    private static final int MAX_CONTEXT_CHARS = 2800;
+    private static final int MAX_MEMORY_CHARS = 800;
+    private static final int MAX_SUMMARY_CHARS = 700;
 
     private static final Pattern EXPLICIT = Pattern.compile(
             "^(?:remember|please remember|تذكر|تذكّر)\\s*[:：-]?\\s*(.+)$",
@@ -47,20 +47,13 @@ public final class MemoryManager {
     }
 
     public List<ChatMessage> buildTurns(List<ChatMessage> history) {
-        List<ChatMessage> recent = new ArrayList<>();
         String memory = memoryBlock();
-        int budget = MAX_CONTEXT_CHARS - memory.length();
-
-        for (int i = history.size() - 1; i >= 0; i--) {
-            ChatMessage m = history.get(i);
-            int cost = m.text.length() + 16;
-            if (cost > budget) break;
-            budget -= cost;
-            recent.add(0, m);
-        }
+        int budget = Math.max(0, MAX_CONTEXT_CHARS - memory.length());
+        List<ChatMessage> recent = ConversationWindow.select(history, budget);
 
         if (!memory.isEmpty()) {
-            List<ChatMessage> result = new ArrayList<>(recent.size() + 1);
+            java.util.ArrayList<ChatMessage> result =
+                    new java.util.ArrayList<>(recent.size() + 1);
             result.add(new ChatMessage(-2, ChatMessage.ROLE_SYSTEM, memory, 0));
             result.addAll(recent);
             return result;
